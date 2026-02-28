@@ -1,0 +1,19 @@
+{
+  "title": "Toni",
+  "pages": [
+    "index",
+    "getting-started",
+    "core-concepts",
+    "request-lifecycle",
+    "extractors",
+    "http-adapters",
+    "websocket",
+    "graphql",
+    "configuration",
+    "lifecycle-hooks",
+    "cli",
+    "testing",
+    "deployment",
+    "api-reference"
+  ]
+}

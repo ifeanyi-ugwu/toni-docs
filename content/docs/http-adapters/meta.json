@@ -1,0 +1,4 @@
+{
+  "title": "HTTP Adapters",
+  "pages": ["overview", "axum", "actix", "custom"]
+}

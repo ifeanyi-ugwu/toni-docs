@@ -1,0 +1,121 @@
+---
+title: Pipes
+description: Pipes transform and validate extracted request data before it reaches the route handler.
+---
+
+A pipe processes data that has already been extracted from the request — after extractors have parsed it, before the handler receives it. They're used for validation, transformation, and sanitization.
+
+<Bridge>
+This is the same concept as NestJS's `PipeTransform`. In NestJS, pipes transform or validate the value and can throw exceptions. In Toni, pipes operate on the `Context` before execution.
+</Bridge>
+
+## The Pipe trait
+
+```rust
+pub trait Pipe: Send + Sync {
+    fn process(&self, data: &mut Context);
+}
+```
+
+## Validation pipe
+
+The most common use case is running validation on deserialized DTOs. The `Validated<T>` extractor (see [Built-in Extractors](/docs/extractors/built-in)) handles this pattern directly:
+
+```rust
+use toni::extractors::Validated;
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+pub struct CreateUserDto {
+    #[validate(length(min = 2, max = 50))]
+    pub name: String,
+    #[validate(email)]
+    pub email: String,
+    #[validate(range(min = 18, max = 120))]
+    pub age: u32,
+}
+
+#[controller("/users", pub struct UsersController { /* ... */ })]
+impl UsersController {
+    #[post("")]
+    fn create(&self, Validated(Json(dto)): Validated<Json<CreateUserDto>>) -> HttpResponse {
+        // dto is validated — if validation failed, an error was returned before we got here
+        HttpResponse::created().json(serde_json::json!({ "name": dto.name })).build()
+    }
+}
+```
+
+## Custom pipe
+
+Implement the `Pipe` trait for custom transformations:
+
+```rust
+use toni::{Pipe, Context};
+
+pub struct TrimStringsPipe;
+
+impl Pipe for TrimStringsPipe {
+    fn process(&self, data: &mut Context) {
+        // Trim whitespace from string fields in the request body
+        // Implementation depends on your use case
+    }
+}
+```
+
+## DI-aware pipes
+
+```rust
+use toni::{injectable, Pipe, Context};
+
+#[injectable(pub struct SanitizationPipe {
+    #[inject]
+    sanitizer: SanitizerService,
+})]
+#[pipe]
+impl SanitizationPipe {
+    pub fn new(sanitizer: SanitizerService) -> Self { Self { sanitizer } }
+}
+
+impl Pipe for SanitizationPipe {
+    fn process(&self, data: &mut Context) {
+        self.sanitizer.clean(data);
+    }
+}
+```
+
+## Applying pipes
+
+### Global
+
+```rust
+let mut factory = ToniFactory::new();
+factory.use_global_pipes(Arc::new(TrimStringsPipe));
+```
+
+### Controller level
+
+```rust
+#[controller("/users", pub struct UsersController { /* ... */ })]
+#[use_pipes(SanitizationPipe {})]
+impl UsersController { /* ... */ }
+```
+
+### Method level
+
+```rust
+#[controller("/posts", pub struct PostsController { /* ... */ })]
+impl PostsController {
+    #[post("")]
+    #[use_pipes(TrimStringsPipe {})]
+    fn create(&self, Json(dto): Json<CreatePostDto>) -> HttpResponse { /* ... */ }
+}
+```
+
+## Validation via extractors vs pipes
+
+For most validation use cases, `Validated<T>` is the right tool — it integrates directly with the `validator` crate and is applied per-extractor without any pipe boilerplate. Custom pipes are better for:
+
+- Cross-field transformations that need access to the full request context
+- Side effects during data processing (metrics, sanitization services)
+- Non-validator-based validation logic

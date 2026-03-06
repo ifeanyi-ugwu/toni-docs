@@ -1,0 +1,102 @@
+---
+title: Broadcasting
+description: Send messages to multiple connected clients from anywhere in your application.
+---
+
+Toni's broadcast system lets you send messages to all connected clients, specific clients, or subsets of clients — from anywhere in your application, not just from within a gateway.
+
+## BroadcastService
+
+Inject `BroadcastService` into any provider or gateway to send messages without needing a direct reference to individual clients:
+
+```rust
+use toni::injectable;
+use toni::websocket::BroadcastService;
+
+#[injectable(pub struct NotificationService {
+    #[inject]
+    broadcast: BroadcastService,
+})]
+impl NotificationService {
+    pub fn new(broadcast: BroadcastService) -> Self { Self { broadcast } }
+
+    pub async fn notify_all(&self, message: &str) {
+        self.broadcast.broadcast_text(message).await;
+    }
+
+    pub async fn notify_client(&self, client_id: &str, message: &str) {
+        self.broadcast.send_to(client_id, WsMessage::text(message)).await;
+    }
+}
+```
+
+## Broadcasting from an HTTP controller
+
+```rust
+#[controller("/events", pub struct EventsController {
+    #[inject]
+    broadcast: BroadcastService,
+})]
+impl EventsController {
+    pub fn new(broadcast: BroadcastService) -> Self { Self { broadcast } }
+
+    #[post("/announce")]
+    async fn announce(&self, Json(body): Json<AnnouncementDto>) -> HttpResponse {
+        self.broadcast
+            .broadcast_text(&format!("[Announcement] {}", body.message))
+            .await;
+        HttpResponse::ok().build()
+    }
+}
+```
+
+## BroadcastService API
+
+```rust
+broadcast.broadcast_text("message")              // to all clients
+broadcast.broadcast(WsMessage)                    // any message type to all
+broadcast.send_to(client_id, WsMessage)           // to specific client
+broadcast.send_to_many(client_ids, WsMessage)     // to multiple clients
+broadcast.get_client_count()                      // number of connected clients
+broadcast.get_client_ids()                        // list of all client IDs
+```
+
+## Enabling broadcast support
+
+Add the `BroadcastModule` to your app — it provides the `BroadcastService` and the `ConnectionManagerProvider` that tracks connected clients:
+
+```rust
+use toni::websocket::BroadcastModule;
+
+#[module(
+    imports: [BroadcastModule],
+    controllers: [EventsController],
+    providers: [NotificationService],
+)]
+pub struct AppModule;
+```
+
+## Example: Server-sent events from a background task
+
+```rust
+use tokio::time::{interval, Duration};
+
+async fn start_heartbeat(broadcast: BroadcastService) {
+    let mut ticker = interval(Duration::from_secs(30));
+    loop {
+        ticker.tick().await;
+        broadcast.broadcast_text("ping").await;
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+    app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
+
+    let broadcast = app.get::<BroadcastService>().await.unwrap();
+    tokio::spawn(start_heartbeat(broadcast));
+
+    app.listen(3000, "127.0.0.1").await;
+}
+```

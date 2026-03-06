@@ -1,0 +1,53 @@
+---
+title: Actix-web Adapter
+description: Using the toni-actix adapter for CPU-intensive workloads.
+---
+
+The `toni-actix` crate integrates Toni with [Actix-web](https://actix.rs/). It uses Actix's multi-threaded worker model, which is well-suited for CPU-bound request processing.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-actix = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+## Basic setup
+
+```rust
+use toni::ToniFactory;
+use toni_actix::ActixAdapter;
+
+#[tokio::main]
+async fn main() {
+    let adapter = ActixAdapter::new();
+    let mut app = ToniFactory::create(AppModule, adapter).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+The API is identical to `toni-axum`. Switching between adapters is a one-line change in `main.rs`.
+
+## When to choose Actix
+
+- Request handlers perform significant CPU work (encoding, hashing, compression)
+- You're migrating from an existing Actix-web application
+- You need Actix's specific actor-based patterns alongside Toni's module system
+
+## Actix worker threads
+
+Configure Actix's worker count via the adapter:
+
+```rust
+use toni_actix::ActixAdapter;
+
+let adapter = ActixAdapter::new().workers(8);
+```
+
+By default, Actix uses one worker per CPU core.
+
+## Limitations
+
+The Actix adapter has the same Toni API surface as the Axum adapter. Some Axum-specific features (certain Tower middleware, `axum::extract::State`) aren't available — but Toni's built-in middleware, guards, interceptors, and extractors work identically on both adapters.

@@ -1,0 +1,98 @@
+---
+title: Axum Adapter
+description: Using the toni-axum adapter — setup, configuration, and Axum-specific features.
+---
+
+The `toni-axum` crate wraps [Axum](https://github.com/tokio-rs/axum) to handle HTTP for Toni applications. It's built on Tokio and is the recommended choice for most applications.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-axum = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+## Basic setup
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+
+#[tokio::main]
+async fn main() {
+    let adapter = AxumAdapter::new();
+    let mut app = ToniFactory::create(AppModule, adapter).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+`AxumAdapter::new()` creates a default adapter with sensible settings. The adapter is passed to `ToniFactory::create`, which uses it to register all routes from the module tree.
+
+## With global middleware and configuration
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let mut factory = ToniFactory::new();
+    factory
+        .use_global_middleware(Arc::new(LoggerMiddleware))
+        .use_global_middleware(Arc::new(CorsMiddleware::default()))
+        .use_global_guards(Arc::new(ThrottleGuard::default()))
+        .use_global_error_handler(Arc::new(GlobalErrorHandler));
+
+    let adapter = AxumAdapter::new();
+    let mut app = factory.create_with(AppModule, adapter).await;
+    app.listen(3000, "0.0.0.0").await;
+}
+```
+
+## WebSocket support
+
+`toni-axum` supports WebSocket gateways out of the box. See [WebSocket Gateways](/docs/websocket/gateways) for how to define gateways. The adapter handles the Axum WebSocket upgrade automatically.
+
+```rust
+use toni_axum::AxumWebSocketAdapter;
+
+let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
+app.listen(3000, "127.0.0.1").await;
+```
+
+## Environment variables
+
+`toni-axum` respects standard Tokio and Axum environment variables. For connection limits, worker threads, and other runtime settings, configure the Tokio runtime directly:
+
+```rust
+fn main() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+            app.listen(3000, "0.0.0.0").await;
+        });
+}
+```
+
+## Integrating Axum layers
+
+If you need Axum-specific `tower::Layer` middleware (e.g., rate limiting from `tower-http`, request tracing), you can add them to the Axum router after route registration. This is an advanced use case — in most cases, Toni middleware covers your needs.
+
+## HTTPS/TLS
+
+TLS termination is typically handled at the load balancer or reverse proxy level (nginx, Cloudflare, etc.). If you need TLS at the application level:
+
+```toml
+[dependencies]
+axum-server = { version = "0.6", features = ["tls-rustls"] }
+```
+
+Set this up in the `main` function after `ToniFactory::create`, before calling `listen`.

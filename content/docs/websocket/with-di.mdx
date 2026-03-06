@@ -1,0 +1,138 @@
+---
+title: WebSocket + Dependency Injection
+description: Gateways are full DI participants — inject any service, use lifecycle hooks, export providers.
+---
+
+WebSocket gateways are providers like any other. They participate fully in the DI system: they can inject services, implement lifecycle hooks, and be exported for other modules to use.
+
+## Injecting services into gateways
+
+```rust
+use toni::{injectable, async_trait};
+use toni::websocket::{GatewayTrait, WsClient, WsMessage, DisconnectReason};
+
+#[injectable(pub struct GameGateway {
+    #[inject]
+    game_service: GameService,
+    #[inject]
+    player_service: PlayerService,
+    #[inject]
+    logger: LoggerService,
+})]
+impl GameGateway {
+    pub fn new(game_service: GameService, player_service: PlayerService, logger: LoggerService) -> Self {
+        Self { game_service, player_service, logger }
+    }
+}
+
+#[async_trait]
+impl GatewayTrait for GameGateway {
+    fn path(&self) -> &str { "/game" }
+
+    async fn on_connect(&self, client: &WsClient) {
+        let player = self.player_service.create_session(client.id()).await;
+        self.logger.log(&format!("Player {} entered", player.name)).await;
+        client.send(WsMessage::text(
+            serde_json::to_string(&player).unwrap()
+        )).await;
+    }
+
+    async fn on_message(&self, client: &WsClient, message: WsMessage) {
+        if let Some(text) = message.as_text() {
+            if let Ok(action) = serde_json::from_str::<GameAction>(text) {
+                let result = self.game_service.process_action(client.id(), action).await;
+                client.send(WsMessage::text(serde_json::to_string(&result).unwrap())).await;
+            }
+        }
+    }
+
+    async fn on_disconnect(&self, client: &WsClient, _reason: DisconnectReason) {
+        self.player_service.end_session(client.id()).await;
+    }
+}
+```
+
+## Lifecycle hooks on gateways
+
+```rust
+#[injectable(pub struct StockTickerGateway {
+    #[inject]
+    market_service: MarketService,
+})]
+impl StockTickerGateway {
+    pub fn new(market_service: MarketService) -> Self { Self { market_service } }
+
+    #[on_module_init]
+    async fn init(&self) {
+        self.market_service.connect().await;
+        println!("Market connection established");
+    }
+
+    #[on_application_shutdown]
+    async fn shutdown(&self, _signal: Option<String>) {
+        self.market_service.disconnect().await;
+        println!("Market connection closed");
+    }
+}
+```
+
+## Multi-protocol context
+
+The `Context` type used by guards and interceptors carries information about the protocol (HTTP or WebSocket). This lets you write protocol-agnostic enhancers:
+
+```rust
+use toni::{Guard, Context};
+
+pub struct AuthGuard;
+
+impl Guard for AuthGuard {
+    fn can_activate(&self, context: &Context) -> bool {
+        match context.protocol() {
+            Protocol::Http => {
+                // Check Authorization header
+                context.get_request()
+                    .headers.get("authorization").is_some()
+            }
+            Protocol::WebSocket => {
+                // Check query param token for WebSocket handshake
+                context.get_ws_handshake()
+                    .and_then(|h| h.query_params.get("token"))
+                    .is_some()
+            }
+        }
+    }
+}
+```
+
+Apply it to gateways the same way as HTTP controllers:
+
+```rust
+#[module(
+    providers: [AuthGuard, GameGateway, GameService],
+)]
+pub struct GameModule;
+```
+
+```rust
+// Apply guard to gateway at registration time
+// (Gateway-level guard application is configured in the module)
+```
+
+## Module setup
+
+```rust
+use toni::websocket::BroadcastModule;
+
+#[module(
+    imports: [BroadcastModule, DatabaseModule],
+    providers: [
+        GameGateway,
+        GameService,
+        PlayerService,
+        LoggerService,
+    ],
+)]
+pub struct GameModule;
+```
+
+Include `BroadcastModule` in `imports` if any gateway or service needs `BroadcastService` or `ConnectionManager`.

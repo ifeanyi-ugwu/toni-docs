@@ -1,0 +1,232 @@
+---
+title: Middleware
+description: Request processing that runs before routing — logging, CORS, authentication headers, rate limiting.
+---
+
+Middleware runs before requests are dispatched to any route handler. It receives the request, can modify it or short-circuit with a response, and passes it to the next middleware in the chain via `next.run(req)`.
+
+<Bridge>
+Toni middleware works like Express middleware (which NestJS is built on) but with Rust's type system. The `next` function concept is identical: call it to pass the request forward, skip it to short-circuit.
+</Bridge>
+
+## The Middleware trait
+
+```rust
+use toni::{async_trait, Middleware, Next, HttpRequest, HttpResponse, MiddlewareResult};
+
+#[async_trait]
+pub trait Middleware: Send + Sync {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult;
+}
+```
+
+`MiddlewareResult` is `Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>>`.
+
+## A minimal example
+
+```rust
+use toni::{async_trait, Middleware, Next, HttpRequest, MiddlewareResult};
+
+pub struct LoggerMiddleware;
+
+#[async_trait]
+impl Middleware for LoggerMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
+        let method = req.method.clone();
+        let uri = req.uri.clone();
+
+        println!("→ {method} {uri}");
+        let response = next.run(req).await?;
+        println!("← {} {method} {uri}", response.status());
+
+        Ok(response)
+    }
+}
+```
+
+Call `next.run(req)` to pass the request to the next middleware (or to the router, if this is the last middleware). Don't call it to short-circuit.
+
+## CORS middleware
+
+```rust
+use toni::{async_trait, Middleware, Next, HttpRequest, HttpResponse, MiddlewareResult};
+
+pub struct CorsMiddleware {
+    pub allowed_origins: Vec<String>,
+}
+
+#[async_trait]
+impl Middleware for CorsMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
+        // Handle preflight
+        if req.method == "OPTIONS" {
+            return Ok(HttpResponse::ok()
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+                .header("Access-Control-Allow-Headers", "Content-Type,Authorization")
+                .build());
+        }
+
+        let mut response = next.run(req).await?;
+        response.set_header("Access-Control-Allow-Origin", "*");
+        Ok(response)
+    }
+}
+```
+
+## Authentication middleware
+
+```rust
+pub struct AuthMiddleware {
+    pub header: String,
+}
+
+#[async_trait]
+impl Middleware for AuthMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
+        let token = req.headers.get(&self.header);
+
+        if token.is_none() {
+            return Ok(HttpResponse::unauthorized()
+                .json(serde_json::json!({ "message": "Missing token" }))
+                .build());
+        }
+
+        next.run(req).await
+    }
+}
+```
+
+## Rate limiting middleware
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
+
+pub struct RateLimitMiddleware {
+    max_requests: usize,
+    window_ms: u64,
+    store: Mutex<HashMap<String, (usize, Instant)>>,
+}
+
+impl RateLimitMiddleware {
+    pub fn new(max_requests: usize, window_ms: u64) -> Self {
+        Self { max_requests, window_ms, store: Mutex::new(HashMap::new()) }
+    }
+}
+
+#[async_trait]
+impl Middleware for RateLimitMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
+        let ip = req.headers.get("x-forwarded-for")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let now = Instant::now();
+        let window = std::time::Duration::from_millis(self.window_ms);
+
+        let allowed = {
+            let mut store = self.store.lock().unwrap();
+            let entry = store.entry(ip.clone()).or_insert((0, now));
+
+            if now.duration_since(entry.1) > window {
+                *entry = (0, now);
+            }
+
+            if entry.0 < self.max_requests {
+                entry.0 += 1;
+                true
+            } else {
+                false
+            }
+        };
+
+        if !allowed {
+            return Ok(HttpResponse::too_many_requests()
+                .json(serde_json::json!({ "message": "Rate limit exceeded" }))
+                .build());
+        }
+
+        next.run(req).await
+    }
+}
+```
+
+## Registering middleware
+
+### Global middleware
+
+Applies to every route across the entire application:
+
+```rust
+use toni::ToniFactory;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    let mut factory = ToniFactory::new();
+    factory.use_global_middleware(Arc::new(LoggerMiddleware));
+    factory.use_global_middleware(Arc::new(CorsMiddleware { allowed_origins: vec!["*".into()] }));
+
+    let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+### Module-scoped middleware
+
+Apply middleware to specific routes using the module's middleware configuration. Middleware can be scoped to path patterns:
+
+```rust
+// In your module configuration
+// (configuration method depends on the adapter — see HTTP Adapters section)
+```
+
+## Middleware execution order
+
+Middleware executes in registration order for the request path, and in reverse order for the response path:
+
+```
+Request:  Middleware1 → Middleware2 → Middleware3 → Handler
+Response: Middleware3 ← Middleware2 ← Middleware1
+```
+
+This is the standard "onion" model — each middleware wraps the ones that come after it.
+
+## DI-aware middleware
+
+Middleware that needs access to services can be implemented as an injectable:
+
+```rust
+#[injectable(pub struct AuthCheckMiddleware {
+    #[inject]
+    auth_service: AuthService,
+})]
+#[middleware]
+impl AuthCheckMiddleware {
+    pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
+}
+
+#[async_trait]
+impl Middleware for AuthCheckMiddleware {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
+        // self.auth_service is available here
+        let valid = self.auth_service.verify_token(&req).await;
+        if !valid {
+            return Ok(HttpResponse::unauthorized().build());
+        }
+        next.run(req).await
+    }
+}
+```
+
+Register in the module:
+
+```rust
+#[module(
+    providers: [AuthCheckMiddleware, AuthService],
+    controllers: [ProtectedController],
+)]
+pub struct ProtectedModule;
+```

@@ -1,0 +1,68 @@
+---
+title: Request Lifecycle
+description: How a request moves through middleware, guards, interceptors, the handler, and back.
+---
+
+Every request travels through a predictable sequence of processing layers before the route handler runs, and through a symmetric sequence on the way back out.
+
+## The sequence
+
+```
+Incoming request
+    │
+    ▼
+Middleware (runs before routing)
+    │
+    ▼
+Guards (authorization check — can this request proceed?)
+    │
+    ▼
+Interceptors (before — can transform request, short-circuit)
+    │
+    ▼
+Pipes (validate and transform extracted data)
+    │
+    ▼
+Route handler (your fn)
+    │
+    ▼
+Interceptors (after — can transform response)
+    │
+    ▼
+Exception filters / Error handlers (if handler or chain threw)
+    │
+    ▼
+Response sent
+```
+
+## Layer responsibilities
+
+| Layer | Runs when | Can block? | Has response access? |
+|-------|-----------|-----------|----------------------|
+| Middleware | Before routing | Yes (by returning error) | Response (after next) |
+| Guards | After routing, before handler | Yes (return false) | No |
+| Interceptors | Around handler | Yes (skip calling next) | Yes (both sides) |
+| Pipes | During param extraction | No (throws instead) | No |
+| Error handlers | On any error | — | Writes the response |
+
+## Scope levels
+
+Guards, interceptors, pipes, and error handlers can be applied at three scopes, in execution order:
+
+1. **Global** — registered on `ToniFactory`, applies to every route
+2. **Controller** — annotated on the controller struct with `#[use_guards]` etc., applies to all routes in that controller
+3. **Method** — annotated on a specific route handler, applies only to that route
+
+All levels run, in that order. Method-level runs *in addition to* controller-level and global, not instead.
+
+<Bridge>
+This is the same execution order as NestJS. The scope levels — global, controller, method — are identical. The main difference is that NestJS uses class-based decorators while Toni uses attribute macros, but the mental model translates directly.
+</Bridge>
+
+## Sections in this chapter
+
+- [Middleware](/docs/request-lifecycle/middleware) — request processing before routing
+- [Guards](/docs/request-lifecycle/guards) — authorization and access control
+- [Interceptors](/docs/request-lifecycle/interceptors) — cross-cutting logic wrapping handlers
+- [Pipes](/docs/request-lifecycle/pipes) — data transformation and validation
+- [Exception Filters](/docs/request-lifecycle/exception-filters) — structured error handling

@@ -1,0 +1,226 @@
+---
+title: Exception Filters
+description: Error handlers that intercept exceptions thrown during the request lifecycle and shape the error response.
+---
+
+When an error occurs anywhere in the request processing chain — in a guard, an interceptor, an extractor, or the handler itself — Toni passes it through the error handler chain. Error handlers decide what HTTP response to send back.
+
+<Bridge>
+This is Toni's equivalent of NestJS's `ExceptionFilter`. Instead of `@Catch()` decorators on a class, you implement the `ErrorHandler` trait and apply handlers with `#[use_error_handlers]`. The chain-of-responsibility pattern (returning `None` to pass to the next handler) is the same concept as having multiple filters in a chain.
+</Bridge>
+
+## The ErrorHandler trait
+
+```rust
+use toni::async_trait;
+
+#[async_trait]
+pub trait ErrorHandler: Send + Sync {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        request: &HttpRequest,
+    ) -> Option<HttpResponse>;
+}
+```
+
+Return `Some(response)` to handle the error and send that response. Return `None` to pass the error to the next handler in the chain.
+
+## Global error handler
+
+```rust
+use toni::{async_trait, ErrorHandler, HttpRequest, HttpResponse};
+use toni::errors::HttpError;
+
+pub struct GlobalErrorHandler;
+
+#[async_trait]
+impl ErrorHandler for GlobalErrorHandler {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        request: &HttpRequest,
+    ) -> Option<HttpResponse> {
+        eprintln!("[Error] {} {}: {}", request.method, request.uri, error);
+
+        // Handle known HTTP errors with their own status codes
+        if let Some(http_error) = error.downcast_ref::<HttpError>() {
+            return Some(HttpResponse::builder()
+                .status(http_error.status_code())
+                .json(serde_json::json!({
+                    "statusCode": http_error.status_code(),
+                    "message": http_error.to_string(),
+                    "path": request.uri,
+                }))
+                .build());
+        }
+
+        // Unknown errors → 500
+        Some(HttpResponse::builder()
+            .status(500)
+            .json(serde_json::json!({
+                "statusCode": 500,
+                "message": "Internal server error",
+            }))
+            .build())
+    }
+}
+```
+
+Register globally:
+
+```rust
+let mut factory = ToniFactory::new();
+factory.use_global_error_handler(Arc::new(GlobalErrorHandler));
+let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+```
+
+## Specialized error handlers
+
+Return `None` to let the error fall through to the next handler:
+
+```rust
+pub struct ValidationErrorHandler;
+
+#[async_trait]
+impl ErrorHandler for ValidationErrorHandler {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        _request: &HttpRequest,
+    ) -> Option<HttpResponse> {
+        if let Some(http_error) = error.downcast_ref::<HttpError>() {
+            if http_error.status_code() == 422 {
+                return Some(HttpResponse::builder()
+                    .status(422)
+                    .json(serde_json::json!({
+                        "statusCode": 422,
+                        "error": "Unprocessable Entity",
+                        "details": http_error.to_string(),
+                    }))
+                    .build());
+            }
+        }
+        None  // pass to next handler
+    }
+}
+
+pub struct NotFoundHandler;
+
+#[async_trait]
+impl ErrorHandler for NotFoundHandler {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        request: &HttpRequest,
+    ) -> Option<HttpResponse> {
+        if let Some(e) = error.downcast_ref::<HttpError>() {
+            if e.status_code() == 404 {
+                return Some(HttpResponse::builder()
+                    .status(404)
+                    .json(serde_json::json!({
+                        "statusCode": 404,
+                        "message": format!("Route '{}' not found", request.uri),
+                    }))
+                    .build());
+            }
+        }
+        None
+    }
+}
+```
+
+## DI-aware error handlers
+
+Error handlers can be injectable services:
+
+```rust
+use toni::{injectable, ErrorHandler, HttpRequest, HttpResponse};
+
+#[injectable(pub struct AuditedErrorHandler {
+    #[inject]
+    audit_service: AuditService,
+})]
+#[error_handler]
+impl AuditedErrorHandler {
+    pub fn new(audit_service: AuditService) -> Self { Self { audit_service } }
+}
+
+#[async_trait]
+impl ErrorHandler for AuditedErrorHandler {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        request: &HttpRequest,
+    ) -> Option<HttpResponse> {
+        self.audit_service.log_error(&error, request).await;
+        None  // let other handlers shape the response
+    }
+}
+```
+
+Register in the module:
+
+```rust
+#[module(
+    controllers: [ApiController],
+    providers: [AuditedErrorHandler, AuditService],
+)]
+pub struct ApiModule;
+```
+
+## Applying error handlers
+
+### Controller level
+
+```rust
+#[controller("/api", pub struct ApiController { /* ... */ })]
+#[use_error_handlers(ValidationErrorHandler {}, NotFoundHandler {})]
+impl ApiController { /* ... */ }
+```
+
+### Method level
+
+```rust
+#[controller("/users", pub struct UsersController { /* ... */ })]
+impl UsersController {
+    #[post("")]
+    #[use_error_handlers(ValidationErrorHandler {})]
+    fn create(&self, Validated(Json(dto)): Validated<Json<CreateUserDto>>) -> HttpResponse { /* ... */ }
+}
+```
+
+## Handler chain execution
+
+Error handlers execute in this order:
+
+1. Method-level handlers (innermost)
+2. Controller-level handlers
+3. Global handler (outermost)
+
+Each handler returns `None` to pass the error up the chain. The first `Some(response)` wins.
+
+## Throwing errors from handlers
+
+Use `HttpError` from `toni::errors` to signal specific HTTP status codes:
+
+```rust
+use toni::errors::HttpError;
+
+fn find_one(&self, Path(id): Path<u32>) -> Result<User, HttpError> {
+    self.service.find(id).ok_or_else(|| HttpError::not_found("User not found"))
+}
+```
+
+Built-in `HttpError` constructors:
+
+| Method | Status |
+|--------|--------|
+| `HttpError::bad_request(msg)` | 400 |
+| `HttpError::unauthorized(msg)` | 401 |
+| `HttpError::forbidden(msg)` | 403 |
+| `HttpError::not_found(msg)` | 404 |
+| `HttpError::conflict(msg)` | 409 |
+| `HttpError::unprocessable_entity(msg)` | 422 |
+| `HttpError::internal_server_error(msg)` | 500 |
+| `HttpError::with_status(status, msg)` | custom |

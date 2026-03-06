@@ -1,0 +1,35 @@
+---
+title: GraphQL Overview
+description: Toni offers two official GraphQL integrations — choose based on your schema style.
+---
+
+Toni ships with two GraphQL integrations as separate crates. Both integrate fully with the DI system, lifecycle hooks, guards, and interceptors.
+
+## Choosing an integration
+
+| | `toni-async-graphql` | `toni-juniper` |
+|---|---|---|
+| **Library** | [async-graphql](https://github.com/async-graphql/async-graphql) | [Juniper](https://github.com/graphql-rust/juniper) |
+| **Context type** | Type-erased (`Data` container) | Concrete, user-defined struct |
+| **Schema style** | Code-first via macros | Code-first via macros |
+| **Best for** | Flexible context, large teams | Type-safe context, smaller teams |
+
+Both support:
+- Schema-first execution (POST + GET `/graphql`)
+- Built-in GraphQL Playground (disable in production)
+- Guards and interceptors on the GraphQL endpoint
+- Injecting Toni services into resolvers via the DI container
+
+## Common architecture
+
+Both integrations expose a `GraphQLModule` dynamic module that registers:
+- A `GraphQLController` handling `/graphql` (configurable path)
+- A `GraphQLService` for executing queries
+- Context building infrastructure
+
+Your resolvers access services through the GraphQL context, which is populated by a `ContextBuilder` you provide.
+
+## Sections
+
+- [async-graphql](/docs/graphql/async-graphql) — using `toni-async-graphql`
+- [Juniper](/docs/graphql/juniper) — using `toni-juniper`

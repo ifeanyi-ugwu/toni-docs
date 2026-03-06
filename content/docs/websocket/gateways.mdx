@@ -1,0 +1,135 @@
+---
+title: WebSocket Gateways
+description: Building real-time WebSocket handlers with Toni's gateway system.
+---
+
+WebSocket connections in Toni are handled through **gateways** — structs that implement the `GatewayTrait` and handle connection lifecycle events and messages. Gateways are registered in the DI container like any other provider, so they have full access to injected services.
+
+<Bridge>
+Toni gateways map directly to NestJS WebSocket gateways. Instead of `@WebSocketGateway()` and `@SubscribeMessage()`, you implement the `GatewayTrait` and use the message handling API. The concepts — server-side events, broadcasting, rooms — are identical.
+</Bridge>
+
+## Enabling WebSocket support
+
+Use the WebSocket adapter alongside your HTTP adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_axum::{AxumAdapter, AxumWebSocketAdapter};
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+    app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+## The GatewayTrait
+
+```rust
+use toni::async_trait;
+use toni::websocket::{GatewayTrait, WsClient, WsMessage};
+
+#[async_trait]
+pub trait GatewayTrait: Send + Sync {
+    fn path(&self) -> &str;
+    async fn on_connect(&self, client: &WsClient);
+    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason);
+    async fn on_message(&self, client: &WsClient, message: WsMessage);
+}
+```
+
+## Basic chat gateway
+
+```rust
+use toni::{injectable, async_trait};
+use toni::websocket::{GatewayTrait, WsClient, WsMessage, DisconnectReason};
+
+#[injectable(pub struct ChatGateway {})]
+impl ChatGateway {
+    pub fn new() -> Self { Self {} }
+}
+
+#[async_trait]
+impl GatewayTrait for ChatGateway {
+    fn path(&self) -> &str {
+        "/chat"
+    }
+
+    async fn on_connect(&self, client: &WsClient) {
+        println!("Client {} connected", client.id());
+        client.send(WsMessage::text("Welcome to the chat!")).await;
+    }
+
+    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason) {
+        println!("Client {} disconnected: {:?}", client.id(), reason);
+    }
+
+    async fn on_message(&self, client: &WsClient, message: WsMessage) {
+        if let Some(text) = message.as_text() {
+            println!("Message from {}: {}", client.id(), text);
+            // Echo back
+            client.send(WsMessage::text(format!("You said: {text}"))).await;
+        }
+    }
+}
+```
+
+## WsClient API
+
+`WsClient` represents an individual connected client:
+
+```rust
+client.id()                          // unique client identifier
+client.send(WsMessage).await         // send a message to this client
+client.close().await                 // close the connection
+client.get_metadata::<T>()           // retrieve typed metadata (set during handshake)
+```
+
+## WsMessage types
+
+```rust
+WsMessage::text("hello")             // text frame
+WsMessage::binary(vec![0u8, 1, 2])  // binary frame
+WsMessage::ping()                    // ping control frame
+WsMessage::pong()                    // pong control frame
+```
+
+## Registering a gateway
+
+Gateways are regular providers. List them in a module:
+
+```rust
+#[module(
+    providers: [ChatGateway],
+)]
+pub struct ChatModule;
+```
+
+Toni automatically detects that `ChatGateway` implements `GatewayTrait` and registers it with the WebSocket adapter.
+
+## Authentication via handshake
+
+Access the HTTP handshake request to authenticate connections before they're established:
+
+```rust
+use toni::websocket::{GatewayTrait, WsHandshake};
+
+#[async_trait]
+impl GatewayTrait for SecureGateway {
+    fn path(&self) -> &str { "/secure" }
+
+    async fn on_handshake(&self, handshake: &WsHandshake) -> bool {
+        // Return false to reject the connection
+        handshake.headers
+            .get("authorization")
+            .map(|h| self.auth_service.verify(h))
+            .unwrap_or(false)
+    }
+
+    async fn on_connect(&self, client: &WsClient) { /* ... */ }
+    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason) { /* ... */ }
+    async fn on_message(&self, client: &WsClient, message: WsMessage) { /* ... */ }
+}
+```

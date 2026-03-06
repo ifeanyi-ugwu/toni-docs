@@ -1,0 +1,56 @@
+---
+title: HTTP Adapters Overview
+description: Why Toni separates application logic from the HTTP runtime, and how to choose between Axum and Actix-web.
+---
+
+Toni doesn't handle HTTP itself. That concern belongs to the **adapter** — a thin integration layer that bridges Toni's routing and DI system to an actual HTTP server.
+
+This separation means your application logic is completely decoupled from the HTTP runtime. Switching adapters is a one-line change.
+
+## Why pluggable adapters?
+
+Different workloads have different runtime characteristics:
+
+- **I/O-bound** workloads (database queries, API calls, file reads) benefit from cooperative multitasking — many concurrent lightweight tasks. Axum + Tokio is built for this.
+- **CPU-bound** workloads (image processing, data transformation, cryptography) benefit from true parallelism across OS threads. Actix-web's actor model is purpose-built for this.
+
+Toni doesn't pick for you. Your choice of adapter is a deployment concern, not an architectural one.
+
+## Choosing an adapter
+
+| | `toni-axum` | `toni-actix` |
+|---|---|---|
+| **Underlying server** | Axum 0.8 + Tokio | Actix-web 4 |
+| **Async model** | `async/await` (Tokio) | Actor model + `async/await` |
+| **Best for** | I/O-bound, microservices | CPU-bound, high-throughput |
+| **WebSocket** | Yes | Yes |
+
+For most applications — REST APIs, BFF layers, backend services — `toni-axum` is the natural choice. It pairs well with the Tokio ecosystem (sqlx, reqwest, tonic, etc.).
+
+Reach for `toni-actix` if you have CPU-intensive per-request work or if you're integrating into an existing Actix-web deployment.
+
+## The HttpAdapter trait
+
+You can implement your own adapter for any HTTP server:
+
+```rust
+pub trait HttpAdapter: Send + Sync {
+    fn register_route(&mut self, route: RouteDefinition);
+    fn register_websocket(&mut self, path: &str, gateway: Arc<GatewayWrapper>);
+    async fn listen(self, port: u16, hostname: &str);
+}
+```
+
+Toni calls `register_route` for each resolved route during startup, then calls `listen` when `app.listen(port, host)` is invoked. The adapter translates Toni's routing abstractions into the underlying server's format.
+
+<Bridge>
+NestJS's platform adapters (`@nestjs/platform-express`, `@nestjs/platform-fastify`) serve the same purpose. The difference is that Toni's adapter is a compile-time type parameter — `ToniApplication<AxumAdapter>` vs `ToniApplication<ActixAdapter>` — rather than a runtime configuration.
+
+This means adapter-specific features can be exposed through the type system without dynamic dispatch overhead.
+</Bridge>
+
+## Sections in this chapter
+
+- [Axum Adapter](/docs/http-adapters/axum) — setup and Axum-specific configuration
+- [Actix-web Adapter](/docs/http-adapters/actix) — setup and Actix-specific configuration
+- [Custom Adapters](/docs/http-adapters/custom) — bring your own HTTP server

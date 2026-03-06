@@ -1,0 +1,229 @@
+---
+title: Built-in Extractors
+description: Type-safe request data extraction — path params, query strings, JSON body, raw bytes, and validated inputs.
+---
+
+Extractors pull typed data out of the HTTP request. They implement the `FromRequest` trait, are parsed once per request, and produce compile-time type errors if you misuse them.
+
+<Bridge>
+In NestJS you use parameter decorators: `@Param()`, `@Query()`, `@Body()`. In Toni, extractors are function parameter types that pattern-match in the handler signature. The result is the same — typed access to request data — but the Rust version is zero-cost and fully checked at compile time.
+
+```ts
+// NestJS
+@Get(':id')
+findOne(@Param('id') id: string, @Query() query: SearchDto) { }
+
+// Toni
+#[get("/:id")]
+fn find_one(&self, Path(id): Path<String>, Query(query): Query<SearchDto>) -> HttpResponse { }
+```
+</Bridge>
+
+## Path — route parameters
+
+Extracts typed values from URL path segments:
+
+```rust
+use toni::extractors::Path;
+
+// Single param
+#[get("/:id")]
+fn find_one(&self, Path(id): Path<u32>) -> HttpResponse {
+    // id is parsed to u32 from the URL segment
+}
+
+// Multiple params via a struct
+#[derive(serde::Deserialize)]
+struct PostParams {
+    user_id: u32,
+    post_id: u32,
+}
+
+#[get("/:user_id/posts/:post_id")]
+fn find_post(&self, Path(params): Path<PostParams>) -> HttpResponse {
+    let user_id = params.user_id;
+    let post_id = params.post_id;
+    // ...
+}
+```
+
+## Query — query string parameters
+
+Deserializes the query string into a typed struct:
+
+```rust
+use toni::extractors::Query;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    page: Option<u32>,
+    limit: Option<u32>,
+}
+
+#[get("/search")]
+fn search(&self, Query(params): Query<SearchQuery>) -> HttpResponse {
+    let q = params.q;
+    let page = params.page.unwrap_or(1);
+    let limit = params.limit.unwrap_or(20);
+    // ...
+}
+```
+
+## Json — strict JSON body
+
+Parses the request body as JSON, requiring `Content-Type: application/json`:
+
+```rust
+use toni::extractors::Json;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct CreateUserDto {
+    name: String,
+    email: String,
+}
+
+#[post("")]
+fn create(&self, Json(dto): Json<CreateUserDto>) -> HttpResponse {
+    // dto is fully typed; if Content-Type is wrong or JSON is malformed, a 400 is returned
+}
+```
+
+## Body — auto-detecting body
+
+Accepts both JSON and `application/x-www-form-urlencoded` — auto-detects from the `Content-Type` header:
+
+```rust
+use toni::extractors::Body;
+
+#[post("")]
+fn create(&self, Body(dto): Body<CreateUserDto>) -> HttpResponse {
+    // works for both JSON and form-encoded bodies
+}
+```
+
+Use `Json` when you only want to accept JSON. Use `Body` when your endpoint needs to support form submissions as well.
+
+## Bytes — raw binary data
+
+Returns the raw request body as a `Vec<u8>`:
+
+```rust
+use toni::extractors::Bytes;
+
+#[post("/upload")]
+fn upload(&self, Bytes(data): Bytes) -> HttpResponse {
+    let size = data.len();
+    // process raw bytes — useful for file uploads, webhooks, etc.
+    HttpResponse::ok()
+        .json(serde_json::json!({ "received_bytes": size }))
+        .build()
+}
+```
+
+## Validated — extraction + validation
+
+Wraps any extractor and runs `validator` crate validation before passing the data to the handler. If validation fails, a 422 response is returned automatically.
+
+```rust
+use toni::extractors::{Validated, Json};
+use serde::Deserialize;
+use validator::Validate;
+
+#[derive(Deserialize, Validate)]
+struct CreateUserDto {
+    #[validate(length(min = 2, max = 100))]
+    name: String,
+
+    #[validate(email)]
+    email: String,
+
+    #[validate(range(min = 13, max = 120))]
+    age: u32,
+}
+
+#[post("")]
+fn create(&self, Validated(Json(dto)): Validated<Json<CreateUserDto>>) -> HttpResponse {
+    // If any validation rule fails, handler is never called.
+    // dto.name is guaranteed to be 2-100 chars, dto.email is a valid email, etc.
+    HttpResponse::created()
+        .json(serde_json::json!({ "name": dto.name }))
+        .build()
+}
+```
+
+`Validated` can wrap any extractor that implements `ValidatableExtractor`:
+
+```rust
+Validated<Json<Dto>>    // validate JSON body
+Validated<Query<Dto>>   // validate query params
+Validated<Body<Dto>>    // validate auto-detected body
+```
+
+## Multiple extractors
+
+A handler can use multiple extractors simultaneously:
+
+```rust
+#[derive(Deserialize)]
+struct PaginationQuery {
+    page: Option<u32>,
+    per_page: Option<u32>,
+}
+
+#[put("/:id")]
+fn update(
+    &self,
+    Path(id): Path<u32>,
+    Query(pagination): Query<PaginationQuery>,
+    Validated(Json(dto)): Validated<Json<UpdateItemDto>>,
+) -> HttpResponse {
+    // All three are parsed and available
+}
+```
+
+## Custom extractors
+
+Implement `FromRequest` to create your own extractor for any request data:
+
+```rust
+use toni::extractors::FromRequest;
+use toni::HttpRequest;
+
+pub struct CurrentUser {
+    pub id: u32,
+    pub email: String,
+}
+
+impl FromRequest for CurrentUser {
+    type Error = String;
+
+    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
+        let user_id: u32 = req.headers
+            .get("x-user-id")
+            .ok_or("Missing x-user-id header")?
+            .parse()
+            .map_err(|_| "Invalid user id")?;
+
+        Ok(CurrentUser {
+            id: user_id,
+            email: req.headers
+                .get("x-user-email")
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+}
+
+// Use it exactly like any built-in extractor
+#[get("/me")]
+fn profile(&self, user: CurrentUser) -> HttpResponse {
+    HttpResponse::ok()
+        .json(serde_json::json!({ "id": user.id, "email": user.email }))
+        .build()
+}
+```
+
+See [Custom Extractors](/docs/extractors/custom) for more patterns.

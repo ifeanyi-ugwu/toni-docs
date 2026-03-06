@@ -1,0 +1,125 @@
+---
+title: async-graphql Integration
+description: Use toni-async-graphql to add a GraphQL endpoint powered by the async-graphql crate.
+---
+
+`toni-async-graphql` integrates Toni's module system with the [async-graphql](https://github.com/async-graphql/async-graphql) crate. The GraphQL context uses `async-graphql`'s `Data` container — a type-erased map — which makes it easy to add Toni services to resolvers.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-async-graphql = "0.1"
+async-graphql = "7"
+toni-axum = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+## 1. Define the schema
+
+```rust
+use async_graphql::{Object, Schema, EmptyMutation, EmptySubscription, Context};
+
+pub struct QueryRoot;
+
+#[Object]
+impl QueryRoot {
+    async fn users(&self, ctx: &Context<'_>) -> Vec<String> {
+        // Access Toni services via the Data container
+        let service = ctx.data::<UsersService>().unwrap();
+        service.find_all_names()
+    }
+
+    async fn user(&self, ctx: &Context<'_>, id: u32) -> Option<String> {
+        let service = ctx.data::<UsersService>().unwrap();
+        service.find_one_name(id)
+    }
+}
+
+pub type AppSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+```
+
+## 2. Build the context (inject Toni services)
+
+The `ContextBuilder` trait tells the integration how to populate the `Data` container for each request:
+
+```rust
+use toni_async_graphql::ContextBuilder;
+use toni::injectable;
+use async_graphql::Data;
+
+#[injectable(pub struct AppContextBuilder {
+    #[inject]
+    users_service: UsersService,
+})]
+impl AppContextBuilder {
+    pub fn new(users_service: UsersService) -> Self { Self { users_service } }
+}
+
+impl ContextBuilder for AppContextBuilder {
+    fn build_context(&self) -> Data {
+        let mut data = Data::default();
+        data.insert(self.users_service.clone());
+        data
+    }
+}
+```
+
+## 3. Register the GraphQL module
+
+```rust
+use toni_async_graphql::GraphQLModule;
+use async_graphql::{Schema, EmptyMutation, EmptySubscription};
+
+let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+
+let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
+    .with_path("/graphql")
+    .with_playground(true);  // disable in production
+
+#[module(
+    imports: [graphql_module, UsersModule],
+)]
+pub struct AppModule;
+```
+
+## 4. Wire up in main
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+Visit `http://localhost:3000/graphql` in a browser to open the GraphQL Playground.
+
+## Using guards on the GraphQL endpoint
+
+Apply guards to the `GraphQLController` via the module configuration:
+
+```rust
+let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
+    .with_path("/graphql")
+    .with_guard(AuthGuard {})
+    .with_playground(false);
+```
+
+## Subscriptions
+
+For GraphQL subscriptions over WebSocket, configure the subscription transport:
+
+```rust
+use toni_async_graphql::GraphQLModule;
+use async_graphql::{Schema, EmptyMutation};
+
+let schema = Schema::new(QueryRoot, MutationRoot, SubscriptionRoot);
+
+let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
+    .with_subscriptions("/graphql/ws");
+```

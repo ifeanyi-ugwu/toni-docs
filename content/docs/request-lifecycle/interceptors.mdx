@@ -1,0 +1,193 @@
+---
+title: Interceptors
+description: Interceptors wrap route handlers — they run before and after, and can transform or short-circuit.
+---
+
+An interceptor wraps a route handler. It runs before the handler (and can short-circuit, skipping the handler entirely), then runs again after the handler with access to the response. This makes interceptors ideal for logging, caching, response transformation, and timing.
+
+<Bridge>
+Toni interceptors work the same as NestJS's `NestInterceptor`. The `intercept` method receives a `context` and a `next` — calling `next.run(context)` proceeds to the handler. You can add logic before and after that call, inspect or modify the response, or skip the call entirely to return a cached result.
+</Bridge>
+
+## The Interceptor trait
+
+```rust
+use toni::async_trait;
+
+#[async_trait]
+pub trait InterceptorNext: Send {
+    async fn run(self: Box<Self>, context: &mut Context);
+}
+
+#[async_trait]
+pub trait Interceptor: Send + Sync {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>);
+}
+```
+
+## Timing interceptor
+
+```rust
+use toni::{async_trait, Interceptor, InterceptorNext, Context};
+use std::time::Instant;
+
+pub struct TimingInterceptor;
+
+#[async_trait]
+impl Interceptor for TimingInterceptor {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
+        let start = Instant::now();
+        next.run(context).await;
+        println!("Request took {:?}", start.elapsed());
+    }
+}
+```
+
+## Caching interceptor
+
+Skip the handler entirely when a cached response exists:
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct CacheInterceptor {
+    cache: Mutex<HashMap<String, String>>,
+}
+
+impl CacheInterceptor {
+    pub fn new() -> Self {
+        Self { cache: Mutex::new(HashMap::new()) }
+    }
+}
+
+#[async_trait]
+impl Interceptor for CacheInterceptor {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
+        let key = format!("{} {}", context.method(), context.path());
+
+        // Check cache first
+        if let Some(cached) = self.cache.lock().unwrap().get(&key).cloned() {
+            context.set_response(
+                HttpResponse::ok()
+                    .header("X-Cache", "HIT")
+                    .body(cached)
+                    .build()
+            );
+            return;  // handler is skipped
+        }
+
+        // Cache miss — call the handler
+        next.run(context).await;
+
+        // Store result in cache
+        if let Some(response) = context.get_response() {
+            if response.status() == 200 {
+                let body = response.body_as_string().unwrap_or_default();
+                self.cache.lock().unwrap().insert(key, body);
+            }
+        }
+    }
+}
+```
+
+## Response transformation
+
+Transform the response before it's sent:
+
+```rust
+pub struct WrapResponseInterceptor;
+
+#[async_trait]
+impl Interceptor for WrapResponseInterceptor {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
+        next.run(context).await;
+
+        // Wrap the response body in a standard envelope
+        if let Some(response) = context.get_response() {
+            if response.status() == 200 {
+                if let Ok(data) = response.body_as_json::<serde_json::Value>() {
+                    context.set_response(
+                        HttpResponse::ok()
+                            .json(serde_json::json!({ "data": data, "success": true }))
+                            .build()
+                    );
+                }
+            }
+        }
+    }
+}
+```
+
+## DI-aware interceptors
+
+```rust
+use toni::{injectable, Interceptor, InterceptorNext, Context};
+
+#[injectable(pub struct AuditInterceptor {
+    #[inject]
+    audit_service: AuditService,
+})]
+#[interceptor]
+impl AuditInterceptor {
+    pub fn new(audit_service: AuditService) -> Self { Self { audit_service } }
+}
+
+#[async_trait]
+impl Interceptor for AuditInterceptor {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
+        let path = context.path().to_string();
+        let method = context.method().to_string();
+
+        next.run(context).await;
+
+        let status = context.get_response()
+            .map(|r| r.status())
+            .unwrap_or(0);
+
+        self.audit_service.log(&method, &path, status).await;
+    }
+}
+```
+
+## Applying interceptors
+
+### Global
+
+```rust
+let mut factory = ToniFactory::new();
+factory.use_global_interceptors(Arc::new(TimingInterceptor));
+let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+```
+
+### Controller level
+
+```rust
+#[controller("/users", pub struct UsersController { /* ... */ })]
+#[use_interceptors(TimingInterceptor {}, WrapResponseInterceptor {})]
+impl UsersController {
+    // all routes are wrapped by both interceptors
+}
+```
+
+### Method level
+
+```rust
+#[controller("/items", pub struct ItemsController { /* ... */ })]
+impl ItemsController {
+    #[get("/:id")]
+    #[use_interceptors(CacheInterceptor {})]  // only this route is cached
+    fn find_one(&self) -> HttpResponse { /* ... */ }
+}
+```
+
+## Execution order
+
+When multiple interceptors are applied, they execute as nested wrappers:
+
+```
+Global interceptors → Controller interceptors → Method interceptors → Handler
+Handler response → Method interceptors → Controller interceptors → Global interceptors
+```
+
+The innermost interceptor (method-level) is closest to the handler.

@@ -1,0 +1,69 @@
+---
+title: Custom Adapters
+description: Implement the HttpAdapter trait to integrate Toni with any HTTP server.
+---
+
+If neither Axum nor Actix-web fits your constraints, you can implement `HttpAdapter` to use any HTTP server. The trait is simple: receive route registrations, then start serving.
+
+## The HttpAdapter trait
+
+```rust
+use toni::adapter::{HttpAdapter, RouteDefinition};
+use toni::websocket::GatewayWrapper;
+use std::sync::Arc;
+
+pub trait HttpAdapter: Send + Sync {
+    fn register_route(&mut self, route: RouteDefinition);
+    fn register_websocket(&mut self, path: &str, gateway: Arc<GatewayWrapper>);
+    async fn listen(self, port: u16, hostname: &str);
+}
+```
+
+`RouteDefinition` contains:
+- The HTTP method (`GET`, `POST`, etc.)
+- The path pattern (e.g., `/users/:id`)
+- A handler function that takes an `HttpRequest` and returns an `HttpResponse`
+
+## Minimal example — hyper adapter
+
+```rust
+use toni::adapter::{HttpAdapter, RouteDefinition};
+use toni::websocket::GatewayWrapper;
+use std::sync::Arc;
+use std::collections::HashMap;
+
+pub struct HyperAdapter {
+    routes: Vec<RouteDefinition>,
+}
+
+impl HyperAdapter {
+    pub fn new() -> Self {
+        Self { routes: Vec::new() }
+    }
+}
+
+impl HttpAdapter for HyperAdapter {
+    fn register_route(&mut self, route: RouteDefinition) {
+        self.routes.push(route);
+    }
+
+    fn register_websocket(&mut self, _path: &str, _gateway: Arc<GatewayWrapper>) {
+        // Implement if needed
+    }
+
+    async fn listen(self, port: u16, hostname: &str) {
+        let addr = format!("{hostname}:{port}").parse().unwrap();
+        // Build and start a hyper server using self.routes
+        // ...
+        println!("Listening on {addr}");
+    }
+}
+```
+
+## Adapter as a route adapter
+
+The `RouteAdapter` trait provides Toni's internal routing abstraction that adapters translate. See the `toni` crate's `adapter` module for the full API surface.
+
+## Contributing an adapter
+
+If you build an adapter for a popular server (Hyper, Warp, Poem), consider contributing it upstream. See the [toni-axum source](https://github.com/ifeanyi-ugwu/toni-rs/tree/main/toni-axum) as a reference implementation.

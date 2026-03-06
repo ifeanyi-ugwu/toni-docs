@@ -1,0 +1,146 @@
+---
+title: Services & Providers
+description: Injectable services are the building blocks of Toni's business logic layer.
+---
+
+A **provider** is anything the DI container manages: a service struct, a configuration value, a database connection, a factory-created object. The most common form is a **service** — a struct that holds business logic and can be injected into controllers and other services.
+
+<Bridge>
+In NestJS, `@Injectable()` marks a class as a provider. In Toni, `#[injectable]` does the same for a struct. The concept is identical: declare it, register it in a module's `providers`, and the framework injects it wherever it's referenced.
+</Bridge>
+
+## Defining a service
+
+```rust
+use toni::injectable;
+
+#[injectable(pub struct UsersService {
+    // fields that are NOT injected — just internal state
+    max_users: u32,
+})]
+impl UsersService {
+    pub fn new() -> Self {
+        Self { max_users: 1000 }
+    }
+
+    pub fn find_all(&self) -> Vec<String> {
+        vec!["Alice".into(), "Bob".into()]
+    }
+
+    pub fn find_one(&self, id: u32) -> Option<String> {
+        if id == 1 { Some("Alice".into()) } else { None }
+    }
+}
+```
+
+The struct definition goes inside the `#[injectable(...)` attribute. The `impl` block is where your methods live — standard Rust.
+
+## Injecting into other services
+
+Use `#[inject]` on fields to mark them for DI. The container resolves them automatically:
+
+```rust
+#[injectable(pub struct OrdersService {
+    #[inject]
+    users_service: UsersService,
+    #[inject]
+    payments_service: PaymentsService,
+})]
+impl OrdersService {
+    pub fn new(users_service: UsersService, payments_service: PaymentsService) -> Self {
+        Self { users_service, payments_service }
+    }
+
+    pub fn create_order(&self, user_id: u32, amount: f64) -> String {
+        let user = self.users_service.find_one(user_id)
+            .expect("user not found");
+        self.payments_service.charge(&user, amount);
+        format!("Order created for {user}")
+    }
+}
+```
+
+For `OrdersService` to inject `UsersService` and `PaymentsService`, those services must be available in the same module scope — either directly in `providers` or from an imported module's `exports`.
+
+## Registering in a module
+
+```rust
+#[module(
+    imports: [PaymentsModule],             // PaymentsService comes from here
+    controllers: [OrdersController],
+    providers: [OrdersService, UsersService],
+)]
+pub struct OrdersModule;
+```
+
+## Async initialization
+
+Use the `#[on_module_init]` lifecycle hook to run async setup after the service is constructed but before the application starts accepting requests:
+
+```rust
+#[injectable(pub struct DatabaseService {
+    pool: Option<Pool>,
+})]
+impl DatabaseService {
+    pub fn new() -> Self {
+        Self { pool: None }
+    }
+
+    #[on_module_init]
+    async fn connect(&self) {
+        // runs once, after all providers in this module are instantiated
+        println!("Database connection established");
+    }
+
+    pub async fn query(&self, sql: &str) -> Vec<Row> {
+        self.pool.as_ref().unwrap().query(sql).await
+    }
+}
+```
+
+## Provider scope
+
+By default, providers are singletons — one instance per module scope. The `#[injectable]` macro supports a `scope` parameter for future scope options (transient, request-scoped). See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
+
+## Implementing enhancer traits
+
+Services can implement the Guard, Interceptor, Pipe, Middleware, or ErrorHandler traits. When they do, they can be registered both as injectable services *and* used as enhancers with DI access:
+
+```rust
+use toni::{injectable, Guard, Context};
+
+#[injectable(pub struct AuthGuard {
+    #[inject]
+    auth_service: AuthService,
+})]
+#[guard]
+impl AuthGuard {
+    pub fn new(auth_service: AuthService) -> Self {
+        Self { auth_service }
+    }
+}
+
+impl Guard for AuthGuard {
+    fn can_activate(&self, ctx: &Context) -> bool {
+        let token = ctx.get_header("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "));
+        token.map(|t| self.auth_service.verify(t)).unwrap_or(false)
+    }
+}
+```
+
+Register it in the module's `providers`, then apply it:
+
+```rust
+#[module(
+    controllers: [ProtectedController],
+    providers: [AuthGuard, AuthService],
+)]
+pub struct ProtectedModule;
+```
+
+```rust
+#[controller("/protected", pub struct ProtectedController { /* ... */ })]
+#[use_guards(AuthGuard {})]
+impl ProtectedController { /* ... */ }
+```

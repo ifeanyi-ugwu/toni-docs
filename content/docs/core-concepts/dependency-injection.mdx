@@ -1,0 +1,140 @@
+---
+title: Dependency Injection
+description: How Toni's DI container resolves, instantiates, and shares providers.
+---
+
+Toni includes a built-in dependency injection (DI) container. It resolves the dependency graph at startup, instantiates providers in the correct order, and wires everything together before the first request arrives.
+
+<Bridge>
+This is the same container-based DI that NestJS uses. In NestJS, the container is managed by the framework's `Injector`. In Toni, the equivalent is `ToniContainer`, which you never interact with directly — `ToniFactory` drives it.
+
+The key concepts (tokens, scopes, the graph resolution) work the same way.
+</Bridge>
+
+## How resolution works
+
+When `ToniFactory::create` runs:
+
+1. The module tree is scanned recursively from the root module
+2. Each module's `providers` and `controllers` are registered with their dependency lists
+3. A dependency graph is built from `#[inject]` field declarations
+4. The graph is topologically sorted — providers with no dependencies are instantiated first
+5. Each subsequent provider receives already-instantiated dependencies
+
+If there's a circular dependency, the scanner reports it at startup. There's no runtime failure.
+
+## Provider tokens
+
+Every provider is identified by a **token** — by default, the type name of the struct. When you write `providers: [UsersService]`, the token is `"UsersService"`.
+
+Custom tokens let you register multiple providers of the same type under different names, or register non-struct values:
+
+```rust
+#[module(
+    providers: [
+        UsersService,
+        provider_value!("APP_NAME", "MyApp".to_string()),
+        provider_factory!("DB_POOL", || create_pool()),
+        provider_alias!("Users", UsersService),       // alternate name for same service
+        provider_token!("PRIMARY_DB", DatabaseService), // custom token for a type
+    ],
+)]
+pub struct AppModule;
+```
+
+See [Provider Patterns](/docs/core-concepts/provider-patterns) for full coverage.
+
+## Module scoping
+
+Providers are scoped to their module. A module's providers are **not** visible to other modules unless explicitly exported.
+
+```
+AppModule
+├── UsersModule
+│   ├── providers: [UsersService]     ← private to UsersModule
+│   └── exports: [UsersService]       ← now visible to importers
+└── OrdersModule
+    ├── imports: [UsersModule]         ← can now inject UsersService
+    └── providers: [OrdersService]
+```
+
+This scoping is enforced at startup. Attempting to inject a provider that isn't in scope causes a clear error during the scan phase.
+
+## Accessing the container at runtime
+
+After the application is created, you can pull instances directly from the container. This is useful for scripting, CLI tools, and testing.
+
+```rust
+let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+
+// Get by type
+let users_service = app.get::<UsersService>().await?;
+
+// Get by type from a specific module
+let service = app.get_from::<UsersService>("UsersModule").await?;
+
+// Get by custom token
+let db_pool = app.get_by_token::<Pool>("DB_POOL").await?;
+```
+
+## Standalone application context
+
+For workers, cron jobs, CLI commands, and tests — situations where you want the DI container without an HTTP server:
+
+```rust
+use toni::ToniFactory;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut ctx = ToniFactory::create_application_context(AppModule).await;
+
+    // Resolve services normally
+    let users_service = ctx.get::<UsersService>().await?;
+    let count = users_service.count().await;
+    println!("Total users: {count}");
+
+    // Runs shutdown lifecycle hooks
+    ctx.close().await?;
+
+    Ok(())
+}
+```
+
+`create_application_context` initializes the full DI container and runs all lifecycle hooks, but doesn't start an HTTP server.
+
+## Injection via constructor
+
+Toni calls `new()` to construct each provider, passing resolved dependencies as arguments. The `#[inject]` fields and the `new()` signature must match:
+
+```rust
+#[injectable(pub struct OrdersService {
+    #[inject]
+    users_service: UsersService,
+    #[inject]
+    logger: LoggerService,
+    // internal_value is NOT injected — it has a default
+    internal_value: String,
+})]
+impl OrdersService {
+    // new() receives ONLY the injected fields, in declaration order
+    pub fn new(users_service: UsersService, logger: LoggerService) -> Self {
+        Self {
+            users_service,
+            logger,
+            internal_value: "default".into(),
+        }
+    }
+}
+```
+
+The `new()` function signature defines what the DI container provides. Fields without `#[inject]` are your responsibility to initialize inside `new()`.
+
+## Circular dependency detection
+
+Toni detects circular dependencies at startup and panics with a diagnostic. If `ServiceA` injects `ServiceB` and `ServiceB` injects `ServiceA`, you'll see an error like:
+
+```
+Circular dependency detected: ServiceA → ServiceB → ServiceA
+```
+
+The standard solution is to break the cycle by introducing an intermediate abstraction or moving the shared logic into a third service that both depend on.

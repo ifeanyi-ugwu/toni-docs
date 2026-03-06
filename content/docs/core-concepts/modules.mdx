@@ -1,0 +1,145 @@
+---
+title: Modules
+description: The organizational unit of a Toni application — how modules group, share, and isolate application components.
+---
+
+Modules are the primary organizational unit in Toni. Each module is a struct annotated with `#[module]` that declares:
+
+- **`controllers`** — the HTTP route handlers owned by this module
+- **`providers`** — the services and values managed by this module's DI scope
+- **`imports`** — other modules whose exported providers this module needs
+- **`exports`** — the providers this module makes available to importing modules
+
+<Bridge>
+This is the same mental model as NestJS's `@Module()`. The attribute arguments map directly:
+
+| NestJS `@Module()` | Toni `#[module]` |
+|--------------------|-----------------|
+| `imports` | `imports` |
+| `controllers` | `controllers` |
+| `providers` | `providers` |
+| `exports` | `exports` |
+</Bridge>
+
+## Basic module
+
+```rust
+use toni::module;
+
+#[module(
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct UsersModule;
+```
+
+The `#[module]` macro transforms this struct into a full module definition. You don't write methods on the struct — the macro generates everything needed for the DI scanner.
+
+## Imports and exports
+
+Modules can import providers from other modules. The exporting module must explicitly list what it shares.
+
+```rust
+// database/database_module.rs
+#[module(
+    providers: [DatabaseService],
+    exports: [DatabaseService],   // available to any module that imports DatabaseModule
+)]
+pub struct DatabaseModule;
+
+// users/users_module.rs
+#[module(
+    imports: [DatabaseModule],    // DatabaseService is now injectable here
+    controllers: [UsersController],
+    providers: [UsersService],    // UsersService can @inject DatabaseService
+)]
+pub struct UsersModule;
+```
+
+A provider listed in `exports` must also be listed in `providers`. Only exported providers are visible outside the module; everything else is private to that module's scope.
+
+## The module tree
+
+Every application has a root module. `ToniFactory::create` starts scanning from there, recursively resolving the full module graph.
+
+```rust
+// app_module.rs
+#[module(
+    imports: [
+        DatabaseModule,
+        UsersModule,
+        AuthModule,
+    ],
+)]
+pub struct AppModule;
+
+// main.rs
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+The root module itself typically has no controllers or providers — it just composes feature modules.
+
+## Global providers
+
+If a provider needs to be available everywhere without explicitly importing its module everywhere, put it in a module imported at the root level and export it there. All downstream modules that import the root (or any module that re-exports it) will have access.
+
+A common pattern for cross-cutting infrastructure:
+
+```rust
+// infrastructure/infrastructure_module.rs
+#[module(
+    providers: [LoggerService, ConfigService, MetricsService],
+    exports: [LoggerService, ConfigService, MetricsService],
+)]
+pub struct InfrastructureModule;
+
+// app_module.rs
+#[module(
+    imports: [InfrastructureModule, UsersModule, AuthModule],
+)]
+pub struct AppModule;
+```
+
+Now every module that's part of the app has access to `LoggerService`, `ConfigService`, and `MetricsService` by importing `InfrastructureModule`.
+
+## Lifecycle hooks on modules
+
+You can attach lifecycle callbacks directly to the module struct using `#[on_module_init]` and `#[on_application_bootstrap]`:
+
+```rust
+#[module(
+    providers: [DatabaseService],
+    exports: [DatabaseService],
+)]
+pub struct DatabaseModule;
+
+impl DatabaseModule {
+    #[on_module_init]
+    fn init(&self) {
+        println!("DatabaseModule initialized");
+    }
+}
+```
+
+See [Lifecycle Hooks](/docs/lifecycle-hooks) for the full sequence.
+
+## Dynamic modules
+
+For cases where a module's configuration depends on runtime values (connection strings, API keys, feature flags), create the module definition programmatically:
+
+```rust
+// config is just a normal Rust struct you build at runtime
+let db_module = DatabaseModule::for_root(DatabaseConfig {
+    url: std::env::var("DATABASE_URL").unwrap(),
+    pool_size: 10,
+});
+
+#[module(imports: [db_module, UsersModule])]
+pub struct AppModule;
+```
+
+The `for_root` pattern is a convention, not a framework feature. It's just a function that returns a `ModuleDefinition` — a struct that carries the module metadata Toni needs.

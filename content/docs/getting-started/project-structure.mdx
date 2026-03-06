@@ -1,0 +1,132 @@
+---
+title: Project Structure
+description: How to organize a Toni application as it grows.
+---
+
+Toni doesn't enforce a specific file layout, but the module system naturally guides you toward a feature-based structure. Here's a recommended layout for a medium-to-large application:
+
+```
+src/
+├── main.rs                    # Entry point — ToniFactory::create
+├── app_module.rs              # Root module that imports feature modules
+│
+├── users/
+│   ├── mod.rs                 # re-exports
+│   ├── users_module.rs        # #[module] definition
+│   ├── users_controller.rs    # #[controller] with route handlers
+│   ├── users_service.rs       # #[injectable] business logic
+│   └── dto/
+│       ├── create_user.rs     # CreateUserDto
+│       └── update_user.rs     # UpdateUserDto
+│
+├── auth/
+│   ├── mod.rs
+│   ├── auth_module.rs
+│   ├── auth_controller.rs
+│   ├── auth_service.rs
+│   └── guards/
+│       └── jwt_guard.rs       # #[guard] / Guard impl
+│
+├── database/
+│   ├── mod.rs
+│   ├── database_module.rs     # Global module exporting DatabaseService
+│   └── database_service.rs
+│
+└── common/
+    ├── filters/
+    │   └── http_exception_filter.rs
+    ├── interceptors/
+    │   └── logging_interceptor.rs
+    └── pipes/
+        └── validation_pipe.rs
+```
+
+## One feature per module
+
+The key organizing principle: **each feature is a module**. A module owns its controllers and services. What it needs from other modules it declares as `imports`. What it offers to other modules it declares in `exports`.
+
+```rust
+// database/database_module.rs
+#[module(
+    providers: [DatabaseService],
+    exports: [DatabaseService],   // other modules can inject this
+)]
+pub struct DatabaseModule;
+
+// users/users_module.rs
+#[module(
+    imports: [DatabaseModule],    // now DatabaseService is available here
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct UsersModule;
+```
+
+## Root module
+
+The root module is the entry point for the module graph. It typically only imports feature modules — it doesn't own controllers or services itself.
+
+```rust
+// app_module.rs
+#[module(
+    imports: [
+        DatabaseModule,
+        UsersModule,
+        AuthModule,
+        ProductsModule,
+    ],
+)]
+pub struct AppModule;
+```
+
+## Growing the structure
+
+As the application grows, feature modules can themselves become module groups:
+
+```
+src/
+├── orders/
+│   ├── orders_module.rs        # imports: [InventoryModule, PaymentsModule]
+│   ├── orders_controller.rs
+│   ├── orders_service.rs
+│   ├── inventory/
+│   │   ├── inventory_module.rs
+│   │   └── inventory_service.rs
+│   └── payments/
+│       ├── payments_module.rs
+│       └── payments_service.rs
+```
+
+<Bridge>
+This maps directly to the NestJS convention of `feature/feature.module.ts`, `feature/feature.controller.ts`, `feature/feature.service.ts`. Toni has no mandated file naming convention, but matching Rust's snake_case module naming with the feature name keeps things predictable.
+
+One difference: in NestJS, `forRoot()` dynamic modules handle global singleton configuration. In Toni, you declare a module global by including it in `imports` at the root level and marking its exports. The `toni-config` crate handles environment config separately.
+</Bridge>
+
+## Shared/common code
+
+Infrastructure that spans features — interceptors, guards, pipes, common types — belongs in a shared location (`common/` or `shared/`). These don't need their own modules; they're just Rust structs implementing the relevant trait, instantiated where needed or provided through a shared module.
+
+```rust
+// common/interceptors/logging_interceptor.rs
+use toni::{async_trait, Interceptor, Context};
+
+pub struct LoggingInterceptor;
+
+#[async_trait]
+impl Interceptor for LoggingInterceptor {
+    async fn intercept(&self, ctx: &mut Context, next: Box<dyn InterceptorNext>) {
+        println!("→ {} {}", ctx.method(), ctx.path());
+        next.run(ctx).await;
+        println!("← {}", ctx.status());
+    }
+}
+```
+
+Register globally at startup:
+
+```rust
+let mut factory = ToniFactory::new();
+factory.use_global_interceptors(Arc::new(LoggingInterceptor));
+let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+```

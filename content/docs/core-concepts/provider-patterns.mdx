@@ -1,0 +1,150 @@
+---
+title: Provider Patterns
+description: Value providers, factory providers, alias providers, and token providers — all the ways to put things into the DI container.
+---
+
+Beyond plain injectable services, Toni supports several provider patterns for registering non-struct values, computed results, async-initialized resources, and alternate names for existing providers.
+
+<Bridge>
+These map directly to NestJS's custom provider syntax:
+
+| NestJS | Toni |
+|--------|------|
+| `{ provide: 'TOKEN', useValue: value }` | `provider_value!("TOKEN", value)` |
+| `{ provide: 'TOKEN', useFactory: () => fn() }` | `provider_factory!("TOKEN", \|\| fn())` |
+| `{ provide: 'TOKEN', useFactory: async (dep) => fn(dep), inject: [Dep] }` | `provider_factory!("TOKEN", async \|dep: Dep\| fn(dep))` |
+| `{ provide: 'TOKEN', useExisting: ExistingService }` | `provider_alias!("TOKEN", ExistingService)` |
+| `{ provide: TOKEN, useClass: ServiceClass }` | `provider_token!("TOKEN", ServiceClass)` |
+</Bridge>
+
+## Service providers (the default)
+
+The most common pattern — just list the struct name:
+
+```rust
+#[module(
+    providers: [UsersService, AuthService],
+)]
+pub struct AppModule;
+```
+
+Both `UsersService` and `AuthService` must be annotated with `#[injectable]`. The DI container calls their `new()` function, resolving any `#[inject]` fields.
+
+## Value providers
+
+Inject a static, pre-computed value:
+
+```rust
+#[module(
+    providers: [
+        provider_value!("APP_NAME", "MyApp".to_string()),
+        provider_value!("PORT", 3000_u16),
+        provider_value!("TIMEOUT", Duration::from_secs(30)),
+    ],
+)]
+pub struct AppModule;
+```
+
+The first argument is the token name (any string). The second is any Rust value that satisfies the provider's type requirements.
+
+Inject by token in a service:
+
+```rust
+// TODO: token injection syntax for fields — see below
+```
+
+## Factory providers
+
+Run a closure to produce a value, with optional dependencies:
+
+```rust
+#[module(
+    providers: [
+        // No dependencies
+        provider_factory!("REQUEST_ID_PREFIX", || {
+            format!("req-{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis())
+        }),
+
+        // With typed dependencies
+        provider_factory!("APP_INFO", |config: ConfigService| {
+            format!("App running in {} mode", config.get_env())
+        }),
+
+        // Async factory
+        provider_factory!("DB_SCHEMA", async |db: DatabaseService| {
+            db.get_schema().await
+        }),
+    ],
+)]
+pub struct AppModule;
+```
+
+Dependencies listed in the closure signature are resolved from the module's DI scope before the factory runs.
+
+## Alias providers
+
+Create an alternate token pointing to an existing provider. The same instance is returned for both tokens:
+
+```rust
+#[module(
+    providers: [
+        ConfigService,
+        provider_alias!("Config", ConfigService),       // type → type
+        provider_alias!("APP_PORT", "PORT"),             // token → token
+    ],
+)]
+pub struct AppModule;
+```
+
+Useful when consuming code uses a different token name than the provider's type.
+
+## Token providers
+
+Register a type under a custom string token. This is the inverse of alias — you choose the token, the type stays the same:
+
+```rust
+#[module(
+    providers: [
+        DatabaseService,
+        provider_token!("PRIMARY_DB", DatabaseService),
+        provider_token!("REPLICA_DB", ReplicaDatabaseService),
+    ],
+)]
+pub struct AppModule;
+```
+
+## The `provide` macro (unified)
+
+The `provide!` macro is a catch-all that accepts any of the above patterns with an explicit `kind` discriminator:
+
+```rust
+#[module(
+    providers: [
+        provide!(value => "KEY" = "static string"),
+        provide!(factory => "KEY2" = || compute()),
+        provide!(alias => "ALT" = OriginalService),
+    ],
+)]
+pub struct AppModule;
+```
+
+The per-pattern macros (`provider_value!`, `provider_factory!`, etc.) are more readable for most cases, but `provide!` can be useful in macros or generated code.
+
+## Exporting custom-token providers
+
+To make a custom-token provider available to other modules, include the token in `exports`:
+
+```rust
+#[module(
+    providers: [
+        DatabaseService,
+        provider_value!("DB_URL", std::env::var("DATABASE_URL").unwrap()),
+    ],
+    exports: [
+        DatabaseService,
+        "DB_URL",    // export by token string
+    ],
+)]
+pub struct DatabaseModule;
+```

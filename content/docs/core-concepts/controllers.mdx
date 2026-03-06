@@ -1,0 +1,223 @@
+---
+title: Controllers
+description: Controllers define HTTP routes and map them to handler functions.
+---
+
+A controller is a struct annotated with `#[controller]` that groups related HTTP route handlers under a base path. Each handler method is annotated with the HTTP verb it responds to.
+
+<Bridge>
+Controllers in Toni serve the exact same purpose as controllers in NestJS. Instead of `@Controller('path')` you use `#[controller("path", ...)]`, and instead of `@Get()`, `@Post()` etc. you use `#[get]`, `#[post]`, etc.
+</Bridge>
+
+## Defining a controller
+
+```rust
+use toni::{controller, HttpResponse};
+
+#[controller("/cats", pub struct CatsController {})]
+impl CatsController {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[get("")]
+    fn find_all(&self) -> HttpResponse {
+        HttpResponse::ok().json(serde_json::json!(["Garfield", "Tom"])).build()
+    }
+}
+```
+
+The `#[controller]` attribute takes:
+1. The base path string (e.g., `"/cats"`)
+2. The struct definition — fields declared here become the struct's fields
+
+All route paths on methods are relative to this base. `#[get("")]` matches `GET /cats`, `#[get("/:id")]` matches `GET /cats/:id`.
+
+## Route handlers
+
+Four HTTP verbs are supported with dedicated attributes:
+
+```rust
+#[controller("/items", pub struct ItemsController {
+    #[inject]
+    service: ItemsService,
+})]
+impl ItemsController {
+    pub fn new(service: ItemsService) -> Self { Self { service } }
+
+    #[get("")]           // GET  /items
+    fn find_all(&self) -> HttpResponse { /* ... */ }
+
+    #[get("/:id")]       // GET  /items/:id
+    fn find_one(&self) -> HttpResponse { /* ... */ }
+
+    #[post("")]          // POST /items
+    fn create(&self) -> HttpResponse { /* ... */ }
+
+    #[put("/:id")]       // PUT  /items/:id
+    fn update(&self) -> HttpResponse { /* ... */ }
+
+    #[delete("/:id")]    // DELETE /items/:id
+    fn remove(&self) -> HttpResponse { /* ... */ }
+}
+```
+
+## Request data
+
+Use extractors to pull data out of requests. Extractors are zero-cost: they're parsed once and typed at compile time.
+
+```rust
+use toni::extractors::{Path, Query, Json, Body, Bytes, Validated};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    page: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct CreateItemDto {
+    name: String,
+    price: f64,
+}
+
+#[controller("/items", pub struct ItemsController {
+    #[inject]
+    service: ItemsService,
+})]
+impl ItemsController {
+    pub fn new(service: ItemsService) -> Self { Self { service } }
+
+    #[get("/:id")]
+    fn find_one(&self, Path(id): Path<u32>) -> HttpResponse {
+        // id is a u32, parsed from the URL
+        match self.service.find(id) {
+            Some(item) => HttpResponse::ok().json(item).build(),
+            None => HttpResponse::not_found().build(),
+        }
+    }
+
+    #[get("")]
+    fn search(&self, Query(q): Query<SearchQuery>) -> HttpResponse {
+        let results = self.service.search(&q.q, q.page.unwrap_or(1));
+        HttpResponse::ok().json(results).build()
+    }
+
+    #[post("")]
+    fn create(&self, Json(dto): Json<CreateItemDto>) -> HttpResponse {
+        let item = self.service.create(dto.name, dto.price);
+        HttpResponse::created().json(item).build()
+    }
+}
+```
+
+See [Extractors](/docs/extractors/built-in) for the full list.
+
+## Dependency injection
+
+Fields marked with `#[inject]` are resolved from the DI container. Toni injects them automatically — you just name them and declare the type.
+
+```rust
+#[controller("/orders", pub struct OrdersController {
+    #[inject]
+    orders_service: OrdersService,
+    #[inject]
+    payments_service: PaymentsService,
+    #[inject]
+    logger: LoggerService,
+})]
+impl OrdersController {
+    pub fn new(
+        orders_service: OrdersService,
+        payments_service: PaymentsService,
+        logger: LoggerService,
+    ) -> Self {
+        Self { orders_service, payments_service, logger }
+    }
+    // ...
+}
+```
+
+Both `OrdersService` and `PaymentsService` must be available in the module's DI scope — either provided directly in `providers` or imported from another module.
+
+## Response types
+
+Handlers can return anything that implements `ToResponse`. The most common options:
+
+```rust
+// HttpResponse — full control
+fn handler(&self) -> HttpResponse {
+    HttpResponse::ok()
+        .json(data)
+        .header("X-Custom", "value")
+        .build()
+}
+
+// Serde-serializable types via automatic JSON conversion
+fn handler(&self) -> MyStruct { /* auto-serialized to JSON 200 */ }
+
+// Result — error handled by the error handler chain
+fn handler(&self) -> Result<MyStruct, HttpError> { /* ... */ }
+```
+
+## Guards on controllers
+
+Apply guards to an entire controller or to specific routes:
+
+```rust
+#[controller("/admin", pub struct AdminController { /* ... */ })]
+#[use_guards(AuthGuard {}, RoleGuard::new("admin"))]
+impl AdminController {
+    #[get("/dashboard")]
+    fn dashboard(&self) -> HttpResponse { /* ... */ }
+
+    #[get("/logs")]
+    #[use_guards(SuperAdminGuard {})]   // additional guard on this route only
+    fn logs(&self) -> HttpResponse { /* ... */ }
+}
+```
+
+Guards on the controller run for every route in that controller. Method-level guards run in addition, after controller-level guards.
+
+See [Guards](/docs/request-lifecycle/guards) for how to implement them.
+
+## Route metadata
+
+Attach metadata to routes that guards and interceptors can read:
+
+```rust
+#[controller("/posts", pub struct PostsController { /* ... */ })]
+impl PostsController {
+    #[get("")]
+    #[set_metadata(Roles(vec!["user", "admin"]))]
+    fn find_all(&self) -> HttpResponse { /* ... */ }
+
+    #[delete("/:id")]
+    #[set_metadata(Roles(vec!["admin"]))]
+    fn remove(&self) -> HttpResponse { /* ... */ }
+}
+```
+
+Inside a guard:
+
+```rust
+impl Guard for RoleGuard {
+    fn can_activate(&self, ctx: &Context) -> bool {
+        let required_roles = ctx.get_metadata::<Roles>();
+        // check current user has one of required_roles
+    }
+}
+```
+
+## Registering controllers
+
+Controllers must be listed in a module's `controllers` array. They cannot be used without a module.
+
+```rust
+#[module(
+    controllers: [CatsController, ItemsController],
+    providers: [CatsService, ItemsService],
+)]
+pub struct FeatureModule;
+```

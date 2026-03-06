@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: What Toni is, why it exists, and when to reach for it.
+---
+
+Toni is a Rust framework for building server-side applications. It brings a structured, modular approach to Rust web development: your application is organized into **modules**, each containing **controllers** that handle HTTP routes and **services** that hold business logic. Dependencies flow between them through a built-in injection container.
+
+<Bridge>
+If you've built applications with NestJS, almost everything in Toni has a direct counterpart. The module hierarchy, the decorator-driven syntax, the guards/interceptors/pipes execution chain — all of it maps cleanly. The main difference is that instead of TypeScript decorators, Toni uses Rust procedural macros, and instead of classes you have structs.
+
+The goal isn't to recreate NestJS in Rust. It's to give you the same ergonomics and structural clarity in a language that gives you performance, memory safety, and no garbage collector.
+</Bridge>
+
+## Why Toni exists
+
+Rust web development typically hands you low-level primitives: an HTTP router, a runtime, maybe an extractor pattern. That's powerful, but it leaves architectural decisions entirely up to you. For small services that's fine. For larger applications — with authentication layers, background jobs, multiple data sources, complex initialization sequences — you end up building the same structural scaffolding from scratch every time.
+
+Toni provides that scaffolding without dictating your HTTP server. Write your application logic once; plug in Axum or Actix-web (or bring your own adapter).
+
+## What Toni is not
+
+Toni is not an HTTP server. It does not handle the actual socket connections, TLS, or HTTP parsing. Those concerns belong to the adapter you choose. Toni's job is to organize your application: resolve dependencies, route requests through the middleware/guard/interceptor chain, and manage the lifecycle of your modules.
+
+## Key concepts at a glance
+
+| Concept | What it does |
+|---------|-------------|
+| **Module** | Groups related controllers and services; defines what's shared with other modules |
+| **Controller** | Maps HTTP routes to handler functions |
+| **Injectable / Service** | A struct managed by the DI container; injected where needed |
+| **Guard** | Runs before a handler; blocks the request if it returns `false` |
+| **Interceptor** | Wraps a handler; can transform request and response |
+| **Pipe** | Transforms or validates extracted data before the handler sees it |
+| **Middleware** | Runs before routing; good for logging, CORS, auth headers |
+| **Extractor** | Pulls typed data out of the request (path params, query, body, etc.) |
+| **Lifecycle hooks** | `on_module_init`, `on_application_bootstrap`, `on_application_shutdown`, etc. |
+
+## HTTP adapters
+
+Toni decouples application logic from the HTTP runtime. Two official adapters ship with the framework:
+
+- **`toni-axum`** — built on [Axum](https://github.com/tokio-rs/axum), Tokio-based, great for I/O-heavy workloads
+- **`toni-actix`** — built on [Actix-web](https://actix.rs/), excellent for CPU-intensive request handling
+
+Both adapters expose the same Toni API. Switching between them is a one-line change.
+
+## Ready to build?
+
+Head to [Installation](/docs/getting-started/installation) to add Toni to your project, or jump straight to the [Quick Start](/docs/getting-started/quick-start) to see a complete working application.

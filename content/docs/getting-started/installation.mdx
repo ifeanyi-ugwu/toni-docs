@@ -1,0 +1,84 @@
+---
+title: Installation
+description: Add Toni to a new or existing Rust project.
+---
+
+## Prerequisites
+
+- Rust 1.75 or later (2024 edition is recommended)
+- Cargo
+
+## Option A — Start from a template with the CLI
+
+The fastest way to get a working Toni project is through the CLI:
+
+```bash
+cargo install toni-cli
+toni new my_app
+cd my_app
+cargo run
+```
+
+This scaffolds a project with `AppModule`, `AppController`, and `AppService` wired together and ready to run.
+
+## Option B — Add to an existing project
+
+Add the core crate and your chosen HTTP adapter to `Cargo.toml`:
+
+```toml
+[dependencies]
+toni = "0.2"
+
+# Choose one adapter:
+toni-axum = "0.1"    # Axum + Tokio  (I/O-bound workloads)
+# toni-actix = "0.1" # Actix-web     (CPU-bound workloads)
+
+# Async runtime (required with toni-axum)
+tokio = { version = "1", features = ["full"] }
+
+# Serialization (nearly always needed)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+### Optional crates
+
+| Crate | Purpose |
+|-------|---------|
+| `toni-config` | Environment-based configuration with optional validation |
+| `toni-async-graphql` | GraphQL via `async-graphql` |
+| `toni-juniper` | GraphQL via `juniper` |
+
+## Minimum working main
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+
+#[tokio::main]
+async fn main() {
+    let adapter = AxumAdapter::new();
+    let mut app = ToniFactory::create(AppModule, adapter).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+That's it. Everything else — modules, controllers, services — lives in your application code and gets wired together by the DI container at startup.
+
+<Bridge>
+Coming from NestJS? The rough translation is:
+
+```ts
+// NestJS
+const app = await NestFactory.create(AppModule);
+await app.listen(3000);
+```
+
+```rust
+// Toni
+let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+app.listen(3000, "127.0.0.1").await;
+```
+
+`ToniFactory::create` is the synchronous-looking entry point; it returns a `ToniApplication<A>` where `A` is the adapter type. No `app.init()` call is needed — initialization runs during `create`.
+</Bridge>

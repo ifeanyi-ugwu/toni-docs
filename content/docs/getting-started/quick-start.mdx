@@ -1,0 +1,223 @@
+---
+title: Quick Start
+description: Build a working Toni application end-to-end in minutes.
+---
+
+This guide walks through building a small REST API with a user resource. By the end you'll have a running server with a controller, a service, and proper module wiring.
+
+## Project setup
+
+```bash
+toni new users_api
+cd users_api
+```
+
+Or add to `Cargo.toml` manually (see [Installation](/docs/getting-started/installation)).
+
+## 1. Define a service
+
+Services hold business logic. The `#[injectable]` macro registers the struct with the DI container so it can be injected into controllers and other services.
+
+```rust
+use toni::injectable;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize)]
+pub struct User {
+    pub id: u32,
+    pub name: String,
+    pub email: String,
+}
+
+#[injectable(pub struct UserService {})]
+impl UserService {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn find_all(&self) -> Vec<User> {
+        vec![
+            User { id: 1, name: "Alice".into(), email: "alice@example.com".into() },
+            User { id: 2, name: "Bob".into(), email: "bob@example.com".into() },
+        ]
+    }
+
+    pub fn find_one(&self, id: u32) -> Option<User> {
+        self.find_all().into_iter().find(|u| u.id == id)
+    }
+}
+```
+
+<Bridge>
+In NestJS you'd write:
+
+```ts
+@Injectable()
+export class UserService {
+  findAll(): User[] { /* ... */ }
+  findOne(id: number): User | undefined { /* ... */ }
+}
+```
+
+`#[injectable]` is the direct counterpart to `@Injectable()`. The struct fields declared inside the macro attribute become the struct definition; the `impl` block is where you write methods — same as any Rust struct.
+</Bridge>
+
+## 2. Define a controller
+
+Controllers map HTTP routes to methods. The `#[controller]` macro takes a base path, then each method is annotated with its HTTP verb and sub-path.
+
+```rust
+use toni::{controller, extractors::{Json, Path}, HttpResponse};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct CreateUserDto {
+    pub name: String,
+    pub email: String,
+}
+
+#[controller("/users", pub struct UserController {
+    #[inject]
+    service: UserService,
+})]
+impl UserController {
+    pub fn new(service: UserService) -> Self {
+        Self { service }
+    }
+
+    #[get("")]
+    fn find_all(&self) -> HttpResponse {
+        let users = self.service.find_all();
+        HttpResponse::ok().json(users).build()
+    }
+
+    #[get("/:id")]
+    fn find_one(&self, Path(id): Path<u32>) -> HttpResponse {
+        match self.service.find_one(id) {
+            Some(user) => HttpResponse::ok().json(user).build(),
+            None => HttpResponse::not_found().build(),
+        }
+    }
+
+    #[post("")]
+    fn create(&self, Json(dto): Json<CreateUserDto>) -> HttpResponse {
+        HttpResponse::created()
+            .json(serde_json::json!({ "name": dto.name, "email": dto.email }))
+            .build()
+    }
+}
+```
+
+<Bridge>
+The NestJS equivalent:
+
+```ts
+@Controller('users')
+export class UserController {
+  constructor(private readonly service: UserService) {}
+
+  @Get()
+  findAll() { return this.service.findAll(); }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) { /* ... */ }
+
+  @Post()
+  create(@Body() dto: CreateUserDto) { /* ... */ }
+}
+```
+
+Key differences: the struct fields (marked `#[inject]`) replace constructor injection. `Path<u32>` replaces `@Param('id')`. The `#[get]`, `#[post]` attributes work the same way as NestJS decorators.
+</Bridge>
+
+## 3. Define a module
+
+Modules declare which controllers and services belong together. Use `#[module]` with `controllers` and `providers` lists.
+
+```rust
+use toni::module;
+
+#[module(
+    controllers: [UserController],
+    providers: [UserService],
+)]
+pub struct UserModule;
+```
+
+<Bridge>
+```ts
+// NestJS
+@Module({
+  controllers: [UserController],
+  providers: [UserService],
+})
+export class UserModule {}
+```
+
+Direct mapping. `providers` in Toni ≈ `providers` in NestJS. `controllers` is identical.
+</Bridge>
+
+## 4. Wire up the root module
+
+Every Toni application has a root module. Import feature modules here.
+
+```rust
+#[module(
+    imports: [UserModule],
+)]
+pub struct AppModule;
+```
+
+## 5. Start the server
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+    app.listen(3000, "127.0.0.1").await;
+}
+```
+
+Run it:
+
+```bash
+cargo run
+```
+
+Your API is now live:
+
+```bash
+curl http://localhost:3000/users
+# [{"id":1,"name":"Alice","email":"alice@example.com"},...]
+
+curl http://localhost:3000/users/1
+# {"id":1,"name":"Alice","email":"alice@example.com"}
+
+curl -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Carol","email":"carol@example.com"}'
+# {"name":"Carol","email":"carol@example.com"}
+```
+
+## What happens at startup
+
+When `ToniFactory::create` is called, Toni:
+
+1. Scans the module tree starting from `AppModule`
+2. Builds a dependency graph from all declared providers and controllers
+3. Instantiates everything in dependency order
+4. Runs `on_module_init` hooks on all providers
+5. Runs `on_application_bootstrap` hooks
+6. Registers all routes with the HTTP adapter
+
+By the time `listen` is called, every service is fully initialized and the route tree is ready.
+
+## Next steps
+
+- [Project Structure](/docs/getting-started/project-structure) — how to organize a larger application
+- [Modules](/docs/core-concepts/modules) — deep dive into the module system
+- [Controllers](/docs/core-concepts/controllers) — all the route definition options
+- [Dependency Injection](/docs/core-concepts/dependency-injection) — how the container works

@@ -1,0 +1,183 @@
+---
+title: toni-macros
+description: Reference for all procedural macros provided by the toni-macros crate.
+---
+
+All macros are re-exported through the `toni` crate — you don't need to add `toni-macros` as a direct dependency.
+
+## Struct-level macros
+
+### `#[module]`
+
+Defines a module with its dependency graph:
+
+```rust
+#[module(
+    imports: [OtherModule, AnotherModule],       // modules to import
+    controllers: [MyController, OtherController], // controllers owned by this module
+    providers: [MyService, provider_value!("KEY", value)], // providers
+    exports: [MyService, "KEY"],                  // what's visible to importers
+)]
+pub struct MyModule;
+```
+
+All fields are optional. An empty module is valid.
+
+### `#[controller]`
+
+Defines an HTTP controller with a base path:
+
+```rust
+#[controller("/path", pub struct MyController {
+    #[inject]
+    service: MyService,       // injected from DI
+    internal: String,         // not injected
+})]
+impl MyController {
+    pub fn new(service: MyService) -> Self {
+        Self { service, internal: "default".into() }
+    }
+}
+```
+
+### `#[injectable]`
+
+Marks a struct as a DI-managed provider:
+
+```rust
+#[injectable(pub struct MyService {
+    #[inject]
+    dep: OtherService,
+    state: u32,
+})]
+impl MyService {
+    pub fn new(dep: OtherService) -> Self {
+        Self { dep, state: 0 }
+    }
+}
+```
+
+---
+
+## Route macros
+
+Applied to methods inside a `#[controller]` impl block:
+
+```rust
+#[get("/path")]       // HTTP GET
+#[post("/path")]      // HTTP POST
+#[put("/path")]       // HTTP PUT
+#[delete("/path")]    // HTTP DELETE
+```
+
+Path segments with `:name` are route parameters: `#[get("/:id")]`.
+
+---
+
+## Enhancer application macros
+
+Applied to a controller or method:
+
+```rust
+#[use_guards(GuardStruct {}, AnotherGuard::new())]
+#[use_interceptors(InterceptorStruct {}, LoggingInterceptor::new())]
+#[use_pipes(PipeStruct {})]
+#[use_error_handlers(ErrorHandlerStruct {})]
+
+#[set_metadata(MyMetadata { key: "value" })]
+```
+
+---
+
+## Enhancer marker macros
+
+Mark a `#[injectable]` struct as implementing an enhancer trait so Toni can detect and register it:
+
+```rust
+#[guard]           // implements Guard
+#[interceptor]     // implements Interceptor
+#[pipe]            // implements Pipe
+#[middleware]      // implements Middleware
+#[error_handler]   // implements ErrorHandler
+```
+
+---
+
+## Provider macros (used inside `providers: [...]`)
+
+```rust
+// Static value
+provider_value!("TOKEN", expression)
+
+// Sync factory with optional dependencies
+provider_factory!("TOKEN", || expression)
+provider_factory!("TOKEN", |dep: DepType| expression)
+
+// Async factory
+provider_factory!("TOKEN", async |dep: DepType| async_expression)
+
+// Alias — alternate token for existing provider
+provider_alias!("NEW_TOKEN", ExistingService)
+provider_alias!("NEW_TOKEN", "EXISTING_TOKEN")
+
+// Register type under custom token
+provider_token!("CUSTOM_TOKEN", ServiceType)
+
+// Unified macro
+provide!(value => "TOKEN" = expr)
+provide!(factory => "TOKEN" = || expr)
+provide!(alias => "TOKEN" = Original)
+```
+
+---
+
+## Lifecycle hook attributes
+
+Used inside `impl` blocks of providers, controllers, or modules:
+
+```rust
+#[on_module_init]
+async fn hook(&self) { }
+
+#[on_application_bootstrap]
+async fn hook(&self) { }
+
+#[on_module_destroy]
+async fn hook(&self) { }
+
+#[before_application_shutdown]
+async fn hook(&self, signal: Option<String>) { }
+
+#[on_application_shutdown]
+async fn hook(&self, signal: Option<String>) { }
+```
+
+---
+
+## Field attributes
+
+```rust
+// In #[injectable] and #[controller] struct definitions:
+#[inject]    // mark field for DI injection
+#[default]   // provide a default value (not injected)
+```
+
+---
+
+## Config derive macro (from toni-config)
+
+```rust
+use toni_config::Config;
+
+#[derive(Config, Clone)]
+pub struct AppConfig {
+    #[env("ENV_VAR_NAME")]
+    pub field: Type,
+
+    #[env("ENV_VAR_NAME", default = "value")]
+    pub optional_field: Type,
+
+    #[nested]
+    pub nested_config: NestedConfig,
+}
+```

@@ -1,0 +1,138 @@
+---
+title: Docker
+description: Containerizing a Toni application with Docker and docker-compose.
+---
+
+## Dockerfile
+
+Multi-stage builds keep the final image small — the builder stage compiles everything, the runtime stage contains only the binary:
+
+```dockerfile
+# Builder stage
+FROM rust:1.82-alpine AS builder
+
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev
+
+WORKDIR /app
+
+# Cache dependencies by copying manifests first
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+RUN rm -f target/release/deps/my_app*
+
+# Build the actual application
+COPY src ./src
+RUN cargo build --release
+
+# Runtime stage
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/my_app ./my_app
+
+EXPOSE 8080
+
+ENV HOST=0.0.0.0
+ENV PORT=8080
+
+CMD ["./my_app"]
+```
+
+Build and run:
+
+```bash
+docker build -t my-toni-app .
+docker run -p 8080:8080 \
+  -e DATABASE_URL=postgresql://host.docker.internal:5432/myapp \
+  -e JWT_SECRET=your-secret-here \
+  my-toni-app
+```
+
+## docker-compose
+
+For local development with a database:
+
+```yaml
+# docker-compose.yml
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://postgres:password@db:5432/myapp
+      JWT_SECRET: dev-secret-at-least-32-chars-long
+      LOG_LEVEL: debug
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: myapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+```
+
+```bash
+docker compose up -d
+docker compose logs -f api
+```
+
+## Health check endpoint
+
+Add a health check route that returns 200 when the application is ready:
+
+```rust
+#[controller("/", pub struct HealthController {})]
+impl HealthController {
+    pub fn new() -> Self { Self {} }
+
+    #[get("health")]
+    fn health(&self) -> HttpResponse {
+        HttpResponse::ok().json(serde_json::json!({ "status": "ok" })).build()
+    }
+}
+```
+
+Configure it in the Dockerfile:
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost:8080/health || exit 1
+```
+
+## Static binary with musl
+
+For a fully static binary (no shared library dependencies):
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+The resulting binary runs on any Linux system with no libc requirements, making the `scratch` or `distroless` Docker base images viable:
+
+```dockerfile
+FROM scratch
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/my_app /app
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+EXPOSE 8080
+CMD ["/app"]
+```

@@ -1,0 +1,55 @@
+---
+title: toni-config
+description: API reference for the configuration management crate.
+---
+
+## Config derive macro
+
+```rust
+use toni_config::Config;
+
+#[derive(Config, Clone)]
+pub struct AppConfig {
+    // Required — panics at startup if not set
+    #[env("DATABASE_URL")]
+    pub database_url: String,
+
+    // Optional with default
+    #[env("PORT", default = "3000")]
+    pub port: u16,
+
+    // Nested config struct
+    #[nested]
+    pub auth: AuthConfig,
+}
+```
+
+## AppConfig::load()
+
+Reads values from the environment (and `.env` file if the `dotenv` feature is enabled):
+
+```rust
+let config = AppConfig::load()?;
+// Returns Err if required fields are missing or values can't be parsed
+```
+
+## AppConfig::load_and_validate()
+
+Same as `load()` plus runs `validator` crate validation (requires `validation` feature):
+
+```rust
+let config = AppConfig::load_and_validate()?;
+// Returns Err if required fields are missing, parse fails, or validation fails
+```
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `dotenv` | Load `.env` file via the `dotenv` crate |
+| `validation` | Enable `load_and_validate()` via the `validator` crate |
+
+```toml
+[dependencies]
+toni-config = { version = "0.1", features = ["dotenv", "validation"] }
+```

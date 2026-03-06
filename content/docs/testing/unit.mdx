@@ -1,0 +1,163 @@
+---
+title: Unit Testing
+description: Testing individual services, guards, and interceptors in isolation.
+---
+
+Unit tests in Toni are straightforward Rust unit tests — no special testing framework is needed. Since services are plain structs with methods, you instantiate them directly and call their methods.
+
+<Bridge>
+In NestJS you typically use `@nestjs/testing`'s `Test.createTestingModule()` to create isolated module instances. In Toni, you can do the same with `ToniFactory::create_application_context` for integration-style tests, but for unit tests you just construct your structs directly — no module system needed.
+</Bridge>
+
+## Testing a service
+
+```rust
+#[injectable(pub struct MathService {})]
+impl MathService {
+    pub fn new() -> Self { Self {} }
+
+    pub fn add(&self, a: i32, b: i32) -> i32 { a + b }
+    pub fn divide(&self, a: f64, b: f64) -> Option<f64> {
+        if b == 0.0 { None } else { Some(a / b) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add() {
+        let service = MathService::new();
+        assert_eq!(service.add(2, 3), 5);
+        assert_eq!(service.add(-1, 1), 0);
+    }
+
+    #[test]
+    fn test_divide_by_zero() {
+        let service = MathService::new();
+        assert_eq!(service.divide(10.0, 0.0), None);
+    }
+
+    #[test]
+    fn test_divide() {
+        let service = MathService::new();
+        assert_eq!(service.divide(10.0, 2.0), Some(5.0));
+    }
+}
+```
+
+## Testing services with dependencies
+
+Construct dependencies manually for unit tests:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_orders_service() -> OrdersService {
+        // Construct with real (or mock) dependencies
+        let users_service = UsersService::new();
+        let payments_service = PaymentsService::new();
+        OrdersService::new(users_service, payments_service)
+    }
+
+    #[tokio::test]
+    async fn test_create_order() {
+        let service = make_orders_service();
+        let result = service.create_order(1, 99.99).await;
+        assert!(result.is_ok());
+    }
+}
+```
+
+## Testing guards
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toni::HttpRequest;
+
+    fn make_request_with_token(token: &str) -> HttpRequest {
+        let mut req = HttpRequest::new();
+        req.headers.insert(
+            "authorization".to_string(),
+            format!("Bearer {token}")
+        );
+        req
+    }
+
+    #[test]
+    fn test_auth_guard_allows_valid_token() {
+        let guard = AuthGuard;
+        let req = make_request_with_token("valid-token-123");
+        let ctx = Context::from_request(req);
+        assert!(guard.can_activate(&ctx));
+    }
+
+    #[test]
+    fn test_auth_guard_blocks_missing_token() {
+        let guard = AuthGuard;
+        let ctx = Context::from_request(HttpRequest::new());
+        assert!(!guard.can_activate(&ctx));
+    }
+}
+```
+
+## Testing async services
+
+Use `#[tokio::test]` for async tests:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_database_service() {
+        let service = DatabaseService::new();
+        // on_module_init won't run automatically in unit tests
+        // Call it manually if needed:
+        // service.connect().await;
+
+        let users = service.find_all().await;
+        assert!(!users.is_empty());
+    }
+}
+```
+
+## Mocking dependencies
+
+For true isolation, create mock implementations of your traits. The `mockall` crate is popular for this:
+
+```toml
+[dev-dependencies]
+mockall = "0.13"
+```
+
+```rust
+use mockall::mock;
+
+mock! {
+    UserRepository {}
+
+    impl UserRepository {
+        fn find_by_id(&self, id: u32) -> Option<User>;
+        fn save(&self, user: &User) -> Result<(), String>;
+    }
+}
+
+#[test]
+fn test_with_mock() {
+    let mut mock_repo = MockUserRepository::new();
+    mock_repo.expect_find_by_id()
+        .with(mockall::predicate::eq(1u32))
+        .returning(|_| Some(User { id: 1, name: "Alice".into() }));
+
+    let service = UserService::with_repository(mock_repo);
+    let user = service.find(1);
+    assert_eq!(user.unwrap().name, "Alice");
+}
+```

@@ -1,0 +1,135 @@
+---
+title: Integration Testing
+description: Test complete Toni applications end-to-end using the application context and HTTP test clients.
+---
+
+Integration tests exercise the full application — modules, DI, lifecycle hooks, and HTTP routing — without mocking internal boundaries.
+
+## Testing with the application context
+
+`ToniFactory::create_application_context` creates a full DI-initialized context without starting an HTTP server. Use it to test service interactions end-to-end:
+
+```rust
+use toni::ToniFactory;
+
+#[tokio::test]
+async fn test_user_creation_flow() {
+    let mut ctx = ToniFactory::create_application_context(AppModule).await;
+
+    let users_service = ctx.get::<UsersService>().await.unwrap();
+    let orders_service = ctx.get::<OrdersService>().await.unwrap();
+
+    // Create a user
+    let user = users_service.create("Alice", "alice@example.com").await.unwrap();
+    assert_eq!(user.name, "Alice");
+
+    // Create an order for that user
+    let order = orders_service.create_order(user.id, 49.99).await.unwrap();
+    assert!(order.id > 0);
+    assert_eq!(order.user_id, user.id);
+
+    ctx.close().await.unwrap();
+}
+```
+
+## HTTP integration tests
+
+For HTTP-level integration tests, start a real server and send requests with a test HTTP client:
+
+```toml
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
+
+async fn start_test_server() -> String {
+    let port = find_free_port();
+    let mut app = ToniFactory::create(TestModule, AxumAdapter::new()).await;
+
+    tokio::spawn(async move {
+        app.listen(port, "127.0.0.1").await;
+    });
+
+    // Give the server a moment to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    format!("http://127.0.0.1:{port}")
+}
+
+fn find_free_port() -> u16 {
+    use std::net::TcpListener;
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[tokio::test]
+async fn test_get_users() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client.get(format!("{base_url}/users"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let users: Vec<serde_json::Value> = response.json().await.unwrap();
+    assert!(!users.is_empty());
+}
+
+#[tokio::test]
+async fn test_create_user() {
+    let base_url = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let response = client.post(format!("{base_url}/users"))
+        .json(&serde_json::json!({
+            "name": "Alice",
+            "email": "alice@test.com"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 201);
+    let user: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(user["name"], "Alice");
+}
+```
+
+## Testing a specific module in isolation
+
+Create a test-only module that provides only what you need:
+
+```rust
+#[module(
+    controllers: [UsersController],
+    providers: [
+        UsersService,
+        // Use a fake database service instead of the real one
+        provider_value!("DB", FakeDatabase::new()),
+    ],
+)]
+pub struct UsersTestModule;
+
+#[tokio::test]
+async fn test_users_controller() {
+    let base_url = start_test_server_with_module(UsersTestModule).await;
+    // ... run HTTP tests against UsersController with fake dependencies
+}
+```
+
+## Lifecycle hooks in tests
+
+Lifecycle hooks run normally in integration tests. If `on_module_init` makes real network calls (database, cache), consider using test-specific provider implementations that avoid external systems.
+
+## Tip: test isolation
+
+Run integration tests with `cargo test --test-threads 1` if tests share state (ports, databases) that can conflict. Or use unique ports per test via `find_free_port()`.

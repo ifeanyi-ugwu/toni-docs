@@ -1,0 +1,44 @@
+---
+title: toni-cli
+description: API reference for the Toni CLI tool.
+---
+
+## Installation
+
+```bash
+cargo install toni-cli
+```
+
+## Commands
+
+### toni new
+
+```
+toni new <project-name>
+```
+
+Scaffolds a new Toni project. Creates:
+- `Cargo.toml` with framework dependencies
+- `src/main.rs`
+- `src/app_module.rs`
+- `src/app_controller.rs`
+- `src/app_service.rs`
+
+### toni generate
+
+```
+toni generate <type> <name>
+```
+
+| Type | Creates |
+|------|---------|
+| `module` | `src/<name>/<name>_module.rs` with `#[module]` |
+| `controller` | `src/<name>/<name>_controller.rs` with `#[controller]` |
+| `service` | `src/<name>/<name>_service.rs` with `#[injectable]` |
+
+## Version
+
+```bash
+toni --version
+toni --help
+```

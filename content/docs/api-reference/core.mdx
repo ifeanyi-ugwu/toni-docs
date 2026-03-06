@@ -1,0 +1,196 @@
+---
+title: toni (core)
+description: API reference for the toni core crate — types, traits, and the application factory.
+---
+
+## ToniFactory
+
+The entry point for creating Toni applications.
+
+```rust
+use toni::ToniFactory;
+```
+
+### Associated functions
+
+```rust
+// Create an HTTP application (most common)
+ToniFactory::create(module, adapter) -> ToniApplication<A>
+
+// Create a standalone DI context (no HTTP server)
+ToniFactory::create_application_context(module) -> ToniApplicationContext
+```
+
+### Methods (on instance)
+
+Create a factory with global enhancers:
+
+```rust
+let mut factory = ToniFactory::new();
+factory
+    .use_global_middleware(Arc::new(impl_middleware))
+    .use_global_guards(Arc::new(impl_guard))
+    .use_global_interceptors(Arc::new(impl_interceptor))
+    .use_global_pipes(Arc::new(impl_pipe))
+    .use_global_error_handler(Arc::new(impl_error_handler));
+
+let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+let mut ctx = factory.create_application_context_with(AppModule).await;
+```
+
+---
+
+## ToniApplication\<A\>
+
+The running application instance returned by `ToniFactory::create`.
+
+```rust
+// Start listening
+app.listen(port: u16, hostname: &str) -> !
+
+// Get a provider by type
+app.get::<T>() -> Result<T>
+app.get_from::<T>(module_token: &str) -> Result<T>
+app.get_by_token::<T>(token: impl IntoToken) -> Result<T>
+app.get_from_by_token::<T>(module_token: &str, token: impl IntoToken) -> Result<T>
+
+// Enable WebSocket
+app.use_websocket_adapter(ws_adapter) -> Result<&mut Self>
+
+// Trigger shutdown lifecycle
+app.close() -> Result<()>
+```
+
+---
+
+## Traits
+
+### Middleware
+
+```rust
+#[async_trait]
+pub trait Middleware: Send + Sync {
+    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult;
+}
+
+pub type MiddlewareResult = Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>>;
+```
+
+### Guard
+
+```rust
+pub trait Guard: Send + Sync {
+    fn can_activate(&self, context: &Context) -> bool;
+}
+```
+
+### Interceptor
+
+```rust
+#[async_trait]
+pub trait Interceptor: Send + Sync {
+    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>);
+}
+```
+
+### Pipe
+
+```rust
+pub trait Pipe: Send + Sync {
+    fn process(&self, data: &mut Context);
+}
+```
+
+### ErrorHandler
+
+```rust
+#[async_trait]
+pub trait ErrorHandler: Send + Sync {
+    async fn handle_error(
+        &self,
+        error: Box<dyn std::error::Error + Send>,
+        request: &HttpRequest,
+    ) -> Option<HttpResponse>;
+}
+```
+
+### FromRequest
+
+```rust
+pub trait FromRequest: Sized {
+    type Error: std::fmt::Display;
+    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error>;
+}
+```
+
+### GatewayTrait
+
+```rust
+#[async_trait]
+pub trait GatewayTrait: Send + Sync {
+    fn path(&self) -> &str;
+    async fn on_connect(&self, client: &WsClient);
+    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason);
+    async fn on_message(&self, client: &WsClient, message: WsMessage);
+    // Optional:
+    async fn on_handshake(&self, handshake: &WsHandshake) -> bool { true }
+}
+```
+
+---
+
+## HttpResponse
+
+```rust
+// Builder pattern
+HttpResponse::ok()                    // 200 OK
+HttpResponse::created()               // 201 Created
+HttpResponse::no_content()            // 204 No Content
+HttpResponse::bad_request()           // 400 Bad Request
+HttpResponse::unauthorized()          // 401 Unauthorized
+HttpResponse::forbidden()             // 403 Forbidden
+HttpResponse::not_found()             // 404 Not Found
+HttpResponse::too_many_requests()     // 429 Too Many Requests
+HttpResponse::builder().status(n)     // custom status
+
+// Chained builder methods
+.json(value)                          // serialize as JSON, sets Content-Type
+.body(string)                         // raw string body
+.header(name, value)                  // add response header
+.build()                              // produce HttpResponse
+```
+
+---
+
+## HttpError
+
+```rust
+use toni::errors::HttpError;
+
+HttpError::bad_request(message)
+HttpError::unauthorized(message)
+HttpError::forbidden(message)
+HttpError::not_found(message)
+HttpError::conflict(message)
+HttpError::unprocessable_entity(message)
+HttpError::internal_server_error(message)
+HttpError::with_status(status: u16, message)
+
+http_error.status_code() -> u16
+```
+
+---
+
+## Extractors
+
+```rust
+use toni::extractors::{Path, Query, Json, Body, Bytes, Validated};
+
+// All implement FromRequest
+Path<T: DeserializeOwned>
+Query<T: DeserializeOwned>
+Json<T: DeserializeOwned>
+Body<T: DeserializeOwned>       // auto-detects JSON / form-encoded
+Bytes                            // raw Vec<u8>
+Validated<E: FromRequest + ValidatableExtractor>
+```

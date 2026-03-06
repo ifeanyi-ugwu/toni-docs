@@ -1,0 +1,36 @@
+---
+title: toni-axum
+description: API reference for the Axum adapter crate.
+---
+
+## AxumAdapter
+
+```rust
+use toni_axum::AxumAdapter;
+
+AxumAdapter::new() -> AxumAdapter
+```
+
+Pass to `ToniFactory::create` or `ToniFactory::create_with`:
+
+```rust
+let adapter = AxumAdapter::new();
+let mut app = ToniFactory::create(AppModule, adapter).await;
+app.listen(port, host).await;
+```
+
+## AxumWebSocketAdapter
+
+```rust
+use toni_axum::AxumWebSocketAdapter;
+
+AxumWebSocketAdapter::new() -> AxumWebSocketAdapter
+```
+
+Enable WebSocket support:
+
+```rust
+let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
+app.listen(3000, "127.0.0.1").await;
+```

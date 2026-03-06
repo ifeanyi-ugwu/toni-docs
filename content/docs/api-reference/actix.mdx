@@ -1,0 +1,23 @@
+---
+title: toni-actix
+description: API reference for the Actix-web adapter crate.
+---
+
+## ActixAdapter
+
+```rust
+use toni_actix::ActixAdapter;
+
+ActixAdapter::new() -> ActixAdapter
+ActixAdapter::new().workers(n: usize) -> ActixAdapter
+```
+
+Pass to `ToniFactory::create`:
+
+```rust
+let adapter = ActixAdapter::new().workers(4);
+let mut app = ToniFactory::create(AppModule, adapter).await;
+app.listen(8080, "0.0.0.0").await;
+```
+
+The API surface is identical to `toni-axum`. Switching adapters requires only changing the import and the `ActixAdapter::new()` call.

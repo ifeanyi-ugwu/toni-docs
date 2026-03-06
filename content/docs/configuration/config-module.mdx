@@ -1,0 +1,146 @@
+---
+title: Config Module
+description: Type-safe configuration management with toni-config.
+---
+
+The `toni-config` crate provides structured, type-safe configuration backed by environment variables. It integrates with the DI container so your configuration is injectable like any other service.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-config = "0.1"
+```
+
+## Defining a configuration struct
+
+Use the `Config` derive macro to create a typed configuration struct. Each field maps to an environment variable:
+
+```rust
+use toni_config::Config;
+
+#[derive(Config, Clone)]
+pub struct AppConfig {
+    #[env("PORT", default = "3000")]
+    pub port: u16,
+
+    #[env("HOST", default = "127.0.0.1")]
+    pub host: String,
+
+    #[env("DATABASE_URL")]
+    pub database_url: String,
+
+    #[env("JWT_SECRET")]
+    pub jwt_secret: String,
+
+    #[env("LOG_LEVEL", default = "info")]
+    pub log_level: String,
+}
+```
+
+Fields with `default` are optional — if the environment variable isn't set, the default value is used. Fields without `default` are required; the application panics at startup if they're missing.
+
+## Registering and injecting
+
+Register configuration as a provider using `provider_value!` (pre-loaded) or `provider_factory!` (loaded on demand):
+
+```rust
+use toni_config::Config;
+
+#[module(
+    providers: [
+        provider_value!("Config", AppConfig::load().expect("Invalid configuration")),
+    ],
+    exports: [
+        "Config",
+    ],
+)]
+pub struct ConfigModule;
+```
+
+Inject by token in services:
+
+```rust
+// Services inject the config by its token
+// (custom token injection syntax — see Provider Patterns)
+```
+
+## Nested configuration
+
+Group related settings into nested structs:
+
+```rust
+#[derive(Config, Clone)]
+pub struct DatabaseConfig {
+    #[env("DATABASE_URL")]
+    pub url: String,
+
+    #[env("DATABASE_POOL_SIZE", default = "10")]
+    pub pool_size: u32,
+
+    #[env("DATABASE_TIMEOUT_MS", default = "5000")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Config, Clone)]
+pub struct AppConfig {
+    #[env("PORT", default = "3000")]
+    pub port: u16,
+
+    #[nested]
+    pub database: DatabaseConfig,
+
+    #[nested]
+    pub auth: AuthConfig,
+}
+```
+
+## Validation
+
+Enable the `validation` feature to run `validator` crate validation on your config at startup:
+
+```toml
+[dependencies]
+toni-config = { version = "0.1", features = ["validation"] }
+validator = { version = "0.20", features = ["derive"] }
+```
+
+```rust
+use toni_config::Config;
+use validator::Validate;
+
+#[derive(Config, Clone, Validate)]
+pub struct AppConfig {
+    #[env("PORT", default = "3000")]
+    #[validate(range(min = 1024, max = 65535))]
+    pub port: u16,
+
+    #[env("DATABASE_URL")]
+    #[validate(url)]
+    pub database_url: String,
+
+    #[env("JWT_SECRET")]
+    #[validate(length(min = 32))]
+    pub jwt_secret: String,
+}
+
+// Load with validation
+let config = AppConfig::load_and_validate()?;
+```
+
+If any constraint fails, the error is reported at startup before the server begins listening.
+
+## Loading configuration
+
+`AppConfig::load()` reads environment variables from the process environment. To also load from a `.env` file, use the dotenv feature:
+
+```toml
+[dependencies]
+toni-config = { version = "0.1", features = ["dotenv"] }
+```
+
+```rust
+// .env file is loaded automatically when AppConfig::load() is called
+let config = AppConfig::load()?;
+```

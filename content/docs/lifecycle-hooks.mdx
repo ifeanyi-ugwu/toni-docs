@@ -1,0 +1,182 @@
+---
+title: Lifecycle Hooks
+description: Run code at specific points in the application and module lifecycle — initialization, startup, and shutdown.
+---
+
+Lifecycle hooks are methods on providers and modules that Toni calls at specific points during application startup and shutdown. They're declared with attribute macros inside `impl` blocks.
+
+<Bridge>
+These are the same lifecycle events as NestJS: `OnModuleInit`, `OnApplicationBootstrap`, `OnModuleDestroy`, `BeforeApplicationShutdown`, `OnApplicationShutdown`. Instead of implementing an interface, you annotate a method with the corresponding attribute.
+
+| NestJS interface | Toni attribute |
+|-----------------|----------------|
+| `OnModuleInit` → `onModuleInit()` | `#[on_module_init]` |
+| `OnApplicationBootstrap` → `onApplicationBootstrap()` | `#[on_application_bootstrap]` |
+| `OnModuleDestroy` → `onModuleDestroy()` | `#[on_module_destroy]` |
+| `BeforeApplicationShutdown` → `beforeApplicationShutdown(signal)` | `#[before_application_shutdown]` |
+| `OnApplicationShutdown` → `onApplicationShutdown(signal)` | `#[on_application_shutdown]` |
+</Bridge>
+
+## Available hooks
+
+### `#[on_module_init]`
+
+Runs after all providers in the module are instantiated and their dependencies resolved, but before the application starts accepting requests. Use it for setup that requires dependencies to be ready (database connections, cache warming).
+
+```rust
+#[injectable(pub struct DatabaseService { pool: Option<Pool> })]
+impl DatabaseService {
+    pub fn new() -> Self { Self { pool: None } }
+
+    #[on_module_init]
+    async fn connect(&self) {
+        let url = std::env::var("DATABASE_URL").unwrap();
+        // self.pool = Some(Pool::connect(&url).await.unwrap());
+        println!("Database connected");
+    }
+}
+```
+
+### `#[on_application_bootstrap]`
+
+Runs after all modules have initialized (all `on_module_init` hooks complete), just before the HTTP server starts listening. Use it for application-level setup that needs everything to be ready.
+
+```rust
+#[injectable(pub struct AppService {})]
+impl AppService {
+    pub fn new() -> Self { Self {} }
+
+    #[on_application_bootstrap]
+    async fn on_ready(&self) {
+        println!("Application ready to serve requests");
+    }
+}
+```
+
+### `#[on_module_destroy]`
+
+Runs at the start of the shutdown sequence. Use it for cleanup specific to this module's resources.
+
+```rust
+#[on_module_destroy]
+async fn cleanup(&self) {
+    println!("Flushing write buffer");
+    // flush queued writes, cancel background tasks, etc.
+}
+```
+
+### `#[before_application_shutdown]`
+
+Runs after `on_module_destroy`, receives the OS signal that triggered shutdown. Use it for graceful draining — stop accepting new work but finish in-flight work.
+
+```rust
+#[before_application_shutdown]
+async fn prepare_shutdown(&self, signal: Option<String>) {
+    println!("Received signal: {:?}", signal);
+    println!("Stop accepting new jobs");
+}
+```
+
+### `#[on_application_shutdown]`
+
+The final hook in the shutdown sequence. Runs after `before_application_shutdown`.
+
+```rust
+#[on_application_shutdown]
+async fn finalize(&self, _signal: Option<String>) {
+    println!("Final cleanup complete");
+}
+```
+
+## Execution order
+
+### Startup
+```
+1. All providers instantiated (new() called in dependency order)
+2. on_module_init — for each provider/module, module-by-module
+3. on_application_bootstrap — for all providers across all modules
+4. HTTP server starts listening
+```
+
+### Shutdown (triggered by SIGTERM, Ctrl+C, or app.close())
+```
+1. Stop accepting new connections
+2. on_module_destroy — for each provider
+3. before_application_shutdown(signal) — for each provider
+4. on_application_shutdown(signal) — for each provider
+5. Process exits
+```
+
+## Full example
+
+```rust
+#[injectable(pub struct CacheService {
+    connected: std::sync::atomic::AtomicBool,
+})]
+impl CacheService {
+    pub fn new() -> Self {
+        Self {
+            connected: std::sync::atomic::AtomicBool::new(false)
+        }
+    }
+
+    #[on_module_init]
+    async fn connect(&self) {
+        println!("Cache: connecting...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        println!("Cache: ready");
+    }
+
+    #[on_application_bootstrap]
+    async fn warm_up(&self) {
+        println!("Cache: warming up hot keys");
+    }
+
+    #[before_application_shutdown]
+    async fn drain(&self, signal: Option<String>) {
+        println!("Cache: stopping writes (signal: {:?})", signal);
+    }
+
+    #[on_application_shutdown]
+    async fn disconnect(&self, _signal: Option<String>) {
+        println!("Cache: connection closed");
+    }
+}
+```
+
+## Hooks on modules
+
+Module structs can also have hooks:
+
+```rust
+#[module(providers: [CacheService])]
+pub struct CacheModule;
+
+impl CacheModule {
+    #[on_module_init]
+    fn init(&self) {
+        println!("CacheModule initialized");
+    }
+}
+```
+
+## Triggering shutdown programmatically
+
+```rust
+let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+// ... after some condition ...
+app.close().await?;  // triggers the full shutdown hook sequence
+```
+
+## Standalone context
+
+When using `ToniFactory::create_application_context` (for CLI tools, workers, etc.), the same hooks run. Call `ctx.close()` to trigger the shutdown sequence:
+
+```rust
+let mut ctx = ToniFactory::create_application_context(AppModule).await;
+
+// do work...
+
+ctx.close().await?;  // triggers on_module_destroy, before_application_shutdown, on_application_shutdown
+```

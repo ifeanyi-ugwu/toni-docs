@@ -1,0 +1,106 @@
+---
+title: CLI Commands
+description: All toni-cli commands — new project creation and code generation.
+---
+
+## toni new
+
+Create a new Toni project from a starter template.
+
+```bash
+toni new <project-name>
+```
+
+**Example:**
+
+```bash
+toni new my_api
+cd my_api
+cargo run
+```
+
+The generated project includes:
+- `Cargo.toml` with `toni` and `toni-axum` dependencies
+- `src/main.rs` with `ToniFactory::create` setup
+- `src/app_module.rs` — root module
+- `src/app_controller.rs` — example controller with a `GET /` route
+- `src/app_service.rs` — example service
+
+## toni generate
+
+Generate boilerplate for common Toni components.
+
+```bash
+toni generate <type> <name>
+```
+
+### Subcommands
+
+```bash
+toni generate module UserModule
+# Creates: src/users/users_module.rs
+
+toni generate controller UserController
+# Creates: src/users/users_controller.rs
+
+toni generate service UserService
+# Creates: src/users/users_service.rs
+```
+
+The generated files include the appropriate `#[module]`, `#[controller]`, or `#[injectable]` attributes with placeholder implementations.
+
+### Example — generated service
+
+```bash
+toni generate service AuthService
+```
+
+Generates `src/auth/auth_service.rs`:
+
+```rust
+use toni::injectable;
+
+#[injectable(pub struct AuthService {})]
+impl AuthService {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+```
+
+### Example — generated controller
+
+```bash
+toni generate controller AuthController
+```
+
+Generates `src/auth/auth_controller.rs`:
+
+```rust
+use toni::{controller, HttpResponse};
+
+#[controller("/auth", pub struct AuthController {})]
+impl AuthController {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[get("")]
+    fn index(&self) -> HttpResponse {
+        HttpResponse::ok().build()
+    }
+}
+```
+
+## Planned commands
+
+The following commands are planned for future releases:
+
+| Command | Description |
+|---------|-------------|
+| `toni generate guard <name>` | Generate a Guard implementation |
+| `toni generate interceptor <name>` | Generate an Interceptor |
+| `toni generate middleware <name>` | Generate Middleware |
+| `toni generate pipe <name>` | Generate a Pipe |
+
+Track progress on the [GitHub repository](https://github.com/ifeanyi-ugwu/toni-rs).

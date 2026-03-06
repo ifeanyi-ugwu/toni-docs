@@ -1,0 +1,89 @@
+---
+title: Environment Variables
+description: Reading and managing environment variables in Toni applications.
+---
+
+Toni applications read configuration from environment variables. The `toni-config` crate automates this with typed structs (see [Config Module](/docs/configuration/config-module)), but you can also access environment variables directly.
+
+## Direct access
+
+```rust
+use std::env;
+
+let database_url = env::var("DATABASE_URL")
+    .expect("DATABASE_URL must be set");
+
+let port: u16 = env::var("PORT")
+    .unwrap_or_else(|_| "3000".to_string())
+    .parse()
+    .expect("PORT must be a valid port number");
+```
+
+## With dotenv
+
+For local development, use the `dotenv` crate to load a `.env` file:
+
+```toml
+[dependencies]
+dotenv = "0.15"
+```
+
+```rust
+dotenv::dotenv().ok();  // loads .env if it exists, silently ignores if missing
+let config = AppConfig::load()?;
+```
+
+## .env file format
+
+```bash
+# .env
+PORT=3000
+HOST=127.0.0.1
+DATABASE_URL=postgresql://localhost/myapp
+JWT_SECRET=super-secret-key-at-least-32-chars
+LOG_LEVEL=debug
+```
+
+## Environment-specific configuration
+
+A common pattern is to load a base config and then override specific values per environment:
+
+```bash
+# .env.development
+LOG_LEVEL=debug
+DATABASE_URL=postgresql://localhost/myapp_dev
+
+# .env.production
+LOG_LEVEL=error
+DATABASE_URL=postgresql://prod-server/myapp
+```
+
+```rust
+let env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+dotenv::from_filename(format!(".env.{env}")).ok();
+dotenv::dotenv().ok();  // base .env as fallback
+```
+
+## Provider value from environment
+
+Register environment-derived values directly in a module:
+
+```rust
+#[module(
+    providers: [
+        provider_value!(
+            "DATABASE_URL",
+            std::env::var("DATABASE_URL").expect("DATABASE_URL required")
+        ),
+        provider_value!(
+            "PORT",
+            std::env::var("PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse::<u16>()
+                .expect("PORT must be a number")
+        ),
+    ],
+    exports: ["DATABASE_URL", "PORT"],
+)]
+pub struct EnvModule;
+```

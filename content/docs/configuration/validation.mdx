@@ -1,0 +1,93 @@
+---
+title: Configuration Validation
+description: Validate configuration values at startup using the validator crate.
+---
+
+Configuration validation catches bad environment values before the server starts accepting requests. `toni-config` integrates with the `validator` crate via a feature flag.
+
+## Setup
+
+```toml
+[dependencies]
+toni-config = { version = "0.1", features = ["validation"] }
+validator = { version = "0.20", features = ["derive"] }
+```
+
+## Annotating configuration
+
+Combine `#[derive(Config)]` with `#[derive(Validate)]` and add `#[validate(...)]` constraints:
+
+```rust
+use toni_config::Config;
+use validator::Validate;
+
+#[derive(Config, Clone, Validate)]
+pub struct AppConfig {
+    #[env("PORT", default = "3000")]
+    #[validate(range(min = 1024, max = 65535))]
+    pub port: u16,
+
+    #[env("DATABASE_URL")]
+    #[validate(url)]
+    pub database_url: String,
+
+    #[env("JWT_SECRET")]
+    #[validate(length(min = 32))]
+    pub jwt_secret: String,
+
+    #[env("ALLOWED_ORIGINS")]  // comma-separated list
+    #[validate(length(min = 1))]
+    pub allowed_origins: String,
+
+    #[env("MAX_UPLOAD_MB", default = "10")]
+    #[validate(range(min = 1, max = 100))]
+    pub max_upload_mb: u32,
+}
+```
+
+## Loading with validation
+
+```rust
+fn main() {
+    dotenv::dotenv().ok();
+
+    let config = AppConfig::load_and_validate()
+        .expect("Invalid configuration — check environment variables");
+
+    // If we get here, all validations passed
+}
+```
+
+## Validation errors
+
+When validation fails, the error message lists every constraint violation:
+
+```
+Configuration error:
+  port: Value 80 is not in range [1024, 65535]
+  jwt_secret: Value must be at least 32 characters long
+```
+
+This makes configuration errors visible immediately at startup, not buried in runtime panics.
+
+## Custom validators
+
+Use `validator`'s custom validation support for constraints beyond the built-in ones:
+
+```rust
+use validator::ValidationError;
+
+fn validate_database_url(url: &str) -> Result<(), ValidationError> {
+    if !url.starts_with("postgresql://") && !url.starts_with("postgres://") {
+        return Err(ValidationError::new("must be a PostgreSQL URL"));
+    }
+    Ok(())
+}
+
+#[derive(Config, Clone, Validate)]
+pub struct AppConfig {
+    #[env("DATABASE_URL")]
+    #[validate(custom(function = "validate_database_url"))]
+    pub database_url: String,
+}
+```

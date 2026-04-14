@@ -12,12 +12,12 @@ ActixAdapter::new() -> ActixAdapter
 ActixAdapter::new().workers(n: usize) -> ActixAdapter
 ```
 
-Pass to `ToniFactory::create`:
+Pass to `app.use_http_adapter` after `ToniFactory::create`:
 
 ```rust
-let adapter = ActixAdapter::new().workers(4);
-let mut app = ToniFactory::create(AppModule, adapter).await;
-app.listen(8080, "0.0.0.0").await;
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(ActixAdapter::new().workers(4), 8080, "0.0.0.0").unwrap();
+app.start().await;
 ```
 
-The API surface is identical to `toni-axum`. Switching adapters requires only changing the import and the `ActixAdapter::new()` call.
+The API surface is identical to `toni-axum`. Switching adapters requires only changing the import and the adapter constructor call.

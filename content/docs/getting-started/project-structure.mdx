@@ -128,5 +128,6 @@ Register globally at startup:
 ```rust
 let mut factory = ToniFactory::new();
 factory.use_global_interceptors(Arc::new(LoggingInterceptor));
-let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+let mut app = factory.create_with(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
 ```

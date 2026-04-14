@@ -22,13 +22,13 @@ use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() {
-    let adapter = AxumAdapter::new();
-    let mut app = ToniFactory::create(AppModule, adapter).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 
-`AxumAdapter::new()` creates a default adapter with sensible settings. The adapter is passed to `ToniFactory::create`, which uses it to register all routes from the module tree.
+`AxumAdapter::new()` creates a default adapter. `use_http_adapter` registers all routes from the module tree onto it, then `start()` begins listening.
 
 ## With global middleware and configuration
 
@@ -46,22 +46,22 @@ async fn main() {
         .use_global_guards(Arc::new(ThrottleGuard::default()))
         .use_global_error_handler(Arc::new(GlobalErrorHandler));
 
-    let adapter = AxumAdapter::new();
-    let mut app = factory.create_with(AppModule, adapter).await;
-    app.listen(3000, "0.0.0.0").await;
+    let mut app = factory.create_with(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+    app.start().await;
 }
 ```
 
 ## WebSocket support
 
-`toni-axum` supports WebSocket gateways out of the box. See [WebSocket Gateways](/docs/websocket/gateways) for how to define gateways. The adapter handles the Axum WebSocket upgrade automatically.
+`toni-axum` supports WebSocket gateways out of the box. See [WebSocket Gateways](/docs/websocket/gateways) for how to define gateways. WebSocket upgrade routes are wired onto the same HTTP port automatically — no separate adapter needed for the common case.
 
 ```rust
-use toni_axum::AxumWebSocketAdapter;
-
-let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
-app.listen(3000, "127.0.0.1").await;
+// Gateways annotated with #[websocket_gateway] are discovered automatically.
+// Just register the HTTP adapter and call start():
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.start().await;
 ```
 
 ## Environment variables
@@ -76,8 +76,9 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-            app.listen(3000, "0.0.0.0").await;
+            let mut app = ToniFactory::create(AppModule).await;
+            app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+            app.start().await;
         });
 }
 ```

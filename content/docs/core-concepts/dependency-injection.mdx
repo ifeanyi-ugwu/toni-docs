@@ -65,7 +65,8 @@ This scoping is enforced at startup. Attempting to inject a provider that isn't 
 After the application is created, you can pull instances directly from the container. This is useful for scripting, CLI tools, and testing.
 
 ```rust
-let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
 
 // Get by type
 let users_service = app.get::<UsersService>().await?;

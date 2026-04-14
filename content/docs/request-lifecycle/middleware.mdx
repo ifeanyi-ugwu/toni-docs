@@ -169,8 +169,9 @@ async fn main() {
     factory.use_global_middleware(Arc::new(LoggerMiddleware));
     factory.use_global_middleware(Arc::new(CorsMiddleware { allowed_origins: vec!["*".into()] }));
 
-    let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = factory.create_with(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 

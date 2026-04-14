@@ -22,9 +22,9 @@ use toni_actix::ActixAdapter;
 
 #[tokio::main]
 async fn main() {
-    let adapter = ActixAdapter::new();
-    let mut app = ToniFactory::create(AppModule, adapter).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(ActixAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 

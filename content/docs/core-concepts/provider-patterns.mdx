@@ -47,11 +47,28 @@ pub struct AppModule;
 
 The first argument is the token name (any string). The second is any Rust value that satisfies the provider's type requirements.
 
-Inject by token in a service:
+Inject by token in a service field using the `#[inject("TOKEN")]` attribute:
 
 ```rust
-// TODO: token injection syntax for fields — see below
+#[injectable(pub struct AppService {
+    #[inject("APP_NAME")]
+    name: String,
+
+    #[inject("PORT")]
+    port: u16,
+
+    // You can also inject a type-registered provider by its token
+    #[inject("PRIMARY_DB")]
+    db: DatabaseService,
+})]
+impl AppService {
+    pub fn new(name: String, port: u16, db: DatabaseService) -> Self {
+        Self { name, port, db }
+    }
+}
 ```
+
+When no token is specified, `#[inject]` resolves by the field's type name. The `#[inject("TOKEN")]` form resolves by the explicit token string.
 
 ## Factory providers
 

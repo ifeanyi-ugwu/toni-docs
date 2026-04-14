@@ -91,12 +91,12 @@ async fn start_heartbeat(broadcast: BroadcastService) {
 
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-    app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
 
     let broadcast = app.get::<BroadcastService>().await.unwrap();
     tokio::spawn(start_heartbeat(broadcast));
 
-    app.listen(3000, "127.0.0.1").await;
+    app.start().await;
 }
 ```

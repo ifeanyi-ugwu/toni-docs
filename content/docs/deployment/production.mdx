@@ -42,10 +42,11 @@ Toni handles SIGTERM and SIGINT signals and runs the shutdown hook sequence (`on
 For production, listen on `0.0.0.0` (all interfaces) rather than `127.0.0.1` (loopback only):
 
 ```rust
-app.listen(8080, "0.0.0.0").await;
+app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+app.start().await;
 ```
 
-Or read the host from configuration:
+Or read the host and port from configuration:
 
 ```rust
 let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -54,7 +55,8 @@ let port: u16 = std::env::var("PORT")
     .parse()
     .expect("PORT must be a number");
 
-app.listen(port, &host).await;
+app.use_http_adapter(AxumAdapter::new(), port, &host).unwrap();
+app.start().await;
 ```
 
 ## Systemd service
@@ -95,8 +97,9 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-            app.listen(8080, "0.0.0.0").await;
+            let mut app = ToniFactory::create(AppModule).await;
+            app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+            app.start().await;
         });
 }
 ```

@@ -164,7 +164,8 @@ impl CacheModule {
 ## Triggering shutdown programmatically
 
 ```rust
-let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
 // ... after some condition ...
 app.close().await?;  // triggers the full shutdown hook sequence
 ```

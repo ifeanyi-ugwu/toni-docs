@@ -11,26 +11,29 @@ use toni_axum::AxumAdapter;
 AxumAdapter::new() -> AxumAdapter
 ```
 
-Pass to `ToniFactory::create` or `ToniFactory::create_with`:
+Pass to `app.use_http_adapter` after `ToniFactory::create`:
 
 ```rust
-let adapter = AxumAdapter::new();
-let mut app = ToniFactory::create(AppModule, adapter).await;
-app.listen(port, host).await;
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.start().await;
 ```
 
-## AxumWebSocketAdapter
+`AxumAdapter` also handles WebSocket upgrades on the same port. Gateway routes annotated with `#[websocket_gateway]` are wired automatically when `start()` is called — no separate WebSocket adapter is needed.
+
+## Separate-port WebSocket
+
+If you need WebSocket on a different port than HTTP, register a second `AxumAdapter` as the WebSocket adapter:
 
 ```rust
-use toni_axum::AxumWebSocketAdapter;
-
-AxumWebSocketAdapter::new() -> AxumWebSocketAdapter
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+app.use_websocket_adapter(AxumAdapter::new()).unwrap();
+app.start().await;
 ```
 
-Enable WebSocket support:
+Then annotate the gateway with a port:
 
 ```rust
-let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
-app.listen(3000, "127.0.0.1").await;
+#[websocket_gateway("/chat", port = 4000, pub struct ChatGateway {})]
 ```

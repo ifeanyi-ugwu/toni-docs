@@ -3,89 +3,87 @@ title: WebSocket Gateways
 description: Building real-time WebSocket handlers with Toni's gateway system.
 ---
 
-WebSocket connections in Toni are handled through **gateways** — structs that implement the `GatewayTrait` and handle connection lifecycle events and messages. Gateways are registered in the DI container like any other provider, so they have full access to injected services.
+WebSocket connections in Toni are handled through **gateways** — structs annotated with `#[websocket_gateway]` that handle connection lifecycle events and messages. Gateways live in the DI container like any other provider, so they have full access to injected services.
 
 <Bridge>
-Toni gateways map directly to NestJS WebSocket gateways. Instead of `@WebSocketGateway()` and `@SubscribeMessage()`, you implement the `GatewayTrait` and use the message handling API. The concepts — server-side events, broadcasting, rooms — are identical.
+Toni gateways map directly to NestJS `@WebSocketGateway()`. Instead of `@SubscribeMessage()` decorators you use `#[subscribe_message("event")]` on async methods. The runtime concepts — broadcasting, rooms, guards — are identical.
 </Bridge>
 
 ## Enabling WebSocket support
 
-Use the WebSocket adapter alongside your HTTP adapter:
+WebSocket routes share the same port as HTTP by default. Register your HTTP adapter and Toni wires WebSocket upgrade routes onto it automatically:
 
 ```rust
 use toni::ToniFactory;
-use toni_axum::{AxumAdapter, AxumWebSocketAdapter};
+use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-    app.use_websocket_adapter(AxumWebSocketAdapter::new()).unwrap();
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 8080, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 
-## The GatewayTrait
+No separate WebSocket adapter is needed for the common case. If you need WebSocket on a different port than HTTP, call `use_websocket_adapter()` with a separate `AxumAdapter`.
+
+## Defining a gateway
+
+Use the `#[websocket_gateway]` macro with the connection path and an optional struct body for injected fields:
 
 ```rust
-use toni::async_trait;
-use toni::websocket::{GatewayTrait, WsClient, WsMessage};
+use toni::*;
+use toni_macros::{module, websocket_gateway};
 
-#[async_trait]
-pub trait GatewayTrait: Send + Sync {
-    fn path(&self) -> &str;
-    async fn on_connect(&self, client: &WsClient);
-    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason);
-    async fn on_message(&self, client: &WsClient, message: WsMessage);
-}
-```
-
-## Basic chat gateway
-
-```rust
-use toni::{injectable, async_trait};
-use toni::websocket::{GatewayTrait, WsClient, WsMessage, DisconnectReason};
-
-#[injectable(pub struct ChatGateway {})]
-impl ChatGateway {
+#[websocket_gateway("/chat", pub struct EchoGateway {})]
+impl EchoGateway {
     pub fn new() -> Self { Self {} }
+
+    #[subscribe_message("message")]
+    async fn handle_message(
+        &self,
+        client: WsClient,
+        message: WsMessage,
+    ) -> Result<Option<WsMessage>, WsError> {
+        let text = message
+            .as_text()
+            .ok_or_else(|| WsError::InvalidMessage("Expected text".into()))?;
+
+        println!("[{}] {}", client.id, text);
+        Ok(Some(WsMessage::text(format!("Echo: {text}"))))
+    }
+
+    #[subscribe_message("ping")]
+    async fn handle_ping(
+        &self,
+        _client: WsClient,
+        _message: WsMessage,
+    ) -> Result<Option<WsMessage>, WsError> {
+        Ok(Some(WsMessage::text("pong")))
+    }
 }
 
-#[async_trait]
-impl GatewayTrait for ChatGateway {
-    fn path(&self) -> &str {
-        "/chat"
-    }
-
-    async fn on_connect(&self, client: &WsClient) {
-        println!("Client {} connected", client.id());
-        client.send(WsMessage::text("Welcome to the chat!")).await;
-    }
-
-    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason) {
-        println!("Client {} disconnected: {:?}", client.id(), reason);
-    }
-
-    async fn on_message(&self, client: &WsClient, message: WsMessage) {
-        if let Some(text) = message.as_text() {
-            println!("Message from {}: {}", client.id(), text);
-            // Echo back
-            client.send(WsMessage::text(format!("You said: {text}"))).await;
-        }
-    }
-}
+#[module(providers: [EchoGateway])]
+struct AppModule;
 ```
 
-## WsClient API
+Each `#[subscribe_message("event")]` method handles one named event type. The client sends:
 
-`WsClient` represents an individual connected client:
+```json
+{"event": "message", "data": "Hello"}
+{"event": "ping"}
+```
+
+## WsClient
+
+`WsClient` carries connection metadata for the current client:
 
 ```rust
-client.id()                          // unique client identifier
-client.send(WsMessage).await         // send a message to this client
-client.close().await                 // close the connection
-client.get_metadata::<T>()           // retrieve typed metadata (set during handshake)
+client.id          // unique client identifier (String field, not a method)
+client.headers     // HTTP handshake headers
 ```
+
+To send a message back to the caller, return `Ok(Some(WsMessage))` from the handler. Returning `Ok(None)` sends nothing.
 
 ## WsMessage types
 
@@ -98,38 +96,84 @@ WsMessage::pong()                    // pong control frame
 
 ## Registering a gateway
 
-Gateways are regular providers. List them in a module:
+Gateways are regular DI providers. List them in a module's `providers`:
 
 ```rust
-#[module(
-    providers: [ChatGateway],
-)]
+#[module(providers: [ChatGateway])]
 pub struct ChatModule;
 ```
 
-Toni automatically detects that `ChatGateway` implements `GatewayTrait` and registers it with the WebSocket adapter.
+Toni discovers that `ChatGateway` was annotated with `#[websocket_gateway]` and registers the upgrade route automatically when `start()` is called.
 
-## Authentication via handshake
+## Dependency injection in gateways
 
-Access the HTTP handshake request to authenticate connections before they're established:
+Declare injected services as fields in the struct body of the macro:
 
 ```rust
-use toni::websocket::{GatewayTrait, WsHandshake};
-
-#[async_trait]
-impl GatewayTrait for SecureGateway {
-    fn path(&self) -> &str { "/secure" }
-
-    async fn on_handshake(&self, handshake: &WsHandshake) -> bool {
-        // Return false to reject the connection
-        handshake.headers
-            .get("authorization")
-            .map(|h| self.auth_service.verify(h))
-            .unwrap_or(false)
+#[websocket_gateway("/chat", pub struct ChatGateway {
+    #[inject]
+    message_service: MessageService,
+})]
+impl ChatGateway {
+    pub fn new(message_service: MessageService) -> Self {
+        Self { message_service }
     }
 
-    async fn on_connect(&self, client: &WsClient) { /* ... */ }
-    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason) { /* ... */ }
-    async fn on_message(&self, client: &WsClient, message: WsMessage) { /* ... */ }
+    #[subscribe_message("message")]
+    async fn on_message(
+        &self,
+        client: WsClient,
+        msg: WsMessage,
+    ) -> Result<Option<WsMessage>, WsError> {
+        if let Some(text) = msg.as_text() {
+            self.message_service.store(&client.id, text).await;
+        }
+        Ok(None)
+    }
 }
 ```
+
+## Error handling in handlers
+
+Return `Err(WsError)` to signal an error. Toni sends the error as a JSON text frame and continues — it does not close the connection unless the error is `WsError::ConnectionClosed` or `WsError::AuthFailed`:
+
+```rust
+#[subscribe_message("create")]
+async fn create(
+    &self,
+    _client: WsClient,
+    msg: WsMessage,
+) -> Result<Option<WsMessage>, WsError> {
+    let text = msg
+        .as_text()
+        .ok_or_else(|| WsError::InvalidMessage("Expected text payload".into()))?;
+
+    // ... handle message
+    Ok(Some(WsMessage::text("created")))
+}
+```
+
+## Multiple event types
+
+A gateway can subscribe to as many events as needed:
+
+```rust
+#[websocket_gateway("/notifications", pub struct NotificationGateway {})]
+impl NotificationGateway {
+    #[subscribe_message("subscribe")]
+    async fn subscribe(&self, client: WsClient, msg: WsMessage)
+        -> Result<Option<WsMessage>, WsError> { /* ... */ Ok(None) }
+
+    #[subscribe_message("unsubscribe")]
+    async fn unsubscribe(&self, client: WsClient, msg: WsMessage)
+        -> Result<Option<WsMessage>, WsError> { /* ... */ Ok(None) }
+
+    #[subscribe_message("ping")]
+    async fn ping(&self, _client: WsClient, _msg: WsMessage)
+        -> Result<Option<WsMessage>, WsError> {
+        Ok(Some(WsMessage::text("pong")))
+    }
+}
+```
+
+See [Broadcasting](/docs/websocket/broadcasting) for sending messages to other clients and [Rooms](/docs/websocket/rooms) for group messaging.

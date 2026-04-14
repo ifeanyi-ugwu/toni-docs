@@ -48,10 +48,11 @@ use toni_axum::AxumAdapter;
 
 async fn start_test_server() -> String {
     let port = find_free_port();
-    let mut app = ToniFactory::create(TestModule, AxumAdapter::new()).await;
+    let mut app = ToniFactory::create(TestModule).await;
+    app.use_http_adapter(AxumAdapter::new(), port, "127.0.0.1").unwrap();
 
     tokio::spawn(async move {
-        app.listen(port, "127.0.0.1").await;
+        app.start().await;
     });
 
     // Give the server a moment to start

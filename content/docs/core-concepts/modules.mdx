@@ -76,8 +76,9 @@ pub struct AppModule;
 // main.rs
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 
@@ -108,15 +109,13 @@ Now every module that's part of the app has access to `LoggerService`, `ConfigSe
 
 ## Lifecycle hooks on modules
 
-You can attach lifecycle callbacks directly to the module struct using `#[on_module_init]` and `#[on_application_bootstrap]`:
+You can attach lifecycle callbacks directly to the module by switching from `pub struct` to `impl` and declaring the hooks inside that block:
 
 ```rust
 #[module(
     providers: [DatabaseService],
     exports: [DatabaseService],
 )]
-pub struct DatabaseModule;
-
 impl DatabaseModule {
     #[on_module_init]
     fn init(&self) {
@@ -124,6 +123,8 @@ impl DatabaseModule {
     }
 }
 ```
+
+Module-level hooks are synchronous and run before the provider hooks of the same phase.
 
 See [Lifecycle Hooks](/docs/lifecycle-hooks) for the full sequence.
 

@@ -41,7 +41,7 @@ pub trait HttpAdapter: Send + Sync {
 }
 ```
 
-Toni calls `register_route` for each resolved route during startup, then calls `listen` when `app.listen(port, host)` is invoked. The adapter translates Toni's routing abstractions into the underlying server's format.
+Toni calls `register_route` for each resolved route when `use_http_adapter` is called, then starts serving when `app.start()` is invoked. The adapter translates Toni's routing abstractions into the underlying server's format.
 
 <Bridge>
 NestJS's platform adapters (`@nestjs/platform-express`, `@nestjs/platform-fastify`) serve the same purpose. The difference is that Toni's adapter is a compile-time type parameter — `ToniApplication<AxumAdapter>` vs `ToniApplication<ActixAdapter>` — rather than a runtime configuration.

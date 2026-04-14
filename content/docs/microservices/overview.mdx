@@ -1,0 +1,79 @@
+---
+title: Microservices Overview
+description: How Toni handles inter-service communication through pluggable transport adapters and pattern-matched message routing.
+---
+
+Toni supports microservice communication through an **RPC transport layer** that is completely decoupled from HTTP. The same module and DI system used for HTTP controllers applies to RPC — services share one container, controllers get injected dependencies, lifecycle hooks run the same way.
+
+<Bridge>
+This maps directly to NestJS microservices. Where NestJS uses `@MessagePattern()` and `@EventPattern()` on `@Controller()`-decorated classes, Toni uses `#[message_pattern]` and `#[event_pattern]` on structs annotated with `#[rpc_controller]`. Transport choice is a single constructor call rather than a factory option object.
+</Bridge>
+
+## How it works
+
+An RPC application runs alongside (or instead of) an HTTP server. After creating the application, register a transport adapter and start:
+
+```rust
+use toni::ToniFactory;
+use toni_tcp::TcpAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+    app.start().await;
+}
+```
+
+You can run HTTP and RPC on the same application instance:
+
+```rust
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+app.start().await;
+```
+
+## Message routing
+
+Each RPC controller method is bound to a **pattern** — a string that identifies the operation. Inbound messages are dispatched to the handler whose pattern matches the message's `pattern` field.
+
+Two handler types exist:
+
+| Annotation | Direction | Handler return |
+|---|---|---|
+| `#[message_pattern("op")]` | Request-response | `Result<RpcData, RpcError>` — reply is sent back |
+| `#[event_pattern("op")]` | Fire-and-forget | `Result<(), RpcError>` — no reply |
+
+## Calling remote services
+
+To call another service from within a handler or service, inject an `RpcClient` and use `send` (request-response) or `emit` (fire-and-forget):
+
+```rust
+use toni::{RpcClient, RpcData};
+use toni_tcp::TcpClientTransport;
+
+// In a module's providers list:
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(TcpClientTransport::new("127.0.0.1", 4000))
+)
+```
+
+```rust
+#[injectable(pub struct InventoryService {
+    #[inject("ORDERS_CLIENT")]
+    orders: RpcClient,
+})]
+impl InventoryService {
+    pub async fn get_order(&self, id: u64) -> anyhow::Result<serde_json::Value> {
+        let reply = self.orders.send("order.get", RpcData::json(serde_json::json!({ "id": id }))).await?;
+        Ok(reply.as_json().cloned().unwrap_or_default())
+    }
+}
+```
+
+## Available transports
+
+- [TCP Adapter](/docs/microservices/tcp-adapter) — newline-delimited JSON over a raw TCP connection
+- [NATS Adapter](/docs/microservices/nats-adapter) — NATS subjects as patterns, inbox-based request-response

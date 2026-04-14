@@ -14,8 +14,8 @@ use toni::ToniFactory;
 ### Associated functions
 
 ```rust
-// Create an HTTP application (most common)
-ToniFactory::create(module, adapter) -> ToniApplication<A>
+// Create an application (shorthand — no factory config needed)
+ToniFactory::create(module) -> ToniApplication
 
 // Create a standalone DI context (no HTTP server)
 ToniFactory::create_application_context(module) -> ToniApplicationContext
@@ -23,7 +23,7 @@ ToniFactory::create_application_context(module) -> ToniApplicationContext
 
 ### Methods (on instance)
 
-Create a factory with global enhancers:
+Create a factory with global enhancers, then create the app:
 
 ```rust
 let mut factory = ToniFactory::new();
@@ -34,28 +34,34 @@ factory
     .use_global_pipes(Arc::new(impl_pipe))
     .use_global_error_handler(Arc::new(impl_error_handler));
 
-let mut app = factory.create_with(AppModule, AxumAdapter::new()).await;
+let mut app = factory.create_with(AppModule).await;
 let mut ctx = factory.create_application_context_with(AppModule).await;
 ```
 
 ---
 
-## ToniApplication\<A\>
+## ToniApplication
 
 The running application instance returned by `ToniFactory::create`.
 
 ```rust
-// Start listening
-app.listen(port: u16, hostname: &str) -> !
+// Register the HTTP adapter and route tree
+app.use_http_adapter(adapter, port: u16, hostname: &str) -> Result<&mut Self>
+
+// Register an RPC transport (TCP, NATS, etc.)
+app.use_rpc_adapter(adapter) -> Result<&mut Self>
+
+// Register a separate-port WebSocket adapter (optional — same-port WS uses the HTTP adapter)
+app.use_websocket_adapter(ws_adapter) -> Result<&mut Self>
+
+// Start all registered servers (HTTP, WS, RPC)
+app.start() -> !
 
 // Get a provider by type
 app.get::<T>() -> Result<T>
 app.get_from::<T>(module_token: &str) -> Result<T>
 app.get_by_token::<T>(token: impl IntoToken) -> Result<T>
 app.get_from_by_token::<T>(module_token: &str, token: impl IntoToken) -> Result<T>
-
-// Enable WebSocket
-app.use_websocket_adapter(ws_adapter) -> Result<&mut Self>
 
 // Trigger shutdown lifecycle
 app.close() -> Result<()>
@@ -193,4 +199,84 @@ Json<T: DeserializeOwned>
 Body<T: DeserializeOwned>       // auto-detects JSON / form-encoded
 Bytes                            // raw Vec<u8>
 Validated<E: FromRequest + ValidatableExtractor>
+```
+
+---
+
+## RpcData
+
+```rust
+use toni::RpcData;
+
+// Constructors
+RpcData::json(serde_json::Value)
+RpcData::text(impl Into<String>)
+RpcData::binary(Vec<u8>)
+
+// Accessors
+data.as_json()    -> Option<&serde_json::Value>
+data.as_text()    -> Option<&str>
+data.as_binary()  -> Option<&[u8]>
+
+// Typed deserialization (JSON across all variants)
+data.parse::<T>() -> Result<T, serde_json::Error>
+
+// Build from a serializable type
+RpcData::from_serialize(&value) -> Result<RpcData, serde_json::Error>
+```
+
+---
+
+## RpcError
+
+```rust
+use toni::RpcError;
+
+RpcError::PatternNotFound(String)   // unregistered pattern
+RpcError::Forbidden(String)         // guard rejected
+RpcError::Internal(String)          // handler error
+```
+
+---
+
+## RpcContext
+
+```rust
+use toni::RpcContext;
+
+ctx.pattern                          // matched pattern string
+ctx.metadata                         // HashMap<String, String>
+ctx.get_metadata(key: &str)          // Option<&str>
+```
+
+---
+
+## RpcClient
+
+```rust
+use toni::RpcClient;
+
+RpcClient::new(transport: impl RpcClientTransport) -> RpcClient
+
+// Request-response
+client.send(pattern, data: RpcData) -> Result<RpcData, RpcClientError>
+client.send_json::<T, R>(pattern, data: &T) -> Result<R, RpcClientError>
+
+// Fire-and-forget
+client.emit(pattern, data: RpcData) -> Result<(), RpcClientError>
+client.emit_json::<T>(pattern, data: &T) -> Result<(), RpcClientError>
+
+// Lifecycle
+client.connect() -> Result<(), RpcClientError>   // eager connect (optional)
+client.close()   -> Result<(), RpcClientError>   // flush and close
+```
+
+`RpcClient` is `Clone` — the inner transport is behind an `Arc`.
+
+### RpcClientError
+
+```rust
+RpcClientError::Transport(String)
+RpcClientError::Timeout
+RpcClientError::Remote { message: String, status: String }
 ```

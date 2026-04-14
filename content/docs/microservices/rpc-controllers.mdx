@@ -1,0 +1,247 @@
+---
+title: RPC Controllers
+description: Defining message handlers with #[rpc_controller], #[message_pattern], and #[event_pattern].
+---
+
+RPC controllers are the microservice equivalent of HTTP controllers. They group pattern-matched message handlers and live in the DI container like any other provider.
+
+<Bridge>
+
+| NestJS | Toni |
+|--------|------|
+| `@Controller()` class with `@MessagePattern()` | `#[rpc_controller]` struct with `#[message_pattern]` |
+| `@EventPattern()` method | `#[event_pattern]` method |
+| `MessagePattern` payload type | `RpcData` |
+| `RpcException` | `RpcError` |
+
+</Bridge>
+
+## Defining a controller
+
+The `#[rpc_controller]` macro wraps a struct definition. Injected dependencies are declared as fields:
+
+```rust
+use toni::*;
+use toni_macros::rpc_controller;
+
+#[rpc_controller(pub struct OrdersController {
+    #[inject]
+    service: OrdersService,
+})]
+impl OrdersController {
+    pub fn new(service: OrdersService) -> Self {
+        Self { service }
+    }
+}
+```
+
+Register it in a module just like any other provider:
+
+```rust
+#[module(
+    providers: [OrdersService, OrdersController],
+)]
+pub struct OrdersModule;
+```
+
+## Request-response handlers
+
+`#[message_pattern]` marks a method that expects a reply. The handler receives the incoming payload as `RpcData` and an `RpcContext` with transport metadata. Return `Ok(RpcData)` to send the reply, or `Err(RpcError)` to send an error envelope:
+
+```rust
+#[message_pattern("order.create")]
+async fn create_order(
+    &self,
+    data: RpcData,
+    _ctx: RpcContext,
+) -> Result<RpcData, RpcError> {
+    let payload: CreateOrderDto = data
+        .parse()
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+    let order = self.service.create(payload).await
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+    RpcData::from_serialize(&order)
+        .map_err(|e| RpcError::Internal(e.to_string()))
+}
+
+#[message_pattern("order.get")]
+async fn get_order(
+    &self,
+    data: RpcData,
+    _ctx: RpcContext,
+) -> Result<RpcData, RpcError> {
+    let id: u64 = data
+        .parse()
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+    let order = self.service.find(id).await
+        .ok_or_else(|| RpcError::PatternNotFound(format!("order {id}")))?;
+
+    RpcData::from_serialize(&order)
+        .map_err(|e| RpcError::Internal(e.to_string()))
+}
+```
+
+## Fire-and-forget handlers
+
+`#[event_pattern]` marks a method that handles events with no reply. Return `Ok(())` on success or `Err(RpcError)` if processing fails (the error is logged but no reply is sent):
+
+```rust
+#[event_pattern("order.shipped")]
+async fn on_order_shipped(
+    &self,
+    data: RpcData,
+    _ctx: RpcContext,
+) -> Result<(), RpcError> {
+    let order_id: u64 = data
+        .parse()
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+    self.service.mark_shipped(order_id).await
+        .map_err(|e| RpcError::Internal(e.to_string()))
+}
+```
+
+## RpcData
+
+`RpcData` is the message payload carrier. It has three variants:
+
+```rust
+RpcData::Json(serde_json::Value)
+RpcData::Text(String)
+RpcData::Binary(Vec<u8>)
+```
+
+Constructors:
+
+```rust
+RpcData::json(serde_json::json!({ "key": "value" }))
+RpcData::text("hello")
+RpcData::binary(vec![0u8, 1, 2])
+```
+
+Reading the payload:
+
+```rust
+data.as_json()    // Option<&serde_json::Value>
+data.as_text()    // Option<&str>
+data.as_binary()  // Option<&[u8]>
+
+// Deserialize into a concrete type (JSON across all variants):
+let dto: CreateOrderDto = data.parse()?;
+```
+
+Building a reply payload from a serializable type:
+
+```rust
+let reply = RpcData::from_serialize(&order)?;
+```
+
+## RpcContext
+
+`RpcContext` carries transport metadata for the current message:
+
+```rust
+ctx.pattern              // the matched pattern string
+ctx.metadata             // HashMap<String, String> — transport headers/properties
+ctx.get_metadata("key")  // Option<&str>
+```
+
+## RpcError
+
+```rust
+RpcError::PatternNotFound(String)   // 404-equivalent — pattern not registered
+RpcError::Forbidden(String)         // guard rejected the message
+RpcError::Internal(String)          // handler error
+```
+
+Errors are serialized into a transport-specific error envelope and returned to the caller (for `#[message_pattern]`) or logged (for `#[event_pattern]`).
+
+## RpcClient — calling remote services
+
+To send messages from one service to another, inject an `RpcClient`. Construct one with any client transport and register it as a provider:
+
+```rust
+use toni::RpcClient;
+use toni_tcp::TcpClientTransport;
+
+#[module(
+    providers: [
+        OrdersService,
+        provider_value!(
+            "INVENTORY_CLIENT",
+            RpcClient::new(TcpClientTransport::new("127.0.0.1", 4001))
+        ),
+    ],
+)]
+pub struct OrdersModule;
+```
+
+Inject into a service:
+
+```rust
+#[injectable(pub struct OrdersService {
+    #[inject("INVENTORY_CLIENT")]
+    inventory: RpcClient,
+})]
+impl OrdersService {
+    pub async fn check_stock(&self, item_id: u64) -> Result<bool, RpcClientError> {
+        let reply = self.inventory
+            .send("inventory.check", RpcData::json(serde_json::json!({ "id": item_id })))
+            .await?;
+        let available: bool = reply.parse()?;
+        Ok(available)
+    }
+
+    pub async fn notify_restock(&self, item_id: u64) -> Result<(), RpcClientError> {
+        self.inventory
+            .emit("inventory.restock", RpcData::json(serde_json::json!({ "id": item_id })))
+            .await
+    }
+}
+```
+
+### Typed helpers
+
+`send_json` and `emit_json` serialize the input and deserialize the response automatically:
+
+```rust
+// Sends payload as JSON, deserializes response into StockStatus
+let status: StockStatus = self.inventory
+    .send_json("inventory.status", &CheckRequest { item_id })
+    .await?;
+
+// Emits payload as JSON, returns ()
+self.inventory
+    .emit_json("inventory.restock", &RestockRequest { item_id, qty: 100 })
+    .await?;
+```
+
+### RpcClientError
+
+```rust
+RpcClientError::Transport(String)              // connection or I/O error
+RpcClientError::Timeout                        // reply did not arrive within the timeout
+RpcClientError::Remote { message, status }     // the remote handler returned RpcError
+```
+
+### Eager connection
+
+By default transports connect lazily on the first `send` or `emit`. To surface connection failures at startup, call `connect()` in a lifecycle hook:
+
+```rust
+#[injectable(pub struct OrdersService {
+    #[inject("INVENTORY_CLIENT")]
+    inventory: RpcClient,
+})]
+impl OrdersService {
+    #[on_application_bootstrap]
+    async fn connect(&self) {
+        if let Err(e) = self.inventory.connect().await {
+            tracing::error!("Failed to connect to inventory service: {e}");
+        }
+    }
+}
+```

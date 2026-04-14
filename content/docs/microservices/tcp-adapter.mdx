@@ -1,0 +1,140 @@
+---
+title: TCP Adapter
+description: Newline-delimited JSON over raw TCP connections — server and client transport setup.
+---
+
+The TCP adapter runs a raw TCP server that speaks a simple newline-delimited JSON protocol. It requires no message broker and has no external dependencies beyond Tokio.
+
+## Server setup
+
+Add the dependency:
+
+```toml
+[dependencies]
+toni = "0.1"
+toni-tcp = "0.1"
+```
+
+Register the adapter after creating the application:
+
+```rust
+use toni::ToniFactory;
+use toni_tcp::TcpAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+    app.start().await;
+}
+```
+
+Running alongside an HTTP server:
+
+```rust
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+app.start().await;
+```
+
+## Wire protocol
+
+All frames are newline-terminated JSON objects (`\n` delimiter).
+
+### Request-response (inbound)
+
+```json
+{"pattern": "order.create", "data": {"item": "book", "qty": 2}, "id": "42"}
+```
+
+The `id` field correlates the reply to the original request. The server sends one response frame per request:
+
+```json
+{"id": "42", "response": {"orderId": 1001}}
+```
+
+On handler error:
+
+```json
+{"id": "42", "err": {"message": "out of stock", "status": "Internal"}}
+```
+
+### Fire-and-forget (inbound)
+
+Omit the `id` field. The server processes the message and sends no reply:
+
+```json
+{"pattern": "order.shipped", "data": {"orderId": 1001}}
+```
+
+## Client transport
+
+Use `TcpClientTransport` to connect to a remote TCP RPC server from within a service:
+
+```rust
+use toni::RpcClient;
+use toni_tcp::TcpClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(TcpClientTransport::new("127.0.0.1", 4000))
+)
+```
+
+The connection is established lazily on the first `send` or `emit` call.
+
+### Custom timeout
+
+The default request-response timeout is 5 seconds. Override with `with_timeout`:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    TcpClientTransport::new("127.0.0.1", 4000)
+        .with_timeout(Duration::from_secs(10))
+)
+```
+
+### Payload limitations
+
+The TCP wire format is JSON. `RpcData::Binary` payloads are not supported — binary data must be encoded (e.g. base64) before placing it in `RpcData::Json` or `RpcData::Text`.
+
+## Example
+
+```rust
+use toni::*;
+use toni_macros::{module, rpc_controller};
+use toni_tcp::{TcpAdapter, TcpClientTransport};
+
+#[rpc_controller(pub struct OrdersController {
+    #[inject]
+    service: OrdersService,
+})]
+impl OrdersController {
+    pub fn new(service: OrdersService) -> Self { Self { service } }
+
+    #[message_pattern("order.create")]
+    async fn create(&self, data: RpcData, _ctx: RpcContext) -> Result<RpcData, RpcError> {
+        let dto: CreateOrderDto = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let order = self.service.create(dto).await.map_err(|e| RpcError::Internal(e.to_string()))?;
+        RpcData::from_serialize(&order).map_err(|e| RpcError::Internal(e.to_string()))
+    }
+
+    #[event_pattern("order.shipped")]
+    async fn shipped(&self, data: RpcData, _ctx: RpcContext) -> Result<(), RpcError> {
+        let id: u64 = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
+        self.service.mark_shipped(id).await.map_err(|e| RpcError::Internal(e.to_string()))
+    }
+}
+
+#[module(providers: [OrdersService, OrdersController])]
+pub struct AppModule;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+    app.start().await;
+}
+```

@@ -1,0 +1,170 @@
+---
+title: NATS Adapter
+description: NATS subjects as patterns — server and client transport setup for pub/sub and request-reply.
+---
+
+The NATS adapter maps each RPC pattern to a NATS subject. Request-response uses NATS's built-in inbox mechanism (`request`/reply-to). Fire-and-forget uses plain `publish`. A NATS server must be running and accessible from both sides.
+
+## Server setup
+
+Add the dependency:
+
+```toml
+[dependencies]
+toni = "0.1"
+toni-nats = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_nats::NatsAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
+    app.start().await;
+}
+```
+
+The adapter retries the initial connection on failure and subscribes to each registered pattern as a NATS subject when `start()` is called.
+
+## Multiple servers
+
+`NatsAdapter::new` and `NatsClientTransport::new` both accept anything that implements `IntoNatsServers` — a single URL string, a `Vec<String>`, or a fixed-size array:
+
+```rust
+// Single server
+NatsAdapter::new("nats://127.0.0.1:4222")
+
+// Cluster
+NatsAdapter::new(["nats://node1:4222", "nats://node2:4222", "nats://node3:4222"])
+
+// Vec
+NatsAdapter::new(vec!["nats://node1:4222".to_string(), "nats://node2:4222".to_string()])
+```
+
+## How patterns map to subjects
+
+Each `#[message_pattern("x.y")]` or `#[event_pattern("x.y")]` registers a NATS subscription on subject `x.y`. Pattern strings become NATS subjects verbatim — dots, wildcards, and hierarchy are all supported:
+
+```rust
+#[message_pattern("order.create")]    // subject: "order.create"
+#[event_pattern("order.shipped")]     // subject: "order.shipped"
+#[message_pattern("inventory.>")]     // NATS wildcard — matches any sub-subject
+```
+
+## Request-response
+
+The adapter subscribes to each pattern. When a message arrives with a reply-to inbox, the handler is invoked and the response is published to that inbox:
+
+```json
+// Response envelope published to the reply inbox:
+{"response": {"orderId": 1001}}
+
+// Error envelope:
+{"err": {"message": "out of stock", "status": "Internal"}}
+```
+
+## Fire-and-forget
+
+Messages published without a reply-to field are dispatched to `#[event_pattern]` handlers. No response is published.
+
+## Client transport
+
+Use `NatsClientTransport` to send messages from a service to another NATS-based service:
+
+```rust
+use toni::RpcClient;
+use toni_nats::NatsClientTransport;
+
+provider_value!(
+    "INVENTORY_CLIENT",
+    RpcClient::new(NatsClientTransport::new("nats://127.0.0.1:4222"))
+)
+```
+
+Inject and use:
+
+```rust
+#[injectable(pub struct OrdersService {
+    #[inject("INVENTORY_CLIENT")]
+    inventory: RpcClient,
+})]
+impl OrdersService {
+    pub async fn check_stock(&self, item_id: u64) -> anyhow::Result<bool> {
+        let reply = self.inventory
+            .send("inventory.check", RpcData::json(serde_json::json!({ "id": item_id })))
+            .await?;
+        Ok(reply.parse()?)
+    }
+}
+```
+
+### Custom timeout
+
+Default request-response timeout is 5 seconds:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    NatsClientTransport::new("nats://127.0.0.1:4222")
+        .with_timeout(Duration::from_secs(15))
+)
+```
+
+## Example — NATS-backed orders service
+
+```rust
+use toni::*;
+use toni_macros::{module, rpc_controller};
+use toni_nats::{NatsAdapter, NatsClientTransport};
+
+#[rpc_controller(pub struct OrdersController {
+    #[inject]
+    service: OrdersService,
+})]
+impl OrdersController {
+    pub fn new(service: OrdersService) -> Self { Self { service } }
+
+    #[message_pattern("order.create")]
+    async fn create(&self, data: RpcData, _ctx: RpcContext) -> Result<RpcData, RpcError> {
+        let dto: CreateOrderDto = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let order = self.service.create(dto).await.map_err(|e| RpcError::Internal(e.to_string()))?;
+        RpcData::from_serialize(&order).map_err(|e| RpcError::Internal(e.to_string()))
+    }
+
+    #[event_pattern("order.shipped")]
+    async fn shipped(&self, data: RpcData, _ctx: RpcContext) -> Result<(), RpcError> {
+        let id: u64 = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
+        self.service.mark_shipped(id).await.map_err(|e| RpcError::Internal(e.to_string()))
+    }
+}
+
+#[module(providers: [OrdersService, OrdersController])]
+pub struct AppModule;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
+    app.start().await;
+}
+```
+
+## Combining HTTP and NATS
+
+```rust
+use toni_axum::AxumAdapter;
+use toni_nats::NatsAdapter;
+
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
+app.start().await;
+```
+
+Both transports share the same DI container and run concurrently inside `start()`.

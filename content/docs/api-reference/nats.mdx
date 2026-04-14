@@ -1,0 +1,83 @@
+---
+title: toni-nats
+description: API reference for the NATS RPC adapter and client transport crate.
+---
+
+## NatsAdapter
+
+Server-side RPC transport. Subscribes to NATS subjects matching registered pattern names and dispatches inbound messages to RPC controllers. Request-response uses NATS reply-to inboxes; fire-and-forget uses plain publish with no reply-to.
+
+```rust
+use toni_nats::NatsAdapter;
+
+NatsAdapter::new(servers: impl IntoNatsServers) -> NatsAdapter
+```
+
+Register after `ToniFactory::create`:
+
+```rust
+let mut app = ToniFactory::create(AppModule).await;
+app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
+app.start().await;
+```
+
+---
+
+## NatsClientTransport
+
+Client-side transport for `RpcClient`. Uses `async_nats::Client::request` for request-response and `async_nats::Client::publish` for fire-and-forget. Connection is established lazily.
+
+```rust
+use toni_nats::NatsClientTransport;
+
+NatsClientTransport::new(servers: impl IntoNatsServers) -> NatsClientTransport
+NatsClientTransport::new(...).with_timeout(Duration) -> NatsClientTransport  // default: 5 s
+```
+
+Wrap in `RpcClient` and register as a provider:
+
+```rust
+provider_value!(
+    "INVENTORY_CLIENT",
+    RpcClient::new(NatsClientTransport::new("nats://127.0.0.1:4222"))
+)
+```
+
+---
+
+## IntoNatsServers
+
+Trait for anything that can be turned into a NATS server list. Implemented for:
+
+```rust
+&str             // single URL
+String           // single URL
+Vec<&str>        // explicit list
+Vec<String>      // explicit list
+[&str; N]        // inline array
+[String; N]      // inline array
+```
+
+Examples:
+
+```rust
+NatsAdapter::new("nats://localhost:4222")
+NatsAdapter::new(["nats://node1:4222", "nats://node2:4222"])
+NatsAdapter::new(vec!["nats://node1:4222".to_string()])
+```
+
+---
+
+## Response envelope
+
+The NATS adapter publishes JSON to the reply-to inbox in the same format as the TCP adapter:
+
+```json
+{"response": {...}}
+```
+
+```json
+{"err": {"message": "...", "status": "Internal"}}
+```
+
+`NatsClientTransport` parses this envelope and returns `Ok(RpcData)` or `Err(RpcClientError::Remote { .. })` accordingly. If the payload is not a recognized envelope, it is returned as `RpcData::Binary`.

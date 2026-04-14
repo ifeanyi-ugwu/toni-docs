@@ -1,4 +1,4 @@
 {
   "title": "API Reference",
-  "pages": ["core", "macros", "axum", "actix", "config", "cli"]
+  "pages": ["core", "macros", "axum", "actix", "tcp", "nats", "config", "cli"]
 }

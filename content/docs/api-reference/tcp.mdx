@@ -1,0 +1,68 @@
+---
+title: toni-tcp
+description: API reference for the TCP RPC adapter and client transport crate.
+---
+
+## TcpAdapter
+
+Server-side RPC transport. Accepts inbound connections on a TCP port and dispatches newline-delimited JSON frames to registered RPC controllers.
+
+```rust
+use toni_tcp::TcpAdapter;
+
+TcpAdapter::new(host: impl Into<String>, port: u16) -> TcpAdapter
+```
+
+Register after `ToniFactory::create`:
+
+```rust
+let mut app = ToniFactory::create(AppModule).await;
+app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
+app.start().await;
+```
+
+---
+
+## TcpClientTransport
+
+Client-side transport for `RpcClient`. Maintains a single persistent TCP connection with lazy connect and correlation-id-based request tracking.
+
+```rust
+use toni_tcp::TcpClientTransport;
+
+TcpClientTransport::new(host: impl Into<String>, port: u16) -> TcpClientTransport
+TcpClientTransport::new(...).with_timeout(Duration) -> TcpClientTransport  // default: 5 s
+```
+
+Wrap in `RpcClient` and register as a provider:
+
+```rust
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(TcpClientTransport::new("127.0.0.1", 4000))
+)
+```
+
+### Wire protocol
+
+Newline-delimited JSON (`\n` terminated). Binary payloads are not supported on the TCP wire — use base64 or another encoding inside a JSON string.
+
+**Request-response inbound:**
+```json
+{"pattern": "order.create", "data": {...}, "id": "1"}
+```
+
+**Response:**
+```json
+{"id": "1", "response": {...}}
+```
+
+**Error response:**
+```json
+{"id": "1", "err": {"message": "...", "status": "Internal"}}
+```
+
+**Fire-and-forget inbound (no `id`):**
+```json
+{"pattern": "order.shipped", "data": {...}}
+```

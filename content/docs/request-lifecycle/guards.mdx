@@ -6,7 +6,9 @@ description: Guards run before route handlers and decide whether the request is 
 A guard is a struct that implements the `Guard` trait. It has a single method, `can_activate`, which returns `true` to allow the request through or `false` to block it. Guards run after middleware, after routing, and before interceptors and the route handler.
 
 <Bridge>
-Guards in Toni are the direct equivalent of NestJS's `CanActivate` guards. The method is synchronous by default (`can_activate` returns `bool`), same as NestJS's `canActivate` returning a plain boolean. For async token verification you'll implement a service that caches validation results, or return a cached `bool`.
+Guards in Toni are the direct equivalent of NestJS's `CanActivate` guards. The method is **synchronous** — `can_activate` returns a plain `bool`, not a `Future`. This is a key difference from NestJS where `canActivate` can return `Promise<boolean>`.
+
+For anything requiring an async call (JWT verification, database lookups), inject a service that caches the result synchronously. A common pattern is a request-scoped `AuthContext` populated via `from_request` that the guard reads from the request extensions.
 </Bridge>
 
 ## The Guard trait

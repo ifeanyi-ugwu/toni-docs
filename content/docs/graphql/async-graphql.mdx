@@ -3,13 +3,13 @@ title: async-graphql Integration
 description: Use toni-async-graphql to add a GraphQL endpoint powered by the async-graphql crate.
 ---
 
-`toni-async-graphql` integrates Toni's module system with the [async-graphql](https://github.com/async-graphql/async-graphql) crate. The GraphQL context uses `async-graphql`'s `Data` container — a type-erased map — which makes it easy to add Toni services to resolvers.
+`toni-async-graphql` integrates Toni's module system with the [async-graphql](https://github.com/async-graphql/async-graphql) crate. A `ContextBuilder` populates the `async-graphql` `Data` container per-request, so resolvers can access injected Toni services.
 
 ## Installation
 
 ```toml
 [dependencies]
-toni = "0.2"
+toni = "0.1"
 toni-async-graphql = "0.1"
 async-graphql = "7"
 toni-axum = "0.1"
@@ -26,7 +26,6 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     async fn users(&self, ctx: &Context<'_>) -> Vec<String> {
-        // Access Toni services via the Data container
         let service = ctx.data::<UsersService>().unwrap();
         service.find_all_names()
     }
@@ -40,25 +39,29 @@ impl QueryRoot {
 pub type AppSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 ```
 
-## 2. Build the context (inject Toni services)
+## 2. Build the context
 
-The `ContextBuilder` trait tells the integration how to populate the `Data` container for each request:
+The `ContextBuilder` trait populates `async-graphql`'s `Data` container before each request executes. It receives the incoming `RequestPart` so you can read headers (e.g. to verify an auth token) alongside injected services.
 
 ```rust
-use toni_async_graphql::ContextBuilder;
-use toni::injectable;
 use async_graphql::Data;
+use async_trait::async_trait;
+use toni::RequestPart;
+use toni_async_graphql::ContextBuilder;
 
 #[injectable(pub struct AppContextBuilder {
     #[inject]
     users_service: UsersService,
 })]
 impl AppContextBuilder {
-    pub fn new(users_service: UsersService) -> Self { Self { users_service } }
+    pub fn new(users_service: UsersService) -> Self {
+        Self { users_service }
+    }
 }
 
+#[async_trait]
 impl ContextBuilder for AppContextBuilder {
-    fn build_context(&self) -> Data {
+    async fn build(&self, _req: &RequestPart) -> Data {
         let mut data = Data::default();
         data.insert(self.users_service.clone());
         data
@@ -66,17 +69,24 @@ impl ContextBuilder for AppContextBuilder {
 }
 ```
 
+When you don't need context data, use the built-in `DefaultContextBuilder`:
+
+```rust
+use toni_async_graphql::{GraphQLModule, DefaultContextBuilder};
+
+let graphql_module = GraphQLModule::for_root(schema, DefaultContextBuilder);
+```
+
 ## 3. Register the GraphQL module
 
 ```rust
 use toni_async_graphql::GraphQLModule;
-use async_graphql::{Schema, EmptyMutation, EmptySubscription};
 
-let schema = Schema::new(QueryRoot, EmptyMutation, EmptySubscription);
+let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription).finish();
 
-let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
-    .with_path("/graphql")
-    .with_playground(true);  // disable in production
+let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder { /* ... */ })
+    .with_path("/graphql")       // default: "/graphql"
+    .with_playground(true);      // default: enabled in debug builds, disabled in release
 
 #[module(
     imports: [graphql_module, UsersModule],
@@ -92,34 +102,54 @@ use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 
-Visit `http://localhost:3000/graphql` in a browser to open the GraphQL Playground.
+`POST /graphql` handles queries and mutations. In debug builds, `GET /graphql` serves GraphQL Playground.
 
-## Using guards on the GraphQL endpoint
+## Reading request headers in context
 
-Apply guards to the `GraphQLController` via the module configuration:
+Use `req` in `build` to read HTTP headers — useful for extracting auth tokens:
 
 ```rust
-let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
-    .with_path("/graphql")
-    .with_guard(AuthGuard {})
-    .with_playground(false);
+#[async_trait]
+impl ContextBuilder for AppContextBuilder {
+    async fn build(&self, req: &RequestPart) -> Data {
+        let mut data = Data::default();
+
+        if let Some(auth) = req.headers.get("authorization") {
+            if let Ok(header_val) = auth.to_str() {
+                if let Some(user) = self.auth_service.verify(header_val).await {
+                    data.insert(user);
+                }
+            }
+        }
+
+        data.insert(self.users_service.clone());
+        data
+    }
+}
 ```
 
-## Subscriptions
-
-For GraphQL subscriptions over WebSocket, configure the subscription transport:
+## API reference
 
 ```rust
-use toni_async_graphql::GraphQLModule;
-use async_graphql::{Schema, EmptyMutation};
+use toni_async_graphql::{GraphQLModule, ContextBuilder, DefaultContextBuilder};
 
-let schema = Schema::new(QueryRoot, MutationRoot, SubscriptionRoot);
+// Module builder
+GraphQLModule::for_root(schema, context_builder) -> GraphQLModule<Q, M, S, Ctx>
+    .with_path(impl Into<String>) -> Self     // endpoint path (default: "/graphql")
+    .with_playground(bool) -> Self            // toggle playground (default: debug_assertions)
 
-let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
-    .with_subscriptions("/graphql/ws");
+// ContextBuilder trait
+#[async_trait]
+trait ContextBuilder: Send + Sync + 'static {
+    async fn build(&self, req: &RequestPart) -> async_graphql::Data;
+}
+
+// No-op implementation
+struct DefaultContextBuilder;
 ```

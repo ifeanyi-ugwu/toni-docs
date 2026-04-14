@@ -59,9 +59,11 @@ pub type AppSchema = RootNode<
 
 ## 3. Build the context
 
-Implement `ContextBuilder` to populate the context for each request, using injected Toni services:
+Implement `ContextBuilder` to populate the context for each request. The `build` method receives the incoming `RequestPart` so you can read headers (e.g. auth tokens) alongside injected services:
 
 ```rust
+use async_trait::async_trait;
+use toni::RequestPart;
 use toni_juniper::ContextBuilder;
 use toni::injectable;
 
@@ -77,16 +79,26 @@ impl AppContextBuilder {
     }
 }
 
+#[async_trait]
 impl ContextBuilder for AppContextBuilder {
     type Context = AppContext;
 
-    fn build(&self) -> AppContext {
+    async fn build(&self, _req: &RequestPart) -> AppContext {
         AppContext {
             users_service: self.users_service.clone(),
             db: self.db.clone(),
         }
     }
 }
+```
+
+When you don't need context data, use the built-in `DefaultContextBuilder` and `DefaultContext`:
+
+```rust
+use toni_juniper::{GraphQLModule, DefaultContextBuilder, DefaultContext};
+
+// DefaultContext implements juniper::Context and is the context type
+// when using DefaultContextBuilder
 ```
 
 ## 4. Register the module
@@ -112,17 +124,18 @@ pub struct AppModule;
 ```rust
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule, AxumAdapter::new()).await;
-    app.listen(3000, "127.0.0.1").await;
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
 }
 ```
 
 ## Comparison with async-graphql
 
-| | `toni-async-graphql` | `toni-juniper` |
-|---|---|---|
-| Context | `Data` (type-erased map) | Concrete struct (your type) |
-| Type safety | Runtime lookup | Compile-time |
-| Flexibility | Easier to add more data later | Explicit, all-or-nothing |
+|             | `toni-async-graphql`          | `toni-juniper`              |
+| ----------- | ----------------------------- | --------------------------- |
+| Context     | `Data` (type-erased map)      | Concrete struct (your type) |
+| Type safety | Runtime lookup                | Compile-time                |
+| Flexibility | Easier to add more data later | Explicit, all-or-nothing    |
 
 If your team values explicit, compile-checked context and doesn't mind the boilerplate of a concrete context type, Juniper is the stronger choice. If you want to incrementally add services to the context without changing the context type, async-graphql's `Data` container is more flexible.

@@ -9,14 +9,13 @@ description: API reference for the Actix-web adapter crate.
 use toni_actix::ActixAdapter;
 
 ActixAdapter::new() -> ActixAdapter
-ActixAdapter::new().workers(n: usize) -> ActixAdapter
 ```
 
 Pass to `app.use_http_adapter` after `ToniFactory::create`:
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(ActixAdapter::new().workers(4), 8080, "0.0.0.0").unwrap();
+app.use_http_adapter(ActixAdapter::new(), 8080, "0.0.0.0").unwrap();
 app.start().await;
 ```
 

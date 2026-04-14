@@ -36,18 +36,6 @@ The API is identical to `toni-axum`. Switching between adapters is a one-line ch
 - You're migrating from an existing Actix-web application
 - You need Actix's specific actor-based patterns alongside Toni's module system
 
-## Actix worker threads
-
-Configure Actix's worker count via the adapter:
-
-```rust
-use toni_actix::ActixAdapter;
-
-let adapter = ActixAdapter::new().workers(8);
-```
-
-By default, Actix uses one worker per CPU core.
-
 ## Limitations
 
 The Actix adapter has the same Toni API surface as the Axum adapter. Some Axum-specific features (certain Tower middleware, `axum::extract::State`) aren't available — but Toni's built-in middleware, guards, interceptors, and extractors work identically on both adapters.

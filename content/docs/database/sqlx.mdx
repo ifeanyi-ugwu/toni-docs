@@ -1,0 +1,131 @@
+---
+title: SQLx
+description: Integrating SQLx with Toni's module system for compile-time checked SQL queries.
+---
+
+`toni-sqlx` provides a `SqlxModule` with database-specific constructors that connect a connection pool at startup and make it available application-wide.
+
+<Bridge>
+Similar to NestJS's `TypeOrmModule.forRoot()`, but you get direct access to SQLx's connection pool — no ORM abstraction. SQL queries stay as strings and are checked at compile time with SQLx's `query!` macros.
+</Bridge>
+
+## Setup
+
+Add the dependency with the appropriate features for your database and TLS runtime:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-sqlx = { version = "0.1", features = ["postgres", "runtime-tokio-rustls"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "macros"] }
+```
+
+Available database features: `postgres`, `mysql`, `sqlite`.  
+Available runtime features: `runtime-tokio-rustls`, `runtime-tokio-native-tls`.
+
+## Registration
+
+Use the database-specific constructor in your root module's `imports`:
+
+```rust
+use toni_sqlx::SqlxModule;
+
+// PostgreSQL
+#[module(
+    imports: [
+        SqlxModule::postgres("postgresql://user:pass@localhost/mydb"),
+    ],
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct AppModule;
+```
+
+```rust
+// MySQL
+SqlxModule::mysql("mysql://user:pass@localhost/mydb")
+
+// SQLite
+SqlxModule::sqlite("sqlite:./data.db")
+```
+
+Each constructor returns a **global** `DynamicModule`. The connection pool is available everywhere without additional imports.
+
+The pool is created at startup and panics on failure, so a bad URL or unreachable host surfaces immediately.
+
+## Injecting the pool
+
+The injected type depends on the database:
+- `sqlx::Pool<Postgres>` for PostgreSQL
+- `sqlx::Pool<MySql>` for MySQL
+- `sqlx::Pool<Sqlite>` for SQLite
+
+```rust
+use sqlx::PgPool; // re-exported from toni_sqlx
+
+#[injectable(pub struct UsersService {
+    pool: PgPool,
+})]
+impl UsersService {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn find_all(&self) -> sqlx::Result<Vec<User>> {
+        sqlx::query_as!(User, "SELECT id, name, email FROM users")
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    pub async fn create(&self, name: &str, email: &str) -> sqlx::Result<i32> {
+        let row = sqlx::query!(
+            "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
+            name,
+            email,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.id)
+    }
+}
+```
+
+`PgPool` is `Clone` — all clones share the same pool.
+
+## Using env vars
+
+```rust
+#[module(
+    imports: [
+        SqlxModule::postgres(
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+        ),
+    ],
+)]
+pub struct AppModule;
+```
+
+## Shutdown
+
+`SqlxModule` calls `pool.close().await` when `app.close()` is called. In-flight queries are allowed to complete before the pool is closed.
+
+## API reference
+
+```rust
+use toni_sqlx::SqlxModule;
+
+SqlxModule::postgres(url: impl Into<String>) -> DynamicModule
+SqlxModule::mysql(url: impl Into<String>)    -> DynamicModule
+SqlxModule::sqlite(url: impl Into<String>)   -> DynamicModule
+```
+
+Each returned `DynamicModule`:
+- provides the database-specific `Pool<DB>` type
+- exports the pool
+- is **global** (no need to import into feature modules)
+
+Re-exports available from `toni_sqlx` (feature-gated):
+- `PgPool` — `sqlx::Pool<Postgres>` (feature: `postgres`)
+- `MySqlPool` — `sqlx::Pool<MySql>` (feature: `mysql`)
+- `SqlitePool` — `sqlx::Pool<Sqlite>` (feature: `sqlite`)
+- `SqlxError`, `Row`, `query`, `query_as`

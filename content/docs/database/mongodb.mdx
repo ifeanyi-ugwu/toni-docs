@@ -1,0 +1,130 @@
+---
+title: MongoDB
+description: Integrating MongoDB with Toni's module system via the managed Database handle.
+---
+
+`toni-mongodb` provides a `MongoModule` that connects to MongoDB at startup and makes `mongodb::Database` available application-wide via the global DI scope.
+
+<Bridge>
+This follows the same pattern as NestJS's `MongooseModule.forRoot()` — one call in the root module, then inject the database handle anywhere without importing the database module into each feature module.
+</Bridge>
+
+## Setup
+
+Add the dependency:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-mongodb = "0.1"
+mongodb = "3"
+```
+
+## Registration
+
+Call `MongoModule::for_root` with the MongoDB URI and database name:
+
+```rust
+use toni_mongodb::MongoModule;
+
+#[module(
+    imports: [
+        MongoModule::for_root("mongodb://localhost:27017", "mydb"),
+    ],
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct AppModule;
+```
+
+`for_root` returns a **global** `DynamicModule`. `mongodb::Database` is available to every module without additional imports.
+
+The connection is established at startup and panics on failure, so an invalid URI or unreachable host surfaces immediately rather than on the first query.
+
+## Injecting the database
+
+`Database` is injected by type — no token string needed:
+
+```rust
+use mongodb::{Database, Collection, bson::doc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct User {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<mongodb::bson::oid::ObjectId>,
+    pub name: String,
+    pub email: String,
+}
+
+#[injectable(pub struct UsersService {
+    db: Database,
+})]
+impl UsersService {
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+
+    fn collection(&self) -> Collection<User> {
+        self.db.collection("users")
+    }
+
+    pub async fn find_all(&self) -> mongodb::error::Result<Vec<User>> {
+        use futures::StreamExt;
+        let cursor = self.collection().find(doc! {}).await?;
+        cursor.collect::<Vec<_>>().await.into_iter().collect()
+    }
+
+    pub async fn create(&self, name: String, email: String) -> mongodb::error::Result<String> {
+        let user = User { id: None, name, email };
+        let result = self.collection().insert_one(user).await?;
+        Ok(result.inserted_id.to_string())
+    }
+}
+```
+
+`Database` is `Clone` — all clones share the same connection pool managed by the underlying `Client`.
+
+## Using env vars
+
+```rust
+#[module(
+    imports: [
+        MongoModule::for_root(
+            std::env::var("MONGO_URI").expect("MONGO_URI must be set"),
+            std::env::var("MONGO_DB").unwrap_or_else(|_| "myapp".to_string()),
+        ),
+    ],
+)]
+pub struct AppModule;
+```
+
+## Shutdown
+
+`MongoModule` calls `client.shutdown().await` when `app.close()` is called, allowing in-flight operations to complete before the connection pool is drained.
+
+## API reference
+
+```rust
+use toni_mongodb::MongoModule;
+
+MongoModule::for_root(
+    uri: impl Into<String>,
+    db_name: impl Into<String>,
+) -> DynamicModule
+```
+
+The returned `DynamicModule`:
+- is named `"MongoModule"`
+- provides `mongodb::Database`
+- exports `Database`
+- is **global** (no need to import into feature modules)
+
+Re-exports available from `toni_mongodb`:
+- `mongodb::Collection`
+- `mongodb::Database`
+- `mongodb::bson::Document`
+- `mongodb::bson::doc` (macro)
+- `mongodb::bson::oid::ObjectId`
+- `mongodb::error::Error as MongoError`
+- `mongodb::options::FindOptions`

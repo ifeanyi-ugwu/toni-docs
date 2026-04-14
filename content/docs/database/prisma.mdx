@@ -1,0 +1,132 @@
+---
+title: Prisma
+description: Integrating a Prisma-generated client with Toni's module system.
+---
+
+`toni-prisma` provides a `PrismaModule` that wraps any `prisma-client-rust`-generated client and makes it injectable throughout your application.
+
+<Bridge>
+This is the Toni equivalent of NestJS's `PrismaModule` pattern — generate the client from your schema, wrap it with `PrismaModule::for_root`, and inject it anywhere.
+</Bridge>
+
+## Setup
+
+First, set up `prisma-client-rust` by following its [documentation](https://prisma.brendonovich.dev). Then add `toni-prisma`:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-prisma = "0.1"
+# plus your generated prisma client crate (e.g. "db" or "prisma")
+```
+
+## Registration
+
+Pass an async closure that creates your generated client to `PrismaModule::for_root`:
+
+```rust
+use toni_prisma::PrismaModule;
+
+mod db {
+    // prisma-client-rust generated client
+    prisma_client_rust::declare!();
+}
+
+#[module(
+    imports: [
+        PrismaModule::for_root(|| async {
+            db::PrismaClient::_builder().build().await.unwrap()
+        }),
+    ],
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct AppModule;
+```
+
+`for_root` calls the closure once at startup and registers the resulting client as a global provider. The closure must return a `Future` that resolves to your `PrismaClient` type.
+
+## Injecting the client
+
+The client is injected by its concrete Rust type — no token string needed:
+
+```rust
+use db::PrismaClient;
+
+#[injectable(pub struct UsersService {
+    db: PrismaClient,
+})]
+impl UsersService {
+    pub fn new(db: PrismaClient) -> Self {
+        Self { db }
+    }
+
+    pub async fn find_all(&self) -> Vec<db::user::Data> {
+        self.db
+            .user()
+            .find_many(vec![])
+            .exec()
+            .await
+            .unwrap()
+    }
+
+    pub async fn find_by_id(&self, id: i32) -> Option<db::user::Data> {
+        self.db
+            .user()
+            .find_unique(db::user::id::equals(id))
+            .exec()
+            .await
+            .unwrap()
+    }
+
+    pub async fn create(&self, name: String, email: String) -> db::user::Data {
+        self.db
+            .user()
+            .create(
+                db::user::name::set(name),
+                vec![db::user::email::set(email)],
+            )
+            .exec()
+            .await
+            .unwrap()
+    }
+}
+```
+
+The client must implement `Clone`. `prisma-client-rust` clients use `Arc` internally, so cloning is cheap.
+
+## Connection string
+
+Configure the database URL inside the closure before building the client:
+
+```rust
+PrismaModule::for_root(|| async {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    db::PrismaClient::_builder()
+        .with_url(url)
+        .build()
+        .await
+        .unwrap()
+})
+```
+
+## Shutdown
+
+`PrismaModule` has no explicit shutdown hook — cleanup happens through the client's `Drop` implementation when the application exits.
+
+## API reference
+
+```rust
+use toni_prisma::PrismaModule;
+
+PrismaModule::for_root<C, F, Fut>(connect: F) -> DynamicModule
+where
+    C: Send + Sync + Clone + 'static,
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = C> + Send + 'static,
+```
+
+The returned `DynamicModule`:
+- provides `C` (your generated `PrismaClient` type)
+- exports `C`
+- is **global** (no need to import into feature modules)

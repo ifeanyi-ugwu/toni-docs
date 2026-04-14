@@ -1,0 +1,129 @@
+---
+title: Diesel
+description: Integrating Diesel async with Toni's module system for type-safe SQL.
+---
+
+`toni-diesel` provides a `DieselModule` with database-specific constructors that set up an async connection pool (via `deadpool`) at startup and make it available application-wide.
+
+<Bridge>
+Diesel is Rust's most type-safe ORM — queries are validated against your schema at compile time. `toni-diesel` uses `diesel-async` under the hood, so all database calls are non-blocking.
+</Bridge>
+
+## Setup
+
+Add the dependency with the appropriate feature for your database:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-diesel = { version = "0.1", features = ["postgres"] }
+diesel = { version = "2", features = ["postgres"] }
+diesel-async = { version = "0.8", features = ["postgres", "deadpool"] }
+```
+
+Available features: `postgres`, `mysql`.
+
+## Registration
+
+Use the database-specific constructor in your root module's `imports`:
+
+```rust
+use toni_diesel::DieselModule;
+
+// PostgreSQL
+#[module(
+    imports: [
+        DieselModule::postgres("postgresql://user:pass@localhost/mydb"),
+    ],
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct AppModule;
+```
+
+```rust
+// MySQL
+DieselModule::mysql("mysql://user:pass@localhost/mydb")
+```
+
+Each constructor returns a **global** `DynamicModule`. The pool is created at startup and panics on failure.
+
+## Injecting the pool
+
+The injected type is a `deadpool::Pool` over the async connection type:
+- `diesel_async::pooled_connection::deadpool::Pool<AsyncPgConnection>` for PostgreSQL
+- `diesel_async::pooled_connection::deadpool::Pool<AsyncMysqlConnection>` for MySQL
+
+```rust
+use toni_diesel::PgPool; // re-exported from toni_diesel
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
+
+#[injectable(pub struct UsersService {
+    pool: PgPool,
+})]
+impl UsersService {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn find_all(&self) -> Result<Vec<User>, diesel::result::Error> {
+        let mut conn = self.pool.get().await
+            .map_err(|_| diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UnableToSendCommand,
+                Box::new("pool error".to_string()),
+            ))?;
+
+        users::table.load::<User>(&mut conn).await
+    }
+
+    pub async fn create(&self, new_user: NewUser) -> Result<User, diesel::result::Error> {
+        let mut conn = self.pool.get().await.unwrap();
+        diesel::insert_into(users::table)
+            .values(&new_user)
+            .get_result(&mut conn)
+            .await
+    }
+}
+```
+
+Obtain a connection from the pool with `.get().await` for each operation. The pool manages the connection lifecycle.
+
+## Using env vars
+
+```rust
+#[module(
+    imports: [
+        DieselModule::postgres(
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+        ),
+    ],
+)]
+pub struct AppModule;
+```
+
+## Shutdown
+
+`DieselModule` calls `pool.close()` when `app.close()` is called, draining the connection pool.
+
+## API reference
+
+```rust
+use toni_diesel::DieselModule;
+
+DieselModule::postgres(url: impl Into<String>) -> DynamicModule
+DieselModule::mysql(url: impl Into<String>)    -> DynamicModule
+```
+
+Each returned `DynamicModule`:
+- provides the database-specific `deadpool::Pool<Connection>` type
+- exports the pool
+- is **global** (no need to import into feature modules)
+
+Re-exports available from `toni_diesel` (feature-gated):
+- `PgPool` — `deadpool::Pool<AsyncPgConnection>` (feature: `postgres`)
+- `MySqlPool` — `deadpool::Pool<AsyncMysqlConnection>` (feature: `mysql`)
+- `AsyncPgConnection`, `AsyncMysqlConnection`
+- `diesel::prelude` as `prelude`
+- `DieselError`
+- `RunQueryDsl`

@@ -1,4 +1,4 @@
 {
   "title": "Database",
-  "pages": ["seaorm", "redis"]
+  "pages": ["seaorm", "redis", "mongodb", "sqlx", "diesel", "prisma"]
 }

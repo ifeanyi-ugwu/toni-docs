@@ -1,0 +1,100 @@
+---
+title: Redis
+description: Integrating Redis with Toni's module system via the managed ConnectionManager.
+---
+
+`toni-redis` provides a `RedisModule` that opens a managed Redis connection at startup and makes `redis::aio::ConnectionManager` available application-wide.
+
+## Setup
+
+Add the dependency:
+
+```toml
+[dependencies]
+toni = "0.1"
+toni-redis = "0.1"
+redis = { version = "0.27", features = ["tokio-comp"] }
+```
+
+## Registration
+
+Call `RedisModule::for_root` in your root module's `imports`:
+
+```rust
+use toni_redis::RedisModule;
+
+#[module(
+    imports: [
+        RedisModule::for_root("redis://127.0.0.1:6379"),
+    ],
+    controllers: [CacheController],
+    providers: [CacheService],
+)]
+pub struct AppModule;
+```
+
+`for_root` returns a **global** `DynamicModule`. `ConnectionManager` is available to every module in the application without additional imports.
+
+The connection is established at startup and panics on failure. An invalid URL or an unreachable Redis server surfaces immediately.
+
+## Injecting the connection
+
+`ConnectionManager` is injected by type:
+
+```rust
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
+
+#[injectable(pub struct CacheService {
+    redis: ConnectionManager,
+})]
+impl CacheService {
+    pub fn new(redis: ConnectionManager) -> Self {
+        Self { redis }
+    }
+
+    pub async fn get(&self, key: &str) -> redis::RedisResult<Option<String>> {
+        let mut conn = self.redis.clone();
+        conn.get(key).await
+    }
+
+    pub async fn set(&self, key: &str, value: &str, ttl_secs: u64) -> redis::RedisResult<()> {
+        let mut conn = self.redis.clone();
+        conn.set_ex(key, value, ttl_secs).await
+    }
+
+    pub async fn del(&self, key: &str) -> redis::RedisResult<()> {
+        let mut conn = self.redis.clone();
+        conn.del(key).await
+    }
+}
+```
+
+`ConnectionManager` is `Clone` — all clones share the same underlying multiplexed connection. Clone it before calling async commands (the `AsyncCommands` trait requires `&mut self` on the connection handle).
+
+## Using env vars
+
+```rust
+#[module(
+    imports: [
+        RedisModule::for_root(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+        ),
+    ],
+)]
+pub struct AppModule;
+```
+
+## API reference
+
+```rust
+use toni_redis::RedisModule;
+
+RedisModule::for_root(url: impl Into<String>) -> DynamicModule
+```
+
+The returned `DynamicModule`:
+- is named `"RedisModule"`
+- provides `redis::aio::ConnectionManager`
+- exports `ConnectionManager`
+- is **global** (no need to import into feature modules)

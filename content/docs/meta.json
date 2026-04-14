@@ -9,6 +9,7 @@
     "http-adapters",
     "websocket",
     "microservices",
+    "database",
     "graphql",
     "configuration",
     "lifecycle-hooks",

@@ -1,0 +1,131 @@
+---
+title: SeaORM
+description: Integrating SeaORM with Toni's module system for managed database connections.
+---
+
+`toni-seaorm` provides a `SeaOrmModule` that connects to a database at startup and makes `DatabaseConnection` available to any provider in the application via the global DI scope.
+
+<Bridge>
+This follows the same pattern as NestJS's `TypeOrmModule.forRoot()` — one call in the root module, then inject the connection handle anywhere without needing to import the database module into each feature module.
+</Bridge>
+
+## Setup
+
+Add the dependency:
+
+```toml
+[dependencies]
+toni = "0.1"
+toni-seaorm = "0.1"
+sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+```
+
+## Registration
+
+Call `SeaOrmModule::for_root` in your root module's `imports`:
+
+```rust
+use toni_seaorm::SeaOrmModule;
+
+#[module(
+    imports: [
+        SeaOrmModule::for_root("postgres://user:pass@localhost/mydb"),
+    ],
+    controllers: [UsersController],
+    providers: [UsersService],
+)]
+pub struct AppModule;
+```
+
+`for_root` returns a **global** `DynamicModule`. `DatabaseConnection` is available to every module in the application without needing to import `SeaOrmModule` into each feature module.
+
+The connection is established at startup and panics on failure, so a bad URL or unreachable host surfaces immediately rather than on the first query.
+
+## Injecting the connection
+
+`DatabaseConnection` is injected by type — no token string needed:
+
+```rust
+use sea_orm::DatabaseConnection;
+
+#[injectable(pub struct UsersService {
+    db: DatabaseConnection,
+})]
+impl UsersService {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db }
+    }
+
+    pub async fn find_all(&self) -> Result<Vec<user::Model>, sea_orm::DbErr> {
+        user::Entity::find().all(&self.db).await
+    }
+
+    pub async fn find_by_id(&self, id: i32) -> Result<Option<user::Model>, sea_orm::DbErr> {
+        user::Entity::find_by_id(id).one(&self.db).await
+    }
+}
+```
+
+`DatabaseConnection` is `Clone` — it wraps a connection pool internally. Each inject gets a clone that shares the same pool.
+
+## Using env vars
+
+Combine with `toni-config` or `std::env::var` to avoid hardcoding credentials:
+
+```rust
+#[module(
+    imports: [
+        SeaOrmModule::for_root(std::env::var("DATABASE_URL").expect("DATABASE_URL must be set")),
+    ],
+)]
+pub struct AppModule;
+```
+
+Or with a typed config:
+
+```rust
+#[derive(Config, Clone)]
+pub struct AppConfig {
+    #[env("DATABASE_URL")]
+    pub database_url: String,
+}
+
+#[module(
+    imports: [
+        ConfigModule::<AppConfig>::from_env().unwrap(),
+    ],
+)]
+pub struct AppModule;
+```
+
+Then in a separate module that imports both:
+
+```rust
+#[module(
+    imports: [AppModule],
+    providers: [
+        provider_factory!("DB_MODULE", |config: ConfigService<AppConfig>| {
+            SeaOrmModule::for_root(config.get().database_url.clone())
+        }),
+    ],
+)]
+pub struct DatabaseModule;
+```
+
+## Shutdown
+
+`SeaOrmModule` closes the database connection gracefully when `app.close()` is called or the application shuts down. In-flight queries are allowed to complete before the connection is closed.
+
+## API reference
+
+```rust
+use toni_seaorm::SeaOrmModule;
+
+SeaOrmModule::for_root(url: impl Into<String>) -> DynamicModule
+```
+
+The returned `DynamicModule`:
+- is named `"SeaOrmModule"`
+- provides `sea_orm::DatabaseConnection`
+- exports `DatabaseConnection`
+- is **global** (no need to import into feature modules)

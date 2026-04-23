@@ -10,8 +10,8 @@ Declare gateways with the `#[websocket_gateway]` macro, which handles both the g
 ## Injecting services into gateways
 
 ```rust
-use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsMessage};
-use toni::{WsHandlerResult};
+use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage};
+use toni::WsHandlerResult;
 use toni_macros::{injectable, module, websocket_gateway};
 
 #[injectable]
@@ -54,10 +54,11 @@ impl GameGateway {
         if let Some(text) = message.as_text() {
             if let Ok(action) = serde_json::from_str::<GameAction>(text) {
                 let result = self.game_service.process_action(&client.id, action).await;
-                return Ok(Some(WsMessage::text(serde_json::to_string(&result).unwrap())));
+                let msg = WsMessage::text(serde_json::to_string(&result).unwrap());
+                return Ok(msg.into());
             }
         }
-        Ok(None)
+        Ok(WsHandlerOutput::Empty)
     }
 
     #[on_disconnect]
@@ -98,7 +99,7 @@ impl StockTickerGateway {
         message: WsMessage,
     ) -> WsHandlerResult {
         // handle ticker subscription...
-        Ok(None)
+        Ok(WsHandlerOutput::Empty)
     }
 }
 ```
@@ -108,6 +109,7 @@ impl StockTickerGateway {
 Guards work identically on gateways and HTTP controllers. `can_activate` receives a `Context` that you can switch to the WebSocket view:
 
 ```rust
+use async_trait::async_trait;
 use toni::{Guard, Context};
 use toni_macros::guard;
 
@@ -116,8 +118,9 @@ pub struct WsAuthGuard;
 #[guard]
 impl WsAuthGuard {}
 
+#[async_trait]
 impl Guard for WsAuthGuard {
-    fn can_activate(&self, context: &Context) -> bool {
+    async fn can_activate(&self, context: &Context) -> bool {
         if let Some(ws) = context.switch_to_ws() {
             // Headers are stored in lowercase
             return ws.client().handshake.headers.get("x-auth-token").is_some();

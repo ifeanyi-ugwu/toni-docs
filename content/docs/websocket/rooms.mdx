@@ -12,7 +12,7 @@ Use `BroadcastService` (from `BroadcastModule`) to manage room membership and se
 Declare gateways with the `#[websocket_gateway]` macro. Inject `BroadcastService` for room management:
 
 ```rust
-use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsMessage};
+use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage};
 use toni::WsHandlerResult;
 use toni_macros::{module, websocket_gateway};
 
@@ -58,7 +58,7 @@ impl RoomGateway {
             .send(WsMessage::text(format!("{} joined", client.id)))
             .await?;
 
-        Ok(None)
+        Ok(WsHandlerOutput::Empty)
     }
 
     #[subscribe_message("leave")]
@@ -79,7 +79,7 @@ impl RoomGateway {
             .send(WsMessage::text(format!("Left room: {room}")))
             .await?;
 
-        Ok(None)
+        Ok(WsHandlerOutput::Empty)
     }
 
     #[subscribe_message("message")]
@@ -102,7 +102,7 @@ impl RoomGateway {
             }
         }
 
-        Ok(None)
+        Ok(WsHandlerOutput::Empty)
     }
 
     #[on_disconnect]

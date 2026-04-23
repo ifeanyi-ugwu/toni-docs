@@ -1,0 +1,105 @@
+---
+title: Multipart / File Upload
+description: Handle multipart/form-data requests and file uploads with the Multipart extractor.
+---
+
+The `Multipart` extractor parses `multipart/form-data` request bodies. It yields fields one at a time — each field can be a plain text value or a file upload.
+
+`Multipart` is a body-consuming extractor. Only one body-consuming extractor may appear per handler.
+
+## Basic usage
+
+```rust
+use toni::extractors::Multipart;
+
+#[post("/upload")]
+async fn upload(&self, mut mp: Multipart) -> impl IntoResponse {
+    while let Some(field) = mp.next_field().await.unwrap() {
+        let name = field.name().unwrap_or("unknown").to_string();
+        let data = field.bytes().await.unwrap();
+        println!("field={name} size={}", data.len());
+    }
+    HttpResponse::no_content().build()
+}
+```
+
+## File upload example
+
+```rust
+use toni::extractors::Multipart;
+
+#[post("/upload")]
+async fn upload(&self, mut mp: Multipart) -> Body {
+    let mut file_name = String::from("unnamed");
+    let mut description = String::new();
+
+    while let Some(field) = mp.next_field().await.unwrap() {
+        match field.name() {
+            Some("description") => {
+                description = field.text().await.unwrap_or_default();
+            }
+            Some("file") => {
+                file_name = field
+                    .file_name()
+                    .unwrap_or("unnamed")
+                    .to_string();
+                let data = field.bytes().await.unwrap_or_default();
+                // save data to disk or object storage
+                println!("received {file_name}: {} bytes", data.len());
+            }
+            _ => {}
+        }
+    }
+
+    Body::json(serde_json::json!({ "file": file_name, "description": description }))
+}
+```
+
+Test with curl:
+
+```bash
+curl -X POST http://127.0.0.1:3000/upload \
+     -F "description=my photo" \
+     -F "file=@/path/to/photo.jpg"
+```
+
+## Field API
+
+Each `Field` (re-exported from `multer`) exposes:
+
+```rust
+field.name() -> Option<&str>              // form field name
+field.file_name() -> Option<&str>         // original filename (file fields only)
+field.content_type() -> Option<&Mime>     // content-type of the field
+field.text().await -> Result<String>      // read as UTF-8 text
+field.bytes().await -> Result<Bytes>      // read as raw bytes
+```
+
+Fields must be consumed in order — calling `next_field` before fully reading the current field drops unread bytes.
+
+## Error handling
+
+`next_field` returns `Result<Option<Field>, MultipartError>`. `MultipartError` covers two cases:
+
+```rust
+pub enum MultipartError {
+    MissingBoundary,   // Content-Type header is absent or has no boundary parameter
+    Parse(multer::Error),
+}
+```
+
+A missing boundary means the request was not sent as `multipart/form-data`. For user-facing errors, map `MultipartError` to an `HttpError`:
+
+```rust
+use toni::{extractors::Multipart, HttpError};
+
+#[post("/upload")]
+async fn upload(&self, mut mp: Multipart) -> Result<Body, HttpError> {
+    while let Some(field) = mp.next_field().await
+        .map_err(|e| HttpError::BadRequest(e.to_string()))?
+    {
+        // process field
+    }
+    Ok(Body::json(serde_json::json!({ "ok": true })))
+}
+```

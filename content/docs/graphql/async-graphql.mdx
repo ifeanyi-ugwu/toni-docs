@@ -134,22 +134,123 @@ impl ContextBuilder for AppContextBuilder {
 }
 ```
 
+## Subscriptions
+
+Enable GraphQL subscriptions over the `graphql-transport-ws` protocol by calling `.with_subscription_path()`:
+
+```rust
+let schema = Schema::build(QueryRoot, EmptyMutation, SubscriptionRoot).finish();
+
+let graphql_module = GraphQLModule::for_root(schema, DefaultContextBuilder)
+    .with_path("/graphql")
+    .with_subscription_path("/graphql/ws");
+```
+
+Clients connect via WebSocket and must negotiate the `graphql-transport-ws` sub-protocol (graphql-ws v5+):
+
+```
+ws://localhost:3000/graphql/ws
+Sec-WebSocket-Protocol: graphql-transport-ws
+```
+
+### Subscription context
+
+Use `.with_subscription_context()` to inject per-connection data into subscription resolvers. The builder receives a `&WsClient` (carrying handshake headers) and the `connection_init` payload:
+
+```rust
+use async_graphql::Data;
+use async_trait::async_trait;
+use serde_json::Value;
+use toni::WsClient;
+use toni_async_graphql::SubscriptionContextBuilder;
+
+#[injectable(pub struct AppSubscriptionContextBuilder {
+    #[inject]
+    auth_service: AuthService,
+})]
+impl AppSubscriptionContextBuilder {
+    pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
+}
+
+#[async_trait]
+impl SubscriptionContextBuilder for AppSubscriptionContextBuilder {
+    async fn build(&self, client: &WsClient, init_payload: Option<Value>) -> Data {
+        let mut data = Data::default();
+
+        if let Some(token) = init_payload
+            .as_ref()
+            .and_then(|p| p.get("authToken"))
+            .and_then(|t| t.as_str())
+        {
+            if let Some(user) = self.auth_service.verify(token).await {
+                data.insert(user);
+            }
+        }
+
+        data
+    }
+}
+
+// Wire it in:
+GraphQLModule::for_root(schema, DefaultContextBuilder)
+    .with_subscription_path("/graphql/ws")
+    .with_subscription_context(AppSubscriptionContextBuilder { /* ... */ })
+```
+
+When you don't need subscription context data, `DefaultSubscriptionContextBuilder` is used automatically.
+
+### Example subscription schema
+
+```rust
+use async_graphql::{Object, Schema, EmptyMutation, Subscription, Context};
+use futures::Stream;
+use futures::stream;
+
+pub struct QueryRoot;
+
+#[Object]
+impl QueryRoot {
+    async fn ping(&self) -> &str { "pong" }
+}
+
+pub struct SubscriptionRoot;
+
+#[Subscription]
+impl SubscriptionRoot {
+    async fn countdown(&self, from: i32) -> impl Stream<Item = i32> {
+        stream::iter((0..=from).rev())
+    }
+}
+
+pub type AppSchema = Schema<QueryRoot, EmptyMutation, SubscriptionRoot>;
+```
+
 ## API reference
 
 ```rust
-use toni_async_graphql::{GraphQLModule, ContextBuilder, DefaultContextBuilder};
+use toni_async_graphql::{GraphQLModule, ContextBuilder, DefaultContextBuilder,
+                         SubscriptionContextBuilder, DefaultSubscriptionContextBuilder};
 
 // Module builder
 GraphQLModule::for_root(schema, context_builder) -> GraphQLModule<Q, M, S, Ctx>
-    .with_path(impl Into<String>) -> Self     // endpoint path (default: "/graphql")
-    .with_playground(bool) -> Self            // toggle playground (default: debug_assertions)
+    .with_path(impl Into<String>) -> Self                    // HTTP endpoint (default: "/graphql")
+    .with_playground(bool) -> Self                           // toggle playground (default: debug_assertions)
+    .with_subscription_path(impl Into<String>) -> Self       // WebSocket endpoint for subscriptions
+    .with_subscription_context(impl SubscriptionContextBuilder) -> Self
 
-// ContextBuilder trait
+// ContextBuilder trait (for queries/mutations)
 #[async_trait]
 trait ContextBuilder: Send + Sync + 'static {
     async fn build(&self, req: &RequestPart) -> async_graphql::Data;
 }
 
-// No-op implementation
+// SubscriptionContextBuilder trait
+#[async_trait]
+trait SubscriptionContextBuilder: Send + Sync + 'static {
+    async fn build(&self, client: &WsClient, init_payload: Option<Value>) -> async_graphql::Data;
+}
+
+// No-op implementations
 struct DefaultContextBuilder;
+struct DefaultSubscriptionContextBuilder;
 ```

@@ -12,6 +12,7 @@
     "database",
     "graphql",
     "configuration",
+    "security",
     "lifecycle-hooks",
     "cli",
     "testing",

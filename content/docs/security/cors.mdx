@@ -1,0 +1,147 @@
+---
+title: CORS
+description: Configuring cross-origin resource sharing for HTTP routes and WebSocket connections.
+---
+
+CORS for HTTP and WebSockets work differently at the protocol level — Toni handles them as two separate concerns.
+
+## HTTP CORS
+
+Register a `CorsLayer` as global middleware:
+
+```toml
+[dependencies]
+toni = { version = "0.2", features = ["tower-compat"] }
+tower-http = { version = "0.6", features = ["cors"] }
+```
+
+```rust
+use std::sync::Arc;
+use toni::ToniFactory;
+use toni::tower_compat::TowerLayer;
+use toni_axum::AxumAdapter;
+use tower_http::cors::CorsLayer;
+
+#[tokio::main]
+async fn main() {
+    let mut factory = ToniFactory::new();
+    factory.use_global_middleware(Arc::new(TowerLayer::new(CorsLayer::permissive())));
+
+    let mut app = factory.create_with(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await;
+}
+```
+
+### Fine-grained configuration
+
+`CorsLayer::permissive()` is useful in development. For production, restrict origins, methods, and headers:
+
+```rust
+use http::header::{AUTHORIZATION, CONTENT_TYPE};
+use http::Method;
+use tower_http::cors::CorsLayer;
+
+let cors = CorsLayer::new()
+    .allow_origin("https://myapp.com".parse::<axum::http::HeaderValue>().unwrap())
+    .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+    .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+    .allow_credentials(true);
+
+factory.use_global_middleware(Arc::new(TowerLayer::new(cors)));
+```
+
+For multiple allowed origins:
+
+```rust
+use axum::http::HeaderValue;
+
+let cors = CorsLayer::new()
+    .allow_origin([
+        "https://myapp.com".parse::<HeaderValue>().unwrap(),
+        "https://staging.myapp.com".parse::<HeaderValue>().unwrap(),
+    ]);
+```
+
+See the [`CorsLayer` docs](https://docs.rs/tower-http/latest/tower_http/cors/struct.CorsLayer.html) for the full builder API including `allow_private_network`, `max_age`, and `expose_headers`.
+
+---
+
+## WebSocket origin validation
+
+WebSockets do not use CORS. There is no preflight — the browser upgrades the connection directly and sends an `Origin` header in the handshake. The server decides whether to accept or reject based on that header. `Access-Control-*` response headers are not checked by the browser for WebSocket connections.
+
+The right place to validate the `Origin` header in Toni is a **guard** on the gateway. Guards receive the full upgrade request (including all headers) and run before any connection lifecycle hooks.
+
+```rust
+use toni::{Context, Guard};
+use toni_macros::guard;
+
+#[guard]
+impl OriginGuard {
+    fn can_activate(&self, ctx: &Context) -> bool {
+        ctx.get_request_part()
+            .and_then(|parts| parts.headers.get("origin"))
+            .and_then(|v| v.to_str().ok())
+            .map(|origin| origin == "https://myapp.com")
+            .unwrap_or(false)
+    }
+}
+```
+
+Apply it to a gateway:
+
+```rust
+use toni_macros::{websocket_gateway, subscribe_message, use_guards};
+
+#[websocket_gateway("/chat")]
+#[use_guards(OriginGuard)]
+impl ChatGateway {
+    #[subscribe_message("message")]
+    async fn on_message(&self, client: WsClient, msg: WsMessage) -> WsHandlerResult {
+        Ok(WsHandlerOutput::Empty)
+    }
+}
+```
+
+A connection rejected by the guard closes before `on_connect` fires.
+
+### Multiple allowed origins from config
+
+```rust
+use toni::{Context, Guard};
+use toni_macros::{guard, injectable};
+
+#[injectable]
+pub struct OriginGuard {
+    #[inject]
+    config: ConfigService<AppConfig>,
+}
+
+#[guard]
+impl OriginGuard {
+    fn can_activate(&self, ctx: &Context) -> bool {
+        let allowed = &self.config.get_ref().allowed_origins;
+        ctx.get_request_part()
+            .and_then(|parts| parts.headers.get("origin"))
+            .and_then(|v| v.to_str().ok())
+            .map(|origin| allowed.iter().any(|a| a == origin))
+            .unwrap_or(false)
+    }
+}
+```
+
+### Missing Origin header
+
+Browsers always send `Origin` for cross-origin WebSocket connections. Direct connections (e.g., `curl`, native apps, or same-origin pages) may omit it. The examples above default to `false` (reject) on a missing header — the safer default for public-facing gateways.
+
+---
+
+## Why they're separate
+
+| | HTTP CORS | WebSocket origin |
+|---|---|---|
+| Protocol mechanism | `Access-Control-*` headers | `Origin` header in HTTP upgrade |
+| Browser enforcement | Strong — blocks request before it's sent | Minimal — browser sends but doesn't block |
+| Preflight | Yes (`OPTIONS`) | No |
+| Where to handle | Global middleware (`TowerLayer`) | Gateway guard |

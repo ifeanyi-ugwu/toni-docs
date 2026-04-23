@@ -42,7 +42,6 @@ async fn main() {
     let mut factory = ToniFactory::new();
     factory
         .use_global_middleware(Arc::new(LoggerMiddleware))
-        .use_global_middleware(Arc::new(CorsMiddleware::default()))
         .use_global_guards(Arc::new(ThrottleGuard::default()))
         .use_global_error_handler(Arc::new(GlobalErrorHandler));
 
@@ -51,6 +50,8 @@ async fn main() {
     app.start().await;
 }
 ```
+
+For CORS, see [CORS](/docs/security/cors).
 
 ## WebSocket support
 
@@ -83,9 +84,25 @@ fn main() {
 }
 ```
 
-## Integrating Axum layers
+## Tower layers
 
-If you need Axum-specific `tower::Layer` middleware (e.g., rate limiting from `tower-http`, request tracing), you can add them to the Axum router after route registration. This is an advanced use case — in most cases, Toni middleware covers your needs.
+Any [`tower::Layer`](https://docs.rs/tower/latest/tower/trait.Layer.html) can be used in Toni via `TowerLayer`. Register it globally to apply to every request, or scoped to specific routes via `configure_middleware`:
+
+```rust
+use std::sync::Arc;
+use toni::tower_compat::TowerLayer;
+use tower_http::trace::TraceLayer;
+
+// Global — every request
+factory.use_global_middleware(Arc::new(TowerLayer::new(TraceLayer::new_for_http())));
+
+// Scoped — specific routes only
+fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
+    consumer
+        .apply(TowerLayer::new(TraceLayer::new_for_http()))
+        .for_routes(vec!["/api/*"]);
+}
+```
 
 ## HTTPS/TLS
 

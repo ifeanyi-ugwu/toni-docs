@@ -6,16 +6,15 @@ description: Guards run before route handlers and decide whether the request is 
 A guard is a struct that implements the `Guard` trait. It has a single method, `can_activate`, which returns `true` to allow the request through or `false` to block it. Guards run after middleware, after routing, and before interceptors and the route handler.
 
 <Bridge>
-Guards in Toni are the direct equivalent of NestJS's `CanActivate` guards. The method is **synchronous** — `can_activate` returns a plain `bool`, not a `Future`. This is a key difference from NestJS where `canActivate` can return `Promise<boolean>`.
-
-For anything requiring an async call (JWT verification, database lookups), inject a service that caches the result synchronously. A common pattern is a request-scoped `AuthContext` populated via `from_request` that the guard reads from the request extensions.
+Guards in Toni are the direct equivalent of NestJS's `CanActivate` guards. `can_activate` is **async** — you can perform JWT verification, database lookups, or any async work directly inside the guard. Returning `true` allows the request; `false` blocks it with a 403.
 </Bridge>
 
 ## The Guard trait
 
 ```rust
+#[async_trait]
 pub trait Guard: Send + Sync {
-    fn can_activate(&self, context: &Context) -> bool;
+    async fn can_activate(&self, context: &Context) -> bool;
 }
 ```
 
@@ -24,12 +23,14 @@ pub trait Guard: Send + Sync {
 ## A simple authentication guard
 
 ```rust
+use async_trait::async_trait;
 use toni::{Guard, Context};
 
 pub struct AuthGuard;
 
+#[async_trait]
 impl Guard for AuthGuard {
-    fn can_activate(&self, context: &Context) -> bool {
+    async fn can_activate(&self, context: &Context) -> bool {
         let req = context.get_request();
         req.headers.get("authorization")
             .and_then(|h| h.strip_prefix("Bearer "))
@@ -44,14 +45,16 @@ impl Guard for AuthGuard {
 Guards can read metadata attached to routes with `#[set_metadata]`:
 
 ```rust
+use async_trait::async_trait;
 use toni::{Guard, Context};
 
 pub struct Role(pub Vec<&'static str>);
 
 pub struct RoleGuard;
 
+#[async_trait]
 impl Guard for RoleGuard {
-    fn can_activate(&self, context: &Context) -> bool {
+    async fn can_activate(&self, context: &Context) -> bool {
         let required = match context.get_metadata::<Role>() {
             Some(role) => &role.0,
             None => return true,  // no role metadata = public route
@@ -87,6 +90,7 @@ impl AdminController {
 Guards that need services (token validation, database lookups) should be implemented as injectables:
 
 ```rust
+use async_trait::async_trait;
 use toni::{injectable, Guard, Context};
 
 #[injectable(pub struct JwtGuard {
@@ -98,15 +102,16 @@ impl JwtGuard {
     pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
 }
 
+#[async_trait]
 impl Guard for JwtGuard {
-    fn can_activate(&self, context: &Context) -> bool {
+    async fn can_activate(&self, context: &Context) -> bool {
         let req = context.get_request();
         let token = req.headers
             .get("authorization")
             .and_then(|h| h.strip_prefix("Bearer "));
 
         match token {
-            Some(t) => self.auth_service.verify_jwt(t),
+            Some(t) => self.auth_service.verify_jwt(t).await,
             None => false,
         }
     }
@@ -165,12 +170,12 @@ When multiple guards are applied, they run in the order listed. If any returns `
 When `can_activate` returns `false`, Toni responds with `403 Forbidden`. To return a different status or body, throw an `HttpError` from within the guard instead:
 
 ```rust
+#[async_trait]
 impl Guard for StrictAuthGuard {
-    fn can_activate(&self, context: &Context) -> bool {
+    async fn can_activate(&self, context: &Context) -> bool {
         let req = context.get_request();
         if req.headers.get("authorization").is_none() {
-            // Panic with an HttpError — the error handler chain picks it up
-            // (advanced pattern — usually returning false is sufficient)
+            // Returning false yields a 403; throw HttpError for a custom status
         }
         false
     }

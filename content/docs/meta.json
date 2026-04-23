@@ -7,6 +7,7 @@
     "request-lifecycle",
     "extractors",
     "http-adapters",
+    "techniques",
     "websocket",
     "microservices",
     "database",

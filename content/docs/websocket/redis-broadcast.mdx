@@ -1,0 +1,124 @@
+---
+title: Redis Broadcast
+description: Scale WebSocket broadcasts across multiple processes with toni-redis-broadcast.
+---
+
+`toni-redis-broadcast` replaces the in-process `BroadcastModule` with a Redis-backed broadcaster. Every `send()` call publishes to a Redis Pub/Sub channel; a background subscriber loop on each process delivers messages to locally connected clients.
+
+Use this when running multiple instances of the same service and needing clients on different processes to receive the same WebSocket messages.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-redis-broadcast = "0.1"
+```
+
+## Setup
+
+Replace `BroadcastModule::new()` with `RedisBroadcastModule::for_root(url)` in your module:
+
+```rust
+use toni_redis_broadcast::RedisBroadcastModule;
+
+#[module(
+    imports: [RedisBroadcastModule::for_root("redis://127.0.0.1:6379")],
+    providers: [ChatGateway, ChatService],
+)]
+pub struct AppModule;
+```
+
+`for_root` returns a **global** `DynamicModule`. It registers both `BroadcastService` (used internally by the gateway wiring) and `RedisBroadcastService` (your injectable for sending messages).
+
+## Injecting RedisBroadcastService
+
+Inject `RedisBroadcastService` anywhere you need to push messages across processes:
+
+```rust
+use toni_redis_broadcast::RedisBroadcastService;
+use toni::websocket::{WsClient, WsError, WsHandlerOutput, WsMessage};
+use toni::WsHandlerResult;
+use toni_macros::websocket_gateway;
+
+#[websocket_gateway("/chat", pub struct ChatGateway {
+    broadcast: RedisBroadcastService,
+})]
+impl ChatGateway {
+    pub fn new(broadcast: RedisBroadcastService) -> Self {
+        Self { broadcast }
+    }
+
+    #[subscribe_message("message")]
+    async fn handle_message(
+        &self,
+        client: WsClient,
+        message: WsMessage,
+    ) -> WsHandlerResult {
+        // Publish to all clients across all processes
+        self.broadcast
+            .to_all()
+            .send(message)
+            .await
+            .ok();
+        Ok(WsHandlerOutput::Empty)
+    }
+}
+```
+
+## RedisBroadcastService API
+
+The API mirrors `BroadcastService` but all `join_room`, `leave_room`, and membership queries are async because they touch Redis:
+
+```rust
+// Targeting — returns RedisBroadcastTarget
+broadcast.to_all()                          // all connected clients (all processes)
+broadcast.to_room(room_name)                // clients in a named room (global via Redis sets)
+broadcast.to_client(client_id)              // a specific client (routed to its process)
+broadcast.except(client_id)                 // all clients except one
+
+// Sending (async, on the target builder)
+.send(WsMessage) -> Result<usize, BroadcastError>    // returns Ok(0) — count unknowable at publish time
+.send_event(event, data) -> Result<usize, BroadcastError>  // JSON: {"event": ..., "data": ...}
+
+// Room membership (async — reads/writes Redis sets)
+broadcast.join_room(client_id, room_id) -> Result<(), BroadcastError>
+broadcast.leave_room(client_id, room_id) -> Result<(), BroadcastError>
+broadcast.get_room_clients(room_id) -> Vec<String>   // async, global view
+broadcast.get_client_rooms(client_id) -> Vec<String> // async, global view
+```
+
+## Rooms
+
+Room membership is stored in Redis sets (`toni:rooms:{room}` and `toni:client:{id}:rooms`), so every process sees the same membership state:
+
+```rust
+#[subscribe_message("join")]
+async fn handle_join(
+    &self,
+    client: WsClient,
+    message: WsMessage,
+) -> WsHandlerResult {
+    let room = message.as_text().unwrap_or_default().trim_start_matches("join:");
+    self.broadcast.join_room(&client.id, room).await.ok();
+    self.broadcast
+        .to_room(room)
+        .send(WsMessage::text(format!("{} joined {room}", client.id)))
+        .await
+        .ok();
+    Ok(WsHandlerOutput::Empty)
+}
+```
+
+## Differences from BroadcastModule
+
+| | `BroadcastModule` | `RedisBroadcastModule` |
+|---|---|---|
+| Scope | Single process | All processes sharing a Redis instance |
+| Injectable | `BroadcastService` | `RedisBroadcastService` |
+| Room queries | Sync (`get_room_clients` → `Vec`) | Async (`get_room_clients` → `Vec`) |
+| Send return | `Result<usize>` (actual count) | `Result<usize>` (always `Ok(0)`) |
+| `except()` | Not available | Available |
+| Dependency | None | Redis |
+
+`BroadcastService` is still registered internally — the gateway framework uses it for connection lifecycle hooks. You inject `RedisBroadcastService` for all cross-process sends.

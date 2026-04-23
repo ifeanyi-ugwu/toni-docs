@@ -1,4 +1,4 @@
 {
   "title": "WebSocket",
-  "pages": ["gateways", "broadcasting", "rooms", "with-di"]
+  "pages": ["gateways", "broadcasting", "rooms", "with-di", "redis-broadcast"]
 }

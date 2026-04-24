@@ -1,0 +1,232 @@
+---
+title: Health Checks
+description: Application health endpoints with toni-terminus — liveness, readiness, and custom indicators.
+---
+
+`toni-terminus` provides a `HealthCheckService` and a set of built-in indicators for HTTP endpoints, memory, and disk. Database crates expose their own indicators behind an optional `health` feature flag.
+
+## Installation
+
+```toml
+[dependencies]
+toni-terminus = { version = "0.1", features = ["http", "memory", "disk", "timeout"] }
+```
+
+All features are opt-in:
+
+| Feature   | What it adds                |
+|-----------|-----------------------------|
+| `http`    | `HttpHealthIndicator`       |
+| `memory`  | `MemoryHealthIndicator`     |
+| `disk`    | `DiskHealthIndicator`       |
+| `timeout` | `.timeout(Duration)` on the check builder |
+
+## Setup
+
+Import `TerminusModule` once in your root module. It registers `HealthCheckService` globally, and each enabled feature registers its indicator:
+
+```rust
+use toni_terminus::TerminusModule;
+
+#[module(
+    imports: [TerminusModule::new()],
+    controllers: [HealthController],
+)]
+pub struct AppModule;
+```
+
+## Basic health controller
+
+```rust
+use std::time::Duration;
+use toni::*;
+use toni_terminus::{
+    HealthCheckService, HttpHealthIndicator, MemoryHealthIndicator, DiskHealthIndicator,
+};
+
+#[controller("/health", pub struct HealthController {
+    #[inject] health: HealthCheckService,
+    #[inject] http:   HttpHealthIndicator,
+    #[inject] memory: MemoryHealthIndicator,
+    #[inject] disk:   DiskHealthIndicator,
+})]
+impl HealthController {
+    /// Liveness probe — is the process alive? No network calls.
+    #[get("/live")]
+    async fn liveness(&self) -> impl IntoResponse {
+        self.health
+            .check(vec![
+                self.memory.check_rss("memory", 512 * 1024 * 1024),
+            ])
+            .await
+    }
+
+    /// Readiness probe — can the process serve traffic?
+    #[get("/ready")]
+    async fn readiness(&self) -> impl IntoResponse {
+        self.health
+            .check(vec![
+                self.http.ping_check("api", "https://api.example.com/health"),
+                self.memory.check_rss("memory", 512 * 1024 * 1024),
+                self.disk.check_storage("disk", "/", 5.0),
+            ])
+            .timeout(Duration::from_secs(5))
+            .await
+    }
+}
+```
+
+All checks run concurrently. The response is HTTP 200 when every check passes, HTTP 503 if any fail. The body is a JSON object keyed by the `key` string passed to each check:
+
+```json
+// 200 — all healthy
+{"status":"ok","info":{"api":{"status":"up","responseTime":42},"memory":{"status":"up"}}}
+
+// 503 — something down
+{"status":"error","error":{"api":{"status":"down","message":"connection refused"}}}
+```
+
+## Built-in indicators
+
+### HttpHealthIndicator
+
+Requires the `http` feature.
+
+```rust
+// Passes on any 2xx or 3xx response
+self.http.ping_check("docs", "https://docs.example.com")
+
+// Full control — inspect status, headers, or body
+self.http.response_check("api", "https://api.example.com/status", |resp| {
+    Box::pin(async move {
+        resp.json::<serde_json::Value>().await
+            .map(|v| v["ready"] == true)
+            .unwrap_or(false)
+    })
+})
+```
+
+### MemoryHealthIndicator
+
+Requires the `memory` feature.
+
+```rust
+// Fail when process RSS ≥ threshold
+self.memory.check_rss("memory_rss", 512 * 1024 * 1024)
+
+// Fail when total system memory used ≥ threshold
+self.memory.check_heap("memory_heap", 1024 * 1024 * 1024)
+```
+
+### DiskHealthIndicator
+
+Requires the `disk` feature.
+
+```rust
+// Fail when the disk containing "/" has less than 10% free space
+self.disk.check_storage("disk", "/", 10.0)
+```
+
+### Timeout
+
+Requires the `timeout` feature. Applies independently to each check — a slow check doesn't block the others:
+
+```rust
+self.health
+    .check(vec![...])
+    .timeout(Duration::from_secs(3))
+    .await
+```
+
+## Database health indicators
+
+Each database crate provides a health indicator behind a `health` feature flag. Enable it alongside the rest of your database setup:
+
+```toml
+toni-redis  = { version = "0.1", features = ["health"] }
+toni-seaorm = { version = "0.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "health"] }
+toni-mongodb = { version = "0.1", features = ["health"] }
+toni-sqlx   = { version = "0.1", features = ["postgres", "runtime-tokio-rustls", "health"] }
+toni-diesel = { version = "0.1", features = ["postgres", "health"] }
+```
+
+When `health` is enabled, `for_root()` automatically registers the indicator alongside the connection — inject it directly:
+
+| Crate         | Indicator type                  | Method            |
+|---------------|---------------------------------|-------------------|
+| `toni-redis`  | `RedisHealthIndicator`          | `ping_check(key)` |
+| `toni-seaorm` | `SeaOrmHealthIndicator`         | `ping_check(key)` |
+| `toni-mongodb`| `MongoHealthIndicator`          | `ping_check(key)` |
+| `toni-sqlx`   | `SqlxHealthIndicator<DB>`       | `ping_check(key)` |
+| `toni-diesel` | `PgHealthIndicator` / `MySqlHealthIndicator` | `ping_check(key)` |
+
+```rust
+use toni_redis::RedisHealthIndicator;
+use toni_seaorm::SeaOrmHealthIndicator;
+
+#[controller("/health", pub struct HealthController {
+    #[inject] health: HealthCheckService,
+    #[inject] redis:  RedisHealthIndicator,
+    #[inject] db:     SeaOrmHealthIndicator,
+})]
+impl HealthController {
+    #[get("/ready")]
+    async fn readiness(&self) -> impl IntoResponse {
+        self.health
+            .check(vec![
+                self.redis.ping_check("redis"),
+                self.db.ping_check("database"),
+            ])
+            .await
+    }
+}
+```
+
+## Custom indicators
+
+Implement `HealthIndicator` for checks the built-ins don't cover. Clone all state before boxing the future so it is `'static`:
+
+```rust
+use futures::future::BoxFuture;
+use serde_json::json;
+use toni_terminus::{HealthEntry, HealthIndicator, HealthIndicatorResult};
+
+pub struct MyServiceIndicator {
+    client: reqwest::Client,
+    url: String,
+}
+
+impl HealthIndicator for MyServiceIndicator {
+    fn check(&self, key: &str) -> BoxFuture<'static, HealthIndicatorResult> {
+        let key = key.to_string();
+        let client = self.client.clone();
+        let url = self.url.clone();
+        Box::pin(async move {
+            match client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => Ok(HealthEntry::up(key)),
+                Ok(r) => Err(HealthEntry::down_with(
+                    key,
+                    json!({ "statusCode": r.status().as_u16() }),
+                )),
+                Err(e) => Err(HealthEntry::down_with(key, json!({ "message": e.to_string() }))),
+            }
+        })
+    }
+}
+```
+
+Pass it directly to `check` — no registration needed for one-off indicators:
+
+```rust
+self.health.check(vec![
+    MyServiceIndicator { client, url }.check("my-service"),
+]).await
+```
+
+## HealthEntry helpers
+
+```rust
+HealthEntry::up(key)                          // pass, no details
+HealthEntry::up_with(key, serde_json::Value)  // pass with detail object
+HealthEntry::down_with(key, serde_json::Value) // fail with detail object
+```

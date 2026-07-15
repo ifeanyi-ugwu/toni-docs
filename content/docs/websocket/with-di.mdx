@@ -1,18 +1,18 @@
 ---
 title: WebSocket + Dependency Injection
-description: Gateways are full DI participants — inject any service, use lifecycle hooks, export providers.
+description: Gateways are full DI participants — inject any service, apply guards and interceptors, use lifecycle hooks.
 ---
 
-WebSocket gateways are providers like any other. They participate fully in the DI system: they can inject services, implement lifecycle hooks, and be exported for other modules to use.
-
-Declare gateways with the `#[websocket_gateway]` macro, which handles both the gateway registration and the struct definition in one place.
+WebSocket gateways are providers like any other. They participate fully in the DI system: they can inject services, implement lifecycle hooks, and be guarded and intercepted like HTTP routes — with `WsContext` in place of `HttpContext`.
 
 ## Injecting services into gateways
+
+Declare dependencies as `#[inject]` fields and take them in the `#[new]` constructor:
 
 ```rust
 use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage};
 use toni::WsHandlerResult;
-use toni_macros::{injectable, module, websocket_gateway};
+use toni_macros::{injectable, module, new, on_connect, on_disconnect, subscriptions, websocket_gateway};
 
 #[injectable]
 pub struct GameService { /* ... */ }
@@ -20,20 +20,17 @@ pub struct GameService { /* ... */ }
 #[injectable]
 pub struct PlayerService { /* ... */ }
 
-#[websocket_gateway("/game", pub struct GameGateway {
+#[websocket_gateway("/game")]
+pub struct GameGateway {
+    #[inject]
     game_service: GameService,
+    #[inject]
     player_service: PlayerService,
+    #[inject]
     broadcast: BroadcastService,
-})]
-impl GameGateway {
-    pub fn new(
-        game_service: GameService,
-        player_service: PlayerService,
-        broadcast: BroadcastService,
-    ) -> Self {
-        Self { game_service, player_service, broadcast }
-    }
+}
 
+impl GameGateway {
     #[on_connect]
     async fn handle_connect(&self, client: &WsClient) -> Result<(), WsError> {
         let player = self.player_service.create_session(&client.id).await;
@@ -45,12 +42,25 @@ impl GameGateway {
         Ok(())
     }
 
+    #[on_disconnect]
+    async fn handle_disconnect(&self, client: &WsClient) {
+        self.player_service.end_session(&client.id).await;
+    }
+}
+
+#[subscriptions]
+impl GameGateway {
+    #[new]
+    pub fn new(
+        game_service: GameService,
+        player_service: PlayerService,
+        broadcast: BroadcastService,
+    ) -> Self {
+        Self { game_service, player_service, broadcast }
+    }
+
     #[subscribe_message("action")]
-    async fn handle_action(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> WsHandlerResult {
+    async fn handle_action(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
         if let Some(text) = message.as_text() {
             if let Ok(action) = serde_json::from_str::<GameAction>(text) {
                 let result = self.game_service.process_action(&client.id, action).await;
@@ -60,105 +70,196 @@ impl GameGateway {
         }
         Ok(WsHandlerOutput::Empty)
     }
+}
+```
 
-    #[on_disconnect]
-    async fn handle_disconnect(&self, client: &WsClient) {
-        self.player_service.end_session(&client.id).await;
+## Guards on gateways
+
+A WebSocket guard is a plain `#[injectable]` provider implementing `Guard<WsContext>` — no marker macro. The role is detected from the trait impl:
+
+```rust
+use toni::async_trait;
+use toni::context::WsContext;
+use toni::traits_helpers::Guard;
+use toni_macros::injectable;
+
+#[injectable]
+pub struct WsAuthGuard;
+
+#[async_trait]
+impl Guard<WsContext> for WsAuthGuard {
+    async fn can_activate(&self, ctx: &WsContext) -> bool {
+        // Handshake header keys are stored lowercase
+        ctx.client().handshake.headers.get("x-auth-token").is_some()
     }
 }
 ```
 
-## Lifecycle hooks on gateways
-
-Gateways support the same lifecycle hooks as any provider:
+Apply it to a gateway with `#[use_guards]` on the `#[subscriptions]` impl — this is the idiomatic form. The guard must also be listed in the module's `providers`:
 
 ```rust
-#[websocket_gateway("/ticker", pub struct StockTickerGateway {
-    market_service: MarketService,
+#[websocket_gateway("/chat")]
+pub struct ChatGateway {
+    #[inject]
     broadcast: BroadcastService,
-})]
-impl StockTickerGateway {
-    pub fn new(market_service: MarketService, broadcast: BroadcastService) -> Self {
-        Self { market_service, broadcast }
+}
+
+#[subscriptions]
+#[use_guards(WsAuthGuard)]
+impl ChatGateway {
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
     }
 
+    #[subscribe_message("message")]
+    async fn handle_message(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+        // Only reached when WsAuthGuard passed
+        Ok(WsMessage::text("ok").into())
+    }
+}
+
+#[module(
+    imports: [BroadcastModule::new()],
+    providers: [ChatGateway, WsAuthGuard],
+)]
+struct ChatModule;
+```
+
+Gateway-level guards run twice: once at **connect** (a rejection refuses the connection) and once per **message** (a rejection drops the message and keeps the connection alive).
+
+### Per-handler guards
+
+`#[use_guards]` also works on individual `#[subscribe_message]` methods — the guard then applies only to that event, on top of any gateway-level guards:
+
+```rust
+#[subscribe_message("admin_command")]
+#[use_guards(AdminGuard)]
+async fn on_admin(&self, client: WsClient, msg: WsMessage) -> WsHandlerResult {
+    Ok(WsMessage::text("done").into())
+}
+```
+
+### Global WebSocket guards
+
+Register a guard for every gateway on the factory. Global enhancers are per-transport — WebSocket guards never see HTTP traffic:
+
+```rust
+use std::sync::Arc;
+
+let mut factory = ToniFactory::new();
+factory.use_global_ws_guards(Arc::new(WsAuthGuard));
+let mut app = factory.create_with(ChatModule).await;
+```
+
+Globally registered instances are constructed by you (`Arc::new`), so they don't need to appear in `providers`.
+
+## Interceptors on gateways
+
+Same model: `#[injectable]` + `Interceptor<WsContext>`. Interceptors wrap the handler — run code before and after, or rewrite the response:
+
+```rust
+use toni::async_trait;
+use toni::context::WsContext;
+use toni::traits_helpers::{Interceptor, InterceptorNext};
+use toni_macros::injectable;
+
+#[injectable]
+pub struct WsLoggingInterceptor;
+
+#[async_trait]
+impl Interceptor<WsContext> for WsLoggingInterceptor {
+    async fn intercept(&self, ctx: &mut WsContext, next: Box<dyn InterceptorNext<WsContext>>) {
+        println!("event '{}' from {}", ctx.event(), ctx.client().id);
+        next.run(ctx).await;
+        println!("event processed");
+    }
+}
+```
+
+An interceptor can rewrite the handler's reply through the context's response slot:
+
+```rust
+#[injectable]
+pub struct WsPrefixInterceptor;
+
+#[async_trait]
+impl Interceptor<WsContext> for WsPrefixInterceptor {
+    async fn intercept(&self, ctx: &mut WsContext, next: Box<dyn InterceptorNext<WsContext>>) {
+        next.run(ctx).await;
+        if let Some(Ok(Some(msg))) = ctx.response() {
+            let prefixed = format!("prefixed:{}", msg.as_text().unwrap_or(""));
+            ctx.set_response(Ok(Some(WsMessage::text(prefixed))));
+        }
+    }
+}
+```
+
+Apply with `#[use_interceptors(...)]` on the `#[subscriptions]` impl or on a single handler, or globally with `factory.use_global_ws_interceptors(Arc::new(...))`. Enhancer attributes stack:
+
+```rust
+#[subscriptions]
+#[use_guards(WsAuthGuard)]
+#[use_interceptors(WsLoggingInterceptor)]
+impl ChatGateway {
+    // ...
+}
+```
+
+Pipes (`Pipe<WsContext>`, `#[use_pipes]`) and error handlers (`ErrorHandler<WsContext, WsMessage>`, `#[use_error_handlers]`) follow the same pattern, with matching `use_global_ws_pipes` / `use_global_ws_error_handler` factory methods.
+
+## WsContext
+
+`WsContext` is the per-message context enhancers receive:
+
+```rust
+ctx.client()      // &WsClient — id, handshake headers/query, extensions
+ctx.message()     // &WsMessage — the inbound frame
+ctx.event()       // &str — the routed event name ("connect" during connection guards)
+ctx.response()    // clone of the response slot (interceptors, after next.run)
+ctx.set_response(Ok(Some(msg)))  // overwrite the reply
+```
+
+## Lifecycle hooks on gateways
+
+Gateways support the same lifecycle hooks as any provider. All hooks are `async`; the two startup hooks return `toni::InitResult`:
+
+```rust
+#[websocket_gateway("/ticker")]
+pub struct StockTickerGateway {
+    #[inject]
+    market_service: MarketService,
+}
+
+impl StockTickerGateway {
     #[on_module_init]
-    async fn init(&self) {
+    async fn init(&self) -> toni::InitResult {
         self.market_service.connect().await;
+        Ok(())
     }
 
     #[on_application_shutdown]
     async fn shutdown(&self, _signal: Option<String>) {
         self.market_service.disconnect().await;
     }
+}
+
+#[subscriptions]
+impl StockTickerGateway {
+    #[new]
+    pub fn new(market_service: MarketService) -> Self {
+        Self { market_service }
+    }
 
     #[subscribe_message("subscribe")]
-    async fn handle_subscribe(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> WsHandlerResult {
+    async fn handle_subscribe(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
         // handle ticker subscription...
         Ok(WsHandlerOutput::Empty)
     }
 }
 ```
 
-## Guards on gateways
-
-Guards work identically on gateways and HTTP controllers. `can_activate` receives a `Context` that you can switch to the WebSocket view:
-
-```rust
-use async_trait::async_trait;
-use toni::{Guard, Context};
-use toni_macros::guard;
-
-pub struct WsAuthGuard;
-
-#[guard]
-impl WsAuthGuard {}
-
-#[async_trait]
-impl Guard for WsAuthGuard {
-    async fn can_activate(&self, context: &Context) -> bool {
-        if let Some(ws) = context.switch_to_ws() {
-            // Headers are stored in lowercase
-            return ws.client().handshake.headers.get("x-auth-token").is_some();
-        }
-        false
-    }
-}
-```
-
-Apply globally so every gateway requires auth:
-
-```rust
-let mut factory = ToniFactory::new();
-factory.use_global_guards(Arc::new(WsAuthGuard));
-let mut app = factory.create_with(ChatModule).await;
-```
-
-## Interceptors on gateways
-
-```rust
-use toni::traits_helpers::{Interceptor, InterceptorNext};
-use toni_macros::interceptor;
-
-pub struct WsLoggingInterceptor;
-
-#[interceptor]
-impl WsLoggingInterceptor {}
-
-#[async_trait]
-impl Interceptor for WsLoggingInterceptor {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
-        if let Some(ws) = context.switch_to_ws() {
-            println!("WS event '{}' from {}", ws.event(), ws.client().id);
-        }
-        next.run(context).await;
-    }
-}
-```
+For WebSocket-specific setup after the gateway's path is registered, use `#[after_init]` — see [Gateways](/docs/websocket/gateways#connection-lifecycle-hooks).
 
 ## Module setup
 
@@ -176,4 +277,4 @@ impl Interceptor for WsLoggingInterceptor {
 pub struct GameModule;
 ```
 
-Include `BroadcastModule::new()` in `imports` whenever any gateway or service needs `BroadcastService`.
+Include `BroadcastModule::new()` in `imports` whenever any gateway or service needs `BroadcastService`, and list every enhancer referenced by `#[use_guards]` / `#[use_interceptors]` in `providers`.

@@ -5,7 +5,7 @@ description: Add Toni to a new or existing Rust project.
 
 ## Prerequisites
 
-- Rust 1.75 or later (2024 edition is recommended)
+- Rust 1.85 or later (the crates use the 2024 edition)
 - Cargo
 
 ## Option A — Start from a template with the CLI
@@ -19,7 +19,7 @@ cd my_app
 cargo run
 ```
 
-This scaffolds a project with `AppModule`, `AppController`, and `AppService` wired together and ready to run.
+This scaffolds a project with `AppModule`, `AppController`, and `AppService` wired together and ready to run. See [CLI Commands](/docs/cli/commands) for the exact layout it generates.
 
 ## Option B — Add to an existing project
 
@@ -30,8 +30,11 @@ Add the core crate and your chosen HTTP adapter to `Cargo.toml`:
 toni = "0.2"
 
 # Choose one adapter:
-toni-axum = "0.1"    # Axum + Tokio  (I/O-bound workloads)
-# toni-actix = "0.1" # Actix-web     (CPU-bound workloads)
+toni-axum = "0.1"     # Axum + Tokio  (I/O-bound workloads)
+# toni-actix = "0.1"  # Actix-web     (CPU-bound workloads)
+# toni-salvo = "0.1"  # Salvo
+# toni-poem = "0.1"   # Poem
+# toni-rocket = "0.1" # Rocket
 
 # Async runtime (required with toni-axum)
 tokio = { version = "1", features = ["full"] }
@@ -59,7 +62,7 @@ use toni_axum::AxumAdapter;
 async fn main() {
     let mut app = ToniFactory::create(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await.unwrap();
 }
 ```
 
@@ -78,8 +81,8 @@ await app.listen(3000);
 // Toni
 let mut app = ToniFactory::create(AppModule).await;
 app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-app.start().await;
+app.start().await.unwrap();
 ```
 
-`ToniFactory::create` is the synchronous-looking entry point. The adapter is wired separately via `use_http_adapter`, which registers all routes from the module tree. No `app.init()` call is needed — initialization runs during `create`.
+`ToniFactory::create` takes the root module directly, like `NestFactory.create`. The adapter is wired separately via `use_http_adapter`, which registers all routes from the module tree. No `app.init()` call is needed — the DI container is built during `create`; `start()` binds the socket and serves until shutdown.
 </Bridge>

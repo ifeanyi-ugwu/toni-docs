@@ -15,7 +15,7 @@ Toni ships with two GraphQL integrations as separate crates. Both integrate full
 | **Best for** | Flexible context, large teams | Type-safe context, smaller teams |
 
 Both support:
-- Schema-first execution (POST + GET `/graphql`)
+- A single HTTP endpoint at `/graphql` (configurable) — POST for queries and mutations, GET for the playground
 - Built-in GraphQL Playground (disable in production)
 - Guards and interceptors on the GraphQL endpoint
 - Injecting Toni services into resolvers via the DI container

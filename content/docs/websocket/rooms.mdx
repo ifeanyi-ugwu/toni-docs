@@ -5,104 +5,34 @@ description: Group WebSocket clients into named rooms and broadcast to specific 
 
 Rooms let you group clients by a logical name and broadcast to a specific group. Common use cases: chat channels, game lobbies, collaboration sessions, topic subscriptions.
 
-Use `BroadcastService` (from `BroadcastModule`) to manage room membership and send targeted messages.
+Use `BroadcastService` (from `BroadcastModule`) to manage room membership and send targeted messages. Rooms are created implicitly — joining a room that doesn't exist creates it, and membership is cleaned up automatically when a client disconnects.
 
 ## Basic room gateway
 
-Declare gateways with the `#[websocket_gateway]` macro. Inject `BroadcastService` for room management:
+Clients send JSON frames like `{"event": "join", "data": {"room": "lobby"}}` — the `event` field routes to the handler, and the handler parses the `data` payload from the full frame:
 
 ```rust
-use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage};
+use toni::websocket::{
+    BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage,
+};
 use toni::WsHandlerResult;
-use toni_macros::{module, websocket_gateway};
+use toni_macros::{module, new, on_connect, on_disconnect, subscriptions, websocket_gateway};
 
-#[websocket_gateway("/rooms", pub struct RoomGateway {
+#[websocket_gateway("/rooms")]
+pub struct RoomGateway {
+    #[inject]
     broadcast: BroadcastService,
-})]
-impl RoomGateway {
-    pub fn new(broadcast: BroadcastService) -> Self {
-        Self { broadcast }
-    }
+}
 
+impl RoomGateway {
     #[on_connect]
     async fn handle_connect(&self, client: &WsClient) -> Result<(), WsError> {
         self.broadcast
             .to_client(&client.id)
-            .send(WsMessage::text("Connected. Send join:<room> to join."))
+            .send(WsMessage::text(format!("Connected as {}", client.id)))
             .await
             .ok();
         Ok(())
-    }
-
-    #[subscribe_message("join")]
-    async fn handle_join(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> WsHandlerResult {
-        let text = message
-            .as_text()
-            .ok_or_else(|| WsError::InvalidMessage("Expected text".into()))?;
-
-        let room = text.trim_start_matches("join:");
-        self.broadcast.join_room(&client.id, room)?;
-
-        self.broadcast
-            .to_client(&client.id)
-            .send(WsMessage::text(format!("Joined room: {room}")))
-            .await?;
-
-        // Notify others in the room
-        self.broadcast
-            .to_room(room)
-            .send(WsMessage::text(format!("{} joined", client.id)))
-            .await?;
-
-        Ok(WsHandlerOutput::Empty)
-    }
-
-    #[subscribe_message("leave")]
-    async fn handle_leave(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> WsHandlerResult {
-        let text = message
-            .as_text()
-            .ok_or_else(|| WsError::InvalidMessage("Expected text".into()))?;
-
-        let room = text.trim_start_matches("leave:");
-        self.broadcast.leave_room(&client.id, room)?;
-
-        self.broadcast
-            .to_client(&client.id)
-            .send(WsMessage::text(format!("Left room: {room}")))
-            .await?;
-
-        Ok(WsHandlerOutput::Empty)
-    }
-
-    #[subscribe_message("message")]
-    async fn handle_message(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> WsHandlerResult {
-        let text = message
-            .as_text()
-            .ok_or_else(|| WsError::InvalidMessage("Expected text".into()))?;
-
-        // Format: "message:<room>:<text>"
-        if let Some(rest) = text.strip_prefix("message:") {
-            if let Some((room, msg)) = rest.split_once(':') {
-                self.broadcast
-                    .to_room(room)
-                    .send(WsMessage::text(format!("[{room}] {}: {msg}", client.id)))
-                    .await?;
-            }
-        }
-
-        Ok(WsHandlerOutput::Empty)
     }
 
     #[on_disconnect]
@@ -119,6 +49,68 @@ impl RoomGateway {
     }
 }
 
+#[subscriptions]
+impl RoomGateway {
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
+    }
+
+    fn parse_field(message: &WsMessage, field: &str) -> Result<String, WsError> {
+        let text = message
+            .as_text()
+            .ok_or_else(|| WsError::InvalidMessage("Expected text message".into()))?;
+        let data: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| WsError::InvalidMessage(format!("Invalid JSON: {}", e)))?;
+        data["data"][field]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| WsError::InvalidMessage(format!("Missing {} field", field)))
+    }
+
+    #[subscribe_message("join")]
+    async fn handle_join(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+        let room = Self::parse_field(&message, "room")?;
+
+        self.broadcast.join_room(&client.id, &room)?;
+
+        // Notify everyone in the room, including the joiner
+        self.broadcast
+            .to_room(&room)
+            .send(WsMessage::text(format!("{} joined {}", client.id, room)))
+            .await?;
+
+        Ok(WsHandlerOutput::Empty)
+    }
+
+    #[subscribe_message("leave")]
+    async fn handle_leave(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+        let room = Self::parse_field(&message, "room")?;
+
+        self.broadcast.leave_room(&client.id, &room)?;
+
+        self.broadcast
+            .to_client(&client.id)
+            .send(WsMessage::text(format!("Left room: {}", room)))
+            .await?;
+
+        Ok(WsHandlerOutput::Empty)
+    }
+
+    #[subscribe_message("message")]
+    async fn handle_message(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+        let room = Self::parse_field(&message, "room")?;
+        let text = Self::parse_field(&message, "text")?;
+
+        self.broadcast
+            .to_room(&room)
+            .send(WsMessage::text(format!("[{}] {}: {}", room, client.id, text)))
+            .await?;
+
+        Ok(WsHandlerOutput::Empty)
+    }
+}
+
 #[module(
     imports: [BroadcastModule::new()],
     providers: [RoomGateway],
@@ -126,23 +118,93 @@ impl RoomGateway {
 pub struct RoomsModule;
 ```
 
+`join_room` and `.send()` return `Result<_, BroadcastError>`, which converts into `WsError` via `?` inside handlers.
+
 ## BroadcastService API
 
 ```rust
-// Room membership
-broadcast.join_room(&client_id, room_name) -> Result<(), WsError>
-broadcast.leave_room(&client_id, room_name) -> Result<(), WsError>
+// Room membership (sync — in-process state)
+broadcast.join_room(&client_id, room) -> Result<(), BroadcastError>
+broadcast.leave_room(&client_id, room) -> Result<(), BroadcastError>
 broadcast.get_client_rooms(&client_id) -> Vec<String>
-broadcast.get_room_clients(room_name) -> Vec<String>
+broadcast.get_room_clients(room) -> Vec<String>
 
-// Targeting (returns a sender builder)
-broadcast.to_all()                  // all connected clients
-broadcast.to_room(room_name)        // all clients in a named room
-broadcast.to_client(client_id)      // a specific client
+// Targeting (returns a BroadcastTarget builder)
+broadcast.to_all()               // all connected clients
+broadcast.to_room(room)          // all clients in a named room
+broadcast.to_client(client_id)   // a specific client (auto-room)
+broadcast.except(client_id)      // all connected clients except one
 
-// Sending (on the builder)
-.send(WsMessage) -> Result<usize, WsError>          // returns count delivered
-.send_event(event, &data) -> Result<usize, WsError> // JSON envelope: {"event":..., "data":...}
+// Target refinement
+.and_room(room)                  // add a room (to_room targets): union of members
+.in_namespace(ns)                // keep only clients in this namespace
+
+// Sending (async, on the builder)
+.send(WsMessage) -> Result<usize, BroadcastError>          // returns count delivered
+.send_event(event, data) -> Result<usize, BroadcastError>  // JSON: {"event": ..., "data": ...}
+```
+
+Both `join_room` and `leave_room` fail with `BroadcastError::ClientNotFound` when the client is not connected.
+
+## Multi-room broadcasts
+
+Chain rooms with `and_room` — clients in any of the rooms receive the message once:
+
+```rust
+self.broadcast
+    .to_room("announcements")
+    .and_room("general")
+    .send(WsMessage::text("Server maintenance at midnight"))
+    .await?;
+```
+
+## Private messages
+
+Every client automatically joins a room named after its own ID on connect, so `to_client` is an ordinary room send:
+
+```rust
+#[subscribe_message("dm")]
+async fn handle_dm(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+    let to = Self::parse_field(&message, "to")?;
+    let text = Self::parse_field(&message, "text")?;
+
+    self.broadcast
+        .to_client(&to)
+        .send(WsMessage::text(format!("DM from {}: {}", client.id, text)))
+        .await?;
+
+    Ok(WsHandlerOutput::Empty)
+}
+```
+
+## Excluding the sender
+
+`except(client_id)` targets every connected client except one:
+
+```rust
+// Everyone but the sender
+self.broadcast
+    .except(&client.id)
+    .send(WsMessage::text(format!("{} did something", client.id)))
+    .await?;
+```
+
+`except` is not room-scoped — it excludes one client from **all** connected clients. To broadcast to a room while skipping the sender (typing indicators, presence pings), iterate the room members:
+
+```rust
+#[subscribe_message("typing")]
+async fn handle_typing(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+    let room = Self::parse_field(&message, "room")?;
+    let msg = WsMessage::text(format!("{} is typing", client.id));
+
+    for peer_id in self.broadcast.get_room_clients(&room) {
+        if peer_id != client.id {
+            self.broadcast.to_client(&peer_id).send(msg.clone()).await.ok();
+        }
+    }
+
+    Ok(WsHandlerOutput::Empty)
+}
 ```
 
 ## Broadcasting from services
@@ -150,17 +212,25 @@ broadcast.to_client(client_id)      // a specific client
 `BroadcastService` is `Clone` — inject it into any service that needs to push to rooms:
 
 ```rust
-#[injectable(pub struct ChatService {
+use toni::websocket::{BroadcastService, WsMessage};
+use toni_macros::{injectable, new};
+
+#[injectable]
+pub struct ChatService {
     #[inject]
     broadcast: BroadcastService,
-})]
+}
+
 impl ChatService {
-    pub fn new(broadcast: BroadcastService) -> Self { Self { broadcast } }
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
+    }
 
     pub async fn send_to_channel(&self, channel: &str, sender: &str, text: &str) {
         self.broadcast
             .to_room(channel)
-            .send(WsMessage::text(format!("[{channel}] {sender}: {text}")))
+            .send(WsMessage::text(format!("[{}] {}: {}", channel, sender, text)))
             .await
             .ok();
     }
@@ -177,39 +247,4 @@ Add it to the same module as the gateway:
 pub struct ChatModule;
 ```
 
-## Private messages
-
-Target a specific client by their ID (available from `WsClient.id`):
-
-```rust
-#[subscribe_message("dm")]
-async fn handle_dm(
-    &self,
-    client: WsClient,
-    message: WsMessage,
-) -> WsHandlerResult {
-    // parse target ID and text from message...
-    self.broadcast
-        .to_client(&target_id)
-        .send(WsMessage::text(format!("DM from {}: {text}", client.id)))
-        .await?;
-    Ok(None)
-}
-```
-
-## Excluding the sender
-
-`BroadcastService` does not have a built-in "broadcast except sender" method. Iterate room members manually:
-
-```rust
-let room_clients = self.broadcast.get_room_clients(room);
-for peer_id in room_clients {
-    if peer_id != client.id {
-        self.broadcast
-            .to_client(&peer_id)
-            .send(msg.clone())
-            .await
-            .ok();
-    }
-}
-```
+Room membership lives in process memory. For a shared, cross-process view of rooms, see [Redis Broadcast](/docs/websocket/redis-broadcast).

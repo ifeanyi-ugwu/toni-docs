@@ -6,7 +6,7 @@ description: How Toni handles inter-service communication through pluggable tran
 Toni supports microservice communication through an **RPC transport layer** that is completely decoupled from HTTP. The same module and DI system used for HTTP controllers applies to RPC — services share one container, controllers get injected dependencies, lifecycle hooks run the same way.
 
 <Bridge>
-This maps directly to NestJS microservices. Where NestJS uses `@MessagePattern()` and `@EventPattern()` on `@Controller()`-decorated classes, Toni uses `#[message_pattern]` and `#[event_pattern]` on structs annotated with `#[rpc_controller]`. Transport choice is a single constructor call rather than a factory option object.
+This maps directly to NestJS microservices. Where NestJS uses `@MessagePattern()` and `@EventPattern()` on `@Controller()`-decorated classes, Toni uses `#[message_pattern]` and `#[event_pattern]` handlers inside a `#[patterns]` impl on an `#[rpc_controller]` struct. Transport choice is a single constructor call rather than a factory option object.
 </Bridge>
 
 ## How it works
@@ -18,62 +18,91 @@ use toni::ToniFactory;
 use toni_tcp::TcpAdapter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(AppModule).await;
-    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
-    app.start().await;
+    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-You can run HTTP and RPC on the same application instance:
+HTTP and RPC can run on the same application instance:
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
-app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
-app.start().await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0")?;
+app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
+app.start().await?;
 ```
+
+An application holds one RPC adapter — a second `use_rpc_adapter` call replaces the first. To serve the same controllers over two transports, create two application instances from the same module.
+
+gRPC is not part of this layer: it is contract-first and streaming, which does not fit the pattern-string + payload model. It registers separately via `use_grpc_adapter` with the `toni-grpc` crate.
 
 ## Message routing
 
-Each RPC controller method is bound to a **pattern** — a string that identifies the operation. Inbound messages are dispatched to the handler whose pattern matches the message's `pattern` field.
+Each RPC controller method is bound to a **pattern** — a string that identifies the operation. Inbound messages are dispatched to the handler whose pattern matches the message's pattern exactly. What the pattern maps to on the wire (TCP frame field, NATS subject, Redis channel, queue, topic) is the transport's choice.
 
-Two handler types exist:
+Two handler kinds exist:
 
 | Annotation | Direction | Handler return |
 |---|---|---|
-| `#[message_pattern("op")]` | Request-response | `Result<RpcData, RpcError>` — reply is sent back |
-| `#[event_pattern("op")]` | Fire-and-forget | `Result<(), RpcError>` — no reply |
+| `#[message_pattern("op")]` | Request-response — a reply is sent back | `Result<T, RpcError>` where `T` is `RpcData` or any `Serialize` type |
+| `#[event_pattern("op")]` | Fire-and-forget — no reply | `Result<(), RpcError>` |
+
+Handlers, payload typing, errors, and enhancers are covered in [RPC Controllers](/docs/microservices/rpc-controllers).
 
 ## Calling remote services
 
-To call another service from within a handler or service, inject an `RpcClient` and use `send` (request-response) or `emit` (fire-and-forget):
+To call another service, inject an `RpcClient` and use `send` (request-response) or `emit` (fire-and-forget). Construct it with any client transport and register it under a token:
 
 ```rust
-use toni::{RpcClient, RpcData};
+use toni::{provider_value, RpcClient};
 use toni_tcp::TcpClientTransport;
 
-// In a module's providers list:
-provider_value!(
-    "ORDERS_CLIENT",
-    RpcClient::new(TcpClientTransport::new("127.0.0.1", 4000))
-)
+#[module(
+    providers: [
+        InventoryService,
+        provider_value!(
+            "ORDERS_CLIENT",
+            RpcClient::new(TcpClientTransport::new("127.0.0.1", 4000))
+        ),
+    ],
+)]
+struct AppModule;
 ```
 
 ```rust
-#[injectable(pub struct InventoryService {
+#[injectable]
+pub struct InventoryService {
     #[inject("ORDERS_CLIENT")]
     orders: RpcClient,
-})]
+}
+
 impl InventoryService {
     pub async fn get_order(&self, id: u64) -> anyhow::Result<serde_json::Value> {
-        let reply = self.orders.send("order.get", RpcData::json(serde_json::json!({ "id": id }))).await?;
-        Ok(reply.as_json().cloned().unwrap_or_default())
+        let order = self.orders
+            .send_json("order.get", &serde_json::json!({ "id": id }))
+            .await?;
+        Ok(order)
     }
 }
 ```
 
+Every client transport connects lazily on first use and defaults to a 5-second request-response timeout, overridable with `with_timeout`. The full client API — typed helpers, per-call metadata, `connect`/`close` — is documented in [RPC Controllers](/docs/microservices/rpc-controllers#rpcclient).
+
 ## Available transports
 
-- [TCP Adapter](/docs/microservices/tcp-adapter) — newline-delimited JSON over a raw TCP connection
-- [NATS Adapter](/docs/microservices/nats-adapter) — NATS subjects as patterns, inbox-based request-response
+Each transport ships as its own crate with a server adapter and a client transport:
+
+| Transport | Crate | Pattern maps to | Request-response via |
+|---|---|---|---|
+| [TCP](/docs/microservices/tcp-adapter) | `toni-tcp` | frame `pattern` field | correlation `id` on a persistent connection |
+| [UDP](/docs/microservices/udp-adapter) | `toni-udp` | datagram `pattern` field | correlation `id`, one datagram per message |
+| [NATS](/docs/microservices/nats-adapter) | `toni-nats` | subject | built-in reply-to inbox |
+| [Redis](/docs/microservices/redis-adapter) | `toni-redis-rpc` | Pub/Sub channel | reply channel carried in a request envelope |
+| [RabbitMQ](/docs/microservices/rabbitmq-adapter) | `toni-rabbitmq` | queue | AMQP `reply_to` + `correlation_id` |
+| [MQTT](/docs/microservices/mqtt-adapter) | `toni-mqtt` | topic | MQTT v5 `response_topic` + `correlation_data` |
+| [Kafka](/docs/microservices/kafka-adapter) | `toni-kafka` | topic | `toni-reply-to` / `toni-correlation-id` headers |
+
+TCP and UDP are broker-less — the adapter is the server. The other five require the respective broker to be reachable from both sides.

@@ -1,7 +1,9 @@
 ---
 title: CLI Commands
-description: All toni-cli commands — new project creation and code generation.
+description: All toni-cli commands — project creation and resource generation.
 ---
+
+The CLI has two commands: `toni new` and `toni generate resource`.
 
 ## toni new
 
@@ -11,96 +13,178 @@ Create a new Toni project from a starter template.
 toni new <project-name>
 ```
 
+The project name may contain only alphanumerics, `-`, and `_`. The command fails if a directory with that name already exists.
+
 **Example:**
 
 ```bash
 toni new my_api
-cd my_api
-cargo run
+# ✅ Successfully created project 'my_api'!
+#
+# Next steps:
+#   cd my_api
+#   cargo build
 ```
 
-The generated project includes:
-- `Cargo.toml` with `toni` and `toni-axum` dependencies
-- `src/main.rs` with `ToniFactory::create` setup
-- `src/app_module.rs` — root module
-- `src/app_controller.rs` — example controller with a `GET /` route
-- `src/app_service.rs` — example service
+Generated layout:
 
-## toni generate
-
-Generate boilerplate for common Toni components.
-
-```bash
-toni generate <type> <name>
+```
+my_api/
+├── Cargo.toml
+└── src/
+    ├── main.rs
+    └── app/
+        ├── mod.rs
+        ├── app.module.rs
+        ├── app.controller.rs
+        └── app.service.rs
 ```
 
-### Subcommands
-
-```bash
-toni generate module UserModule
-# Creates: src/users/users_module.rs
-
-toni generate controller UserController
-# Creates: src/users/users_controller.rs
-
-toni generate service UserService
-# Creates: src/users/users_service.rs
-```
-
-The generated files include the appropriate `#[module]`, `#[controller]`, or `#[injectable]` attributes with placeholder implementations.
-
-### Example — generated service
-
-```bash
-toni generate service AuthService
-```
-
-Generates `src/auth/auth_service.rs`:
+`Cargo.toml` pins `toni = "0.2.0"`, `toni-axum = "0.1.0"`, and `tokio` with full features. The generated `main.rs`:
 
 ```rust
-use toni::injectable;
+use app::app_module::AppModule;
+use toni::ToniFactory;
+use toni_axum::AxumAdapter;
 
-#[injectable(pub struct AuthService {})]
-impl AuthService {
-    pub fn new() -> Self {
-        Self {}
+mod app;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::new()
+        .create_with(AppModule)
+        .await;
+
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1")
+        .unwrap();
+
+    app.start().await.unwrap();
+}
+```
+
+`AppController` serves `POST`/`GET`/`PUT`/`DELETE` at `http://127.0.0.1:3000/app`, each delegating to a matching `AppService` method. The dotted file names are mapped to Rust modules with `#[path]` attributes in `src/app/mod.rs` — see [Project Structure](/docs/getting-started/project-structure).
+
+## toni generate resource
+
+Generate a CRUD resource — module, controller, and service — and wire it into the application.
+
+```bash
+toni generate resource <name>
+```
+
+Run it from the project root (the command edits files under `src/app/`). `resource` is the only generator type; there are no separate `module`/`controller`/`service` generators.
+
+**Example:**
+
+```bash
+toni generate resource users
+```
+
+Creates `src/app/users/`:
+
+```
+src/app/users/
+├── mod.rs                  # #[path] declarations for the files below
+├── users.module.rs         # UsersModule
+├── users.controller.rs     # UsersController
+└── users.service.rs        # UsersService
+```
+
+and wires it in automatically:
+
+- `src/app/mod.rs` gains `#[path = "users/mod.rs"] pub mod users;`
+- `src/app/app.module.rs` gains the import and `UsersModule` in its `imports:` list
+
+Type names are the input name with the first letter uppercased (`users` → `UsersModule`, `UsersController`, `UsersService`); module and file names are snake_cased.
+
+### Generated controller
+
+```rust
+use super::users_service::UsersService;
+use toni::extractors::Path;
+use toni::*;
+
+#[controller("/users")]
+pub struct UsersController {
+    #[inject]
+    users_service: UsersService,
+}
+
+#[routes]
+impl UsersController {
+    #[post("/")]
+    fn create(&self) -> Body {
+        Body::text(self.users_service.create())
+    }
+
+    #[get("/")]
+    fn find_all(&self) -> Body {
+        Body::text(self.users_service.find_all())
+    }
+
+    #[get("/{id}")]
+    fn find_by_id(&self, Path(id): Path<String>) -> Body {
+        Body::text(self.users_service.find_by_id(id))
+    }
+
+    #[put("/")]
+    fn update(&self) -> Body {
+        Body::text(self.users_service.update())
+    }
+
+    #[delete("/")]
+    fn delete(&self) -> Body {
+        Body::text(self.users_service.delete())
     }
 }
 ```
 
-### Example — generated controller
-
-```bash
-toni generate controller AuthController
-```
-
-Generates `src/auth/auth_controller.rs`:
+### Generated service
 
 ```rust
-use toni::{controller, HttpResponse};
+use toni::*;
 
-#[controller("/auth", pub struct AuthController {})]
-impl AuthController {
-    pub fn new() -> Self {
-        Self {}
+#[injectable]
+pub struct UsersService;
+
+impl UsersService {
+    pub fn find_all(&self) -> String {
+        "find_all".to_string()
     }
 
-    #[get("")]
-    fn index(&self) -> HttpResponse {
-        HttpResponse::ok().build()
+    pub fn find_by_id(&self, id: String) -> String {
+        format!("find_by_id {}", id)
+    }
+
+    pub fn create(&self) -> String {
+        "create".to_string()
+    }
+
+    pub fn update(&self) -> String {
+        "update".to_string()
+    }
+
+    pub fn delete(&self) -> String {
+        "delete".to_string()
     }
 }
 ```
 
-## Planned commands
+### Generated module
 
-The following commands are planned for future releases:
+```rust
+use toni::*;
 
-| Command | Description |
-|---------|-------------|
-| `toni generate guard <name>` | Generate a Guard implementation |
-| `toni generate interceptor <name>` | Generate an Interceptor |
-| `toni generate middleware <name>` | Generate Middleware |
-| `toni generate pipe <name>` | Generate a Pipe |
+use super::users_controller::UsersController;
+use super::users_service::UsersService;
 
-Track progress on the [GitHub repository](https://github.com/ifeanyi-ugwu/toni-rs).
+#[module(
+  imports: [],
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: []
+)]
+impl UsersModule {}
+```
+
+The stub methods return placeholder strings — replace them with real logic and typed responses (see [Quick Start](/docs/getting-started/quick-start)).

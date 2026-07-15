@@ -19,7 +19,7 @@ These map directly to NestJS's custom provider syntax:
 
 ## Service providers (the default)
 
-The most common pattern — just list the struct name:
+The most common pattern — list the struct name:
 
 ```rust
 #[module(
@@ -28,47 +28,41 @@ The most common pattern — just list the struct name:
 pub struct AppModule;
 ```
 
-Both `UsersService` and `AuthService` must be annotated with `#[injectable]`. The DI container calls their `new()` function, resolving any `#[inject]` fields.
+Both `UsersService` and `AuthService` must be annotated with `#[injectable]`. The container builds each one from its fields — `#[inject]` fields are resolved from the DI graph, `#[default(expr)]` fields get their expression — or through a `#[new]`-tagged constructor when one exists. `#[new]` is the right tool when construction needs logic or a dependency is consumed without being stored; field injection covers everything else. See [Services & Providers](/docs/core-concepts/services).
 
 ## Value providers
 
-Inject a static, pre-computed value:
+Inject a static, pre-computed value under a string token or a type token:
 
 ```rust
 #[module(
     providers: [
         provider_value!("APP_NAME", "MyApp".to_string()),
         provider_value!("PORT", 3000_u16),
-        provider_value!("TIMEOUT", Duration::from_secs(30)),
+        provider_value!(Duration, Duration::from_secs(60)),   // type as token
     ],
 )]
 pub struct AppModule;
 ```
 
-The first argument is the token name (any string). The second is any Rust value that satisfies the provider's type requirements.
-
 Inject by token in a service field using the `#[inject("TOKEN")]` attribute:
 
 ```rust
-#[injectable(pub struct AppService {
+#[injectable]
+pub struct AppInfo {
     #[inject("APP_NAME")]
     name: String,
 
     #[inject("PORT")]
     port: u16,
 
-    // You can also inject a type-registered provider by its token
-    #[inject("PRIMARY_DB")]
-    db: DatabaseService,
-})]
-impl AppService {
-    pub fn new(name: String, port: u16, db: DatabaseService) -> Self {
-        Self { name, port, db }
-    }
+    // a type registered under a custom token
+    #[inject("PRIMARY_CONFIG")]
+    config: ConfigService,
 }
 ```
 
-When no token is specified, `#[inject]` resolves by the field's type name. The `#[inject("TOKEN")]` form resolves by the explicit token string.
+When no token is specified, `#[inject]` resolves by the field's type. The `#[inject("TOKEN")]` form resolves by the explicit token string.
 
 ## Factory providers
 
@@ -78,8 +72,8 @@ Run a closure to produce a value, with optional dependencies:
 #[module(
     providers: [
         // No dependencies
-        provider_factory!("REQUEST_ID_PREFIX", || {
-            format!("req-{}", std::time::SystemTime::now()
+        provider_factory!("REQUEST_ID", || {
+            format!("req_{}", std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis())
         }),
 
@@ -88,9 +82,9 @@ Run a closure to produce a value, with optional dependencies:
             format!("App running in {} mode", config.get_env())
         }),
 
-        // Async factory
-        provider_factory!("DB_SCHEMA", async |db: DatabaseService| {
-            db.get_schema().await
+        // Async factory — detected by the `async` keyword
+        provider_factory!("ASYNC_STATUS", async |logger: LoggerService| {
+            logger.log("System initialized")
         }),
     ],
 )]
@@ -107,7 +101,7 @@ Create an alternate token pointing to an existing provider. The same instance is
 #[module(
     providers: [
         ConfigService,
-        provider_alias!("Config", ConfigService),       // type → type
+        provider_alias!("Config", ConfigService),       // token → type
         provider_alias!("APP_PORT", "PORT"),             // token → token
     ],
 )]
@@ -118,12 +112,11 @@ Useful when consuming code uses a different token name than the provider's type.
 
 ## Token providers
 
-Register a type under a custom string token. This is the inverse of alias — you choose the token, the type stays the same:
+Register a type under a custom string token. Unlike listing the type in `providers`, this does **not** create the default type-token entry — the custom token is the only way to reach it:
 
 ```rust
 #[module(
     providers: [
-        DatabaseService,
         provider_token!("PRIMARY_DB", DatabaseService),
         provider_token!("REPLICA_DB", ReplicaDatabaseService),
     ],
@@ -131,37 +124,80 @@ Register a type under a custom string token. This is the inverse of alias — yo
 pub struct AppModule;
 ```
 
-## The `provide` macro (unified)
+## The `provide!` macro (unified)
 
-The `provide!` macro is a catch-all that accepts any of the above patterns with an explicit `kind` discriminator:
+`provide!` covers all of the above with one entry point. The first argument is the token; the second is auto-detected — a closure or async block becomes a factory, anything else a value:
 
 ```rust
 #[module(
     providers: [
-        provide!(value => "KEY" = "static string"),
-        provide!(factory => "KEY2" = || compute()),
-        provide!(alias => "ALT" = OriginalService),
+        provide!("API_KEY", "secret_key".to_string()),     // value
+        provide!("MAX_CONNECTIONS", || 100_i32),           // factory
+        provide!("LOGGER", |config: ConfigService| {       // factory with dep
+            Logger::for_env(config.get_env())
+        }),
     ],
 )]
 pub struct AppModule;
 ```
 
-The per-pattern macros (`provider_value!`, `provider_factory!`, etc.) are more readable for most cases, but `provide!` can be useful in macros or generated code.
+Marker functions make the variant explicit, and are the only spelling for aliases and token providers:
 
-## Exporting custom-token providers
+```rust
+provide!("EXPLICIT_VALUE", value("explicit".to_string())),  // value provider
+provide!("EXPLICIT_FACTORY", factory(|| compute())),        // factory provider
+provide!("CACHE_ALIAS", existing(CacheService)),            // alias provider
+provide!("PRIMARY_DB", provider(DatabaseService)),          // token provider
+```
 
-To make a custom-token provider available to other modules, include the token in `exports`:
+## Multi-providers
+
+Several `provide!` entries can contribute to the same token; the contributions are collected into a `Vec`. Add `multi(Trait)` naming the trait every contribution implements:
 
 ```rust
 #[module(
     providers: [
-        DatabaseService,
-        provider_value!("DB_URL", std::env::var("DATABASE_URL").unwrap()),
-    ],
-    exports: [
-        DatabaseService,
-        "DB_URL",    // export by token string
+        PluginA,
+        PluginB,
+        provide!("PLUGINS", PluginA, multi(Plugin)),
+        provide!("PLUGINS", PluginB, multi(Plugin)),
+        PluginRegistry,
     ],
 )]
+pub struct AppModule;
+```
+
+The consumer injects the collection as `Vec<Arc<dyn Trait>>`:
+
+```rust
+use std::sync::Arc;
+
+#[injectable]
+pub struct PluginRegistry {
+    #[inject("PLUGINS")]
+    plugins: Vec<Arc<dyn Plugin>>,
+}
+```
+
+`multi(Plugin)` is shorthand for `multi(dyn Plugin + Send + Sync)`. Contributions can be type paths, factory closures, or `existing(...)` references; a token with no contributions injects an empty `Vec`.
+
+## Exporting custom-token providers
+
+The `exports` list in `#[module]` accepts type names, so type-token providers export directly:
+
+```rust
+#[module(
+    providers: [DatabaseService],
+    exports: [DatabaseService],
+)]
 pub struct DatabaseModule;
+```
+
+String-token providers are exported from a [dynamic module](/docs/core-concepts/modules#dynamic-modules) via `export_token`:
+
+```rust
+DynamicModule::builder("ConfigModule")
+    .provider(/* value provider factory */)
+    .export_token("DB_URL")
+    .build()
 ```

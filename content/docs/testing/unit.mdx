@@ -12,9 +12,12 @@ In NestJS you typically use `@nestjs/testing`'s `Test.createTestingModule()` to 
 ## Testing a service
 
 ```rust
-#[injectable(pub struct MathService {})]
+#[injectable]
+pub struct MathService;
+
 impl MathService {
-    pub fn new() -> Self { Self {} }
+    #[new]
+    pub fn new() -> Self { Self }
 
     pub fn add(&self, a: i32, b: i32) -> i32 { a + b }
     pub fn divide(&self, a: f64, b: f64) -> Option<f64> {
@@ -47,6 +50,8 @@ mod tests {
 }
 ```
 
+`#[new]` marks the DI constructor, and passes the method through unchanged — tests call `MathService::new()` like any constructor.
+
 ## Testing services with dependencies
 
 Construct dependencies manually for unit tests:
@@ -74,37 +79,64 @@ mod tests {
 
 ## Testing guards
 
+Guards implement `Guard<HttpContext>` (or another context type) with an async `can_activate`. Build a request with `HttpRequest::builder()`, wrap it in an `HttpContext`, and await the guard directly:
+
 ```rust
+use toni::async_trait;
+use toni::context::HttpContext;
+use toni::traits_helpers::Guard;
+use toni_macros::injectable;
+
+#[injectable]
+pub struct AuthGuard;
+
+#[async_trait]
+impl Guard<HttpContext> for AuthGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        ctx.request()
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|h| h.starts_with("Bearer "))
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toni::HttpRequest;
+    use toni::{HttpRequest, RequestBody};
 
-    fn make_request_with_token(token: &str) -> HttpRequest {
-        let mut req = HttpRequest::new();
-        req.headers.insert(
-            "authorization".to_string(),
-            format!("Bearer {token}")
-        );
-        req
+    fn context_with_token(token: &str) -> HttpContext {
+        let req = HttpRequest::builder()
+            .uri("/protected")
+            .header("authorization", format!("Bearer {token}"))
+            .body(RequestBody::empty())
+            .unwrap();
+        HttpContext::from_request(req)
     }
 
-    #[test]
-    fn test_auth_guard_allows_valid_token() {
+    #[tokio::test]
+    async fn allows_valid_token() {
         let guard = AuthGuard;
-        let req = make_request_with_token("valid-token-123");
-        let ctx = Context::from_request(req);
-        assert!(guard.can_activate(&ctx));
+        let ctx = context_with_token("valid-token-123");
+        assert!(guard.can_activate(&ctx).await);
     }
 
-    #[test]
-    fn test_auth_guard_blocks_missing_token() {
+    #[tokio::test]
+    async fn blocks_missing_token() {
         let guard = AuthGuard;
-        let ctx = Context::from_request(HttpRequest::new());
-        assert!(!guard.can_activate(&ctx));
+        let req = HttpRequest::builder()
+            .uri("/protected")
+            .body(RequestBody::empty())
+            .unwrap();
+        let ctx = HttpContext::from_request(req);
+        assert!(!guard.can_activate(&ctx).await);
     }
 }
 ```
+
+`HttpRequest::builder()` is the `http` crate's request builder — chain `.method(...)`, `.uri(...)`, and `.header(...)` as needed, then finish with `.body(RequestBody::empty())` (or `RequestBody::Buffered(bytes)` for a request with a body). `HttpContext::from_request` accepts the result directly.
 
 ## Testing async services
 

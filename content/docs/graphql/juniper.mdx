@@ -59,20 +59,20 @@ pub type AppSchema = RootNode<
 
 ## 3. Build the context
 
-Implement `ContextBuilder` to populate the context for each request. The `build` method receives the incoming `RequestPart` so you can read headers (e.g. auth tokens) alongside injected services:
+Implement `ContextBuilder` to populate the context for each request. The `build` method receives the incoming `RequestPart` so you can read headers (e.g. auth tokens) alongside the services the builder carries.
+
+The builder is passed by value to `for_root` — it is not resolved through the DI container. Construct it, and the services it captures, when building the module:
 
 ```rust
 use async_trait::async_trait;
 use toni::RequestPart;
 use toni_juniper::ContextBuilder;
-use toni::injectable;
 
-#[injectable(pub struct AppContextBuilder {
-    #[inject]
+pub struct AppContextBuilder {
     users_service: UsersService,
-    #[inject]
     db: DatabaseService,
-})]
+}
+
 impl AppContextBuilder {
     pub fn new(users_service: UsersService, db: DatabaseService) -> Self {
         Self { users_service, db }
@@ -103,18 +103,27 @@ use toni_juniper::{GraphQLModule, DefaultContextBuilder, DefaultContext};
 
 ## 4. Register the module
 
+Module `imports` entries are expressions, so a helper function keeps the declaration readable:
+
 ```rust
 use toni_juniper::GraphQLModule;
 use juniper::{EmptyMutation, EmptySubscription, RootNode};
 
-let schema = RootNode::new(QueryRoot, EmptyMutation::new(), EmptySubscription::new());
-
-let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder)
-    .with_path("/api/graphql")
-    .with_playground(true);   // disable in production
+fn graphql_module() -> GraphQLModule<
+    QueryRoot,
+    EmptyMutation<AppContext>,
+    EmptySubscription<AppContext>,
+    AppContextBuilder,
+> {
+    let schema = RootNode::new(QueryRoot, EmptyMutation::new(), EmptySubscription::new());
+    let context_builder = AppContextBuilder::new(UsersService::new(), DatabaseService::new());
+    GraphQLModule::for_root(schema, context_builder)
+        .with_path("/api/graphql")
+        .with_playground(true)   // disable in production
+}
 
 #[module(
-    imports: [graphql_module, UsersModule, DatabaseModule],
+    imports: [graphql_module(), UsersModule, DatabaseModule],
 )]
 pub struct AppModule;
 ```
@@ -126,7 +135,7 @@ pub struct AppModule;
 async fn main() {
     let mut app = ToniFactory::create(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await.unwrap();
 }
 ```
 

@@ -48,14 +48,13 @@ The connection is established at startup and panics on failure, so a bad URL or 
 ```rust
 use sea_orm::DatabaseConnection;
 
-#[injectable(pub struct UsersService {
+#[injectable]
+pub struct UsersService {
+    #[inject]
     db: DatabaseConnection,
-})]
-impl UsersService {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
-    }
+}
 
+impl UsersService {
     pub async fn find_all(&self) -> Result<Vec<user::Model>, sea_orm::DbErr> {
         user::Entity::find().all(&self.db).await
     }
@@ -81,40 +80,36 @@ Combine with `toni-config` or `std::env::var` to avoid hardcoding credentials:
 pub struct AppModule;
 ```
 
-Or with a typed config:
+Or with a typed config. A `DynamicModule` is not a provider — it can't be produced by a factory at injection time, so the URL must be known when the module tree is built. Load the config first, then pass the value to `for_root`:
 
 ```rust
+use toni_config::{Config, ConfigModule};
+
 #[derive(Config, Clone)]
 pub struct AppConfig {
     #[env("DATABASE_URL")]
     pub database_url: String,
 }
 
+fn database_module() -> toni::DynamicModule {
+    let config = ConfigModule::<AppConfig>::from_env()
+        .expect("invalid configuration");
+    SeaOrmModule::for_root(config.get_ref().database_url.clone())
+}
+
 #[module(
-    imports: [
-        ConfigModule::<AppConfig>::from_env().unwrap(),
-    ],
+    imports: [database_module()],
 )]
 pub struct AppModule;
-```
-
-Then in a separate module that imports both:
-
-```rust
-#[module(
-    imports: [AppModule],
-    providers: [
-        provider_factory!("DB_MODULE", |config: ConfigService<AppConfig>| {
-            SeaOrmModule::for_root(config.get().database_url.clone())
-        }),
-    ],
-)]
-pub struct DatabaseModule;
 ```
 
 ## Shutdown
 
 `SeaOrmModule` closes the database connection gracefully when `app.close()` is called or the application shuts down. In-flight queries are allowed to complete before the connection is closed.
+
+## Health checks
+
+Enable the `health` feature to have `for_root` also register a `SeaOrmHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
 
 ## API reference
 

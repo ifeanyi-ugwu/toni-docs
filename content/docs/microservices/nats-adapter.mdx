@@ -3,11 +3,11 @@ title: NATS Adapter
 description: NATS subjects as patterns — server and client transport setup for pub/sub and request-reply.
 ---
 
-The NATS adapter maps each RPC pattern to a NATS subject. Request-response uses NATS's built-in inbox mechanism (`request`/reply-to). Fire-and-forget uses plain `publish`. A NATS server must be running and accessible from both sides.
+The NATS adapter maps each RPC pattern to a NATS subject. Request-response uses NATS's built-in reply-to inbox; fire-and-forget uses plain `publish`. A NATS server must be reachable from both sides.
 
 ## Server setup
 
-Add the dependency:
+Add the dependencies:
 
 ```toml
 [dependencies]
@@ -22,62 +22,58 @@ use toni::ToniFactory;
 use toni_nats::NatsAdapter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(AppModule).await;
-    app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
-    app.start().await;
+    app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222"))?;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-The adapter retries the initial connection on failure and subscribes to each registered pattern as a NATS subject when `start()` is called.
+The initial connection retries until the server is reachable (`retry_on_initial_connect`), so a slow-starting NATS container does not kill the process. If the connection or a subject subscription ultimately fails, the serve task panics. Connection state changes (connected, disconnected, server errors) are logged.
 
 ## Multiple servers
 
-`NatsAdapter::new` and `NatsClientTransport::new` both accept anything that implements `IntoNatsServers` — a single URL string, a `Vec<String>`, or a fixed-size array:
+`NatsAdapter::new` and `NatsClientTransport::new` accept anything implementing `IntoNatsServers` — a single URL, a `Vec<String>` / `Vec<&str>`, or a fixed-size array:
 
 ```rust
-// Single server
 NatsAdapter::new("nats://127.0.0.1:4222")
-
-// Cluster
 NatsAdapter::new(["nats://node1:4222", "nats://node2:4222", "nats://node3:4222"])
-
-// Vec
 NatsAdapter::new(vec!["nats://node1:4222".to_string(), "nats://node2:4222".to_string()])
 ```
 
 ## How patterns map to subjects
 
-Each `#[message_pattern("x.y")]` or `#[event_pattern("x.y")]` registers a NATS subscription on subject `x.y`. Pattern strings become NATS subjects verbatim — dots, wildcards, and hierarchy are all supported:
+Each `#[message_pattern("x.y")]` or `#[event_pattern("x.y")]` subscribes to subject `x.y`. Routing is exact: the dispatcher matches the received message's subject against the registered pattern strings. NATS wildcards (`*`, `>`) in a pattern create a valid subscription, but messages arriving on it carry their concrete subject and find no exact-match handler — they fail with `not_found`. Register one handler per concrete subject.
 
-```rust
-#[message_pattern("order.create")]    // subject: "order.create"
-#[event_pattern("order.shipped")]     // subject: "order.shipped"
-#[message_pattern("inventory.>")]     // NATS wildcard — matches any sub-subject
-```
+## Wire behavior
 
-## Request-response
+- **Inbound payload** — parsed as JSON into `RpcData::Json`; anything that is not valid JSON becomes `RpcData::Binary`.
+- **Metadata** — NATS headers on the inbound message become `ctx.metadata()`; per-call metadata from `RpcClient::request(...).metadata(...)` travels as NATS headers.
+- **Request-response** — a message with a reply-to inbox gets its reply published there. A reply-to that addresses an `#[event_pattern]` handler gets a `{"response": null}` ack.
+- **Fire-and-forget** — no reply-to, nothing published back.
 
-The adapter subscribes to each pattern. When a message arrives with a reply-to inbox, the handler is invoked and the response is published to that inbox:
+Reply framing:
 
 ```json
-// Response envelope published to the reply inbox:
 {"response": {"orderId": 1001}}
-
-// Error envelope:
-{"err": {"message": "out of stock", "status": "Internal"}}
 ```
 
-## Fire-and-forget
+`RpcData::Text` replies wrap as a JSON string (`{"response": "pong"}`). `RpcData::Binary` replies are published **raw**, with no envelope — the only transport payload shape that round-trips binary unmodified.
 
-Messages published without a reply-to field are dispatched to `#[event_pattern]` handlers. No response is published.
+Handler errors arrive inside `response` as the canonical envelope; dispatch failures arrive as `{"err": {"message": ..., "status": ...}}` with the lowercase statuses `not_found` / `forbidden` / `error`. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+Test with the NATS CLI:
+
+```bash
+nats req order.create '{"item":"keyboard","qty":3}'   # request-response
+nats pub order.shipped '{"order_id":1001}'            # fire-and-forget
+```
 
 ## Client transport
 
-Use `NatsClientTransport` to send messages from a service to another NATS-based service:
-
 ```rust
-use toni::RpcClient;
+use toni::{provider_value, RpcClient};
 use toni_nats::NatsClientTransport;
 
 provider_value!(
@@ -86,22 +82,7 @@ provider_value!(
 )
 ```
 
-Inject and use:
-
-```rust
-#[injectable(pub struct OrdersService {
-    #[inject("INVENTORY_CLIENT")]
-    inventory: RpcClient,
-})]
-impl OrdersService {
-    pub async fn check_stock(&self, item_id: u64) -> anyhow::Result<bool> {
-        let reply = self.inventory
-            .send("inventory.check", RpcData::json(serde_json::json!({ "id": item_id })))
-            .await?;
-        Ok(reply.parse()?)
-    }
-}
-```
+The connection is established lazily on the first `send` or `emit`; reconnection after a drop is handled by the NATS client library. `close()` flushes pending publishes.
 
 ### Custom timeout
 
@@ -116,44 +97,9 @@ RpcClient::new(
 )
 ```
 
-## Example — NATS-backed orders service
+## Operational limits
 
-```rust
-use toni::*;
-use toni_macros::{module, rpc_controller};
-use toni_nats::{NatsAdapter, NatsClientTransport};
-
-#[rpc_controller(pub struct OrdersController {
-    #[inject]
-    service: OrdersService,
-})]
-impl OrdersController {
-    pub fn new(service: OrdersService) -> Self { Self { service } }
-
-    #[message_pattern("order.create")]
-    async fn create(&self, data: RpcData, _ctx: RpcContext) -> Result<RpcData, RpcError> {
-        let dto: CreateOrderDto = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
-        let order = self.service.create(dto).await.map_err(|e| RpcError::Internal(e.to_string()))?;
-        RpcData::from_serialize(&order).map_err(|e| RpcError::Internal(e.to_string()))
-    }
-
-    #[event_pattern("order.shipped")]
-    async fn shipped(&self, data: RpcData, _ctx: RpcContext) -> Result<(), RpcError> {
-        let id: u64 = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
-        self.service.mark_shipped(id).await.map_err(|e| RpcError::Internal(e.to_string()))
-    }
-}
-
-#[module(providers: [OrdersService, OrdersController])]
-pub struct AppModule;
-
-#[tokio::main]
-async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
-    app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
-    app.start().await;
-}
-```
+Unlike the TCP/UDP adapters, the NATS adapter has no drain timeout, no `with_max_inflight` backpressure cap, and no bound local address (`BoundAdapters.rpc` is `None`) — each inbound message spawns an unbounded task, and shutdown does not wait for in-flight handlers. There is no per-request `rpc.request` tracing span either. Broker-side limits (max payload, slow-consumer handling) apply as configured on the NATS server.
 
 ## Combining HTTP and NATS
 
@@ -162,9 +108,9 @@ use toni_axum::AxumAdapter;
 use toni_nats::NatsAdapter;
 
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
-app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
-app.start().await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0")?;
+app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222"))?;
+app.start().await?;
 ```
 
-Both transports share the same DI container and run concurrently inside `start()`.
+Both transports share the same DI container and run concurrently inside `start()`. A worked HTTP-controller-calls-RPC example lives in the repository at `examples/rpc_nats_client.rs`.

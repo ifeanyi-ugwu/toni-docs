@@ -1,0 +1,342 @@
+---
+title: Error Handling
+description: Domain errors with toni::Error, canonical envelopes, the #[catch] handler chain, observers, and panic recovery.
+---
+
+Toni's error story has four layers, from most common to most specialized:
+
+1. **Domain errors** — implement `toni::Error` on your own types, return `Result<T, MyError>` from handlers, and the framework renders a canonical response with the right status on every transport.
+2. **`HttpError`** — a convenience type for trivial cases that don't warrant a dedicated error.
+3. **The error handler chain** — `#[catch(T)]` functions and `ErrorHandler` implementations that reshape specific errors into custom responses.
+4. **Observers and panic recovery** — a fire-and-forget tap for logging/metrics, and `catch_unwind` around every pipeline segment so a panic never tears down the server.
+
+<Bridge>
+This replaces what NestJS calls exception filters. `HttpException` maps to `HttpError`; a `@Catch(EntityNotFoundError)` filter maps to a `#[catch(EntityNotFoundError)]` function; `useGlobalFilters` maps to `use_global_http_error_handler`. The biggest difference: in Toni the primary path is a typed domain error (`#[derive(toni::Error)]`) that renders itself — filters are the override, not the default.
+</Bridge>
+
+## Domain errors with `toni::Error`
+
+The `toni::Error` trait is `std::error::Error` plus the metadata the pipeline needs:
+
+```rust
+pub trait Error: std::error::Error + Send + Sync + 'static {
+    /// Coarse classification — drives status codes and envelopes on every transport.
+    fn kind(&self) -> ErrorKind;
+
+    /// Human-readable message for the client. Defaults to `Display`.
+    fn message(&self) -> Cow<'_, str> { /* ... */ }
+
+    /// Structured payload merged into the response under `details`.
+    fn details(&self) -> Option<serde_json::Value> { None }
+}
+```
+
+Derive it with `#[derive(toni::Error)]` and tag variants with `#[error_kind(KIND)]`:
+
+```rust
+#[derive(Debug, toni::Error)]
+enum UserError {
+    #[error_kind(NotFound)]
+    NotFound(String),
+
+    #[error_kind(BadRequest)]
+    InvalidId(String),
+
+    #[error_kind(Conflict)]
+    EmailTaken(String),
+}
+
+impl std::fmt::Display for UserError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "user {id} not found"),
+            Self::InvalidId(id) => write!(f, "invalid user id: {id}"),
+            Self::EmailTaken(email) => write!(f, "email already in use: {email}"),
+        }
+    }
+}
+
+impl std::error::Error for UserError {}
+```
+
+The derive generates only the `kind()` impl — `Display` and `std::error::Error` stay yours (write them by hand or with `thiserror`). On an enum, a top-level `#[error_kind(...)]` is the default for untagged variants; without one, untagged variants fall back to `Internal`. Structs take a single top-level tag.
+
+### ErrorKind
+
+`ErrorKind` is the transport-independent vocabulary. Each transport maps it to its own wire form — the HTTP layer owns the status mapping:
+
+| `ErrorKind` | HTTP status |
+|---|---|
+| `BadRequest` | 400 |
+| `Unauthorized` | 401 |
+| `Forbidden` | 403 |
+| `NotFound` | 404 |
+| `Conflict` | 409 |
+| `UnprocessableEntity` | 422 |
+| `TooManyRequests` | 429 |
+| `Timeout` | 504 |
+| `Unavailable` | 503 |
+| `Unimplemented` | 501 |
+| `Internal` | 500 |
+
+The variant name (`"NotFound"`) is the stable `kind` identifier used in RPC and WebSocket envelopes.
+
+## Returning errors from handlers
+
+Handlers return `Result<T, MyError>`. A blanket `From<E: toni::Error>` impl lifts the error into the transport's handler error type (`HttpError`, `RpcError`, `WsError`), so `?` works on any `toni::Error`:
+
+```rust
+#[injectable]
+pub struct UserService {}
+impl UserService {
+    fn find_user(&self, id: &str) -> Result<User, UserError> {
+        if id == "1" {
+            Ok(User { id: "1".into(), name: "John Doe".into() })
+        } else {
+            Err(UserError::NotFound(id.into()))
+        }
+    }
+}
+
+#[controller("/users")]
+pub struct UserController {
+    #[inject]
+    service: UserService,
+}
+
+#[routes]
+impl UserController {
+    #[get("/:id")]
+    fn get_user(&self, Path(id): Path<String>) -> Result<Body, UserError> {
+        let user = self.service.find_user(&id)?;
+        Ok(Body::json(serde_json::to_value(user).unwrap()))
+    }
+}
+```
+
+`GET /users/999` renders the canonical HTTP envelope:
+
+```json
+{ "statusCode": 404, "message": "user 999 not found", "error": "Not Found" }
+```
+
+When `details()` returns `Some(value)`, it is merged into the body under a `details` key.
+
+## HttpError
+
+For one-off cases, `HttpError` skips the dedicated type:
+
+```rust
+use toni::errors::HttpError;
+
+#[get("/-/teapot")]
+fn teapot(&self) -> Result<Body, HttpError> {
+    Err(HttpError::custom(418, "I'm a teapot"))
+}
+```
+
+| Constructor | Status |
+|--------|--------|
+| `HttpError::bad_request(msg)` | 400 |
+| `HttpError::unauthorized(msg)` | 401 |
+| `HttpError::forbidden(msg)` | 403 |
+| `HttpError::not_found(msg)` | 404 |
+| `HttpError::conflict(msg)` | 409 |
+| `HttpError::unprocessable_entity(msg)` | 422 |
+| `HttpError::internal_server_error(msg)` | 500 |
+| `HttpError::custom(status, msg)` | any |
+
+`HttpError` renders the same `{statusCode, message, error}` envelope via `to_response()`. It also implements `IntoResponse`, and carries an `AppError` variant that wraps lifted domain errors — `status_code()`, `message()`, and rendering all delegate to the wrapped error's `kind`/`message`/`details`.
+
+## Custom rendering with `#[catch(T)]`
+
+When the canonical envelope isn't enough — extra headers, a domain-specific body shape — a `#[catch(T)]` function claims errors of type `T` and produces the response directly:
+
+```rust
+use serde_json::json;
+use toni::{catch, Error, ErrorKind};
+use toni::context::HttpContext;
+use toni::HttpResponse;
+
+#[derive(Debug)]
+struct PaymentDeclined {
+    reason_code: &'static str,
+    retry_after_secs: u32,
+}
+
+impl std::fmt::Display for PaymentDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "payment declined ({})", self.reason_code)
+    }
+}
+impl std::error::Error for PaymentDeclined {}
+impl Error for PaymentDeclined {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::UnprocessableEntity
+    }
+}
+
+#[catch(PaymentDeclined)]
+async fn render_payment_declined(err: &PaymentDeclined, _ctx: &HttpContext) -> HttpResponse {
+    HttpResponse::builder()
+        .status(toni::errors::http_status(err.kind()))
+        .header("Retry-After", err.retry_after_secs.to_string())
+        .json(json!({
+            "type": "payment_declined",
+            "reason_code": err.reason_code,
+            "retry_after_secs": err.retry_after_secs,
+        }))
+        .build()
+}
+```
+
+`#[catch(T)]` lowers a free `async fn (err: &T, ctx: &CtxType) -> ResponseType` into an `ErrorHandler` that downcasts the inbound error to `T` — non-matching errors fall through to the next handler. The function name becomes a unit struct, registered like any handler:
+
+```rust
+#[controller("/billing")]
+pub struct BillingController {}
+
+#[routes]
+#[use_error_handlers(render_payment_declined)]
+impl BillingController {
+    #[post("/charge")]
+    fn charge(&self) -> Result<Body, PaymentDeclined> {
+        Err(PaymentDeclined { reason_code: "insufficient_funds", retry_after_secs: 60 })
+    }
+}
+```
+
+The context parameter picks the transport: `&HttpContext` returning `HttpResponse` for HTTP, `&RpcContext` returning `RpcData` for RPC, `&WsContext` returning `WsMessage` for WebSocket.
+
+## The ErrorHandler chain
+
+`#[catch]` is sugar for the underlying trait:
+
+```rust
+use toni::traits_helpers::{ChainError, ErrorHandler};
+
+#[async_trait]
+pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
+    async fn handle_error(&self, error: ChainError<'_>, ctx: &C) -> Option<R>;
+}
+```
+
+`ChainError<'a>` is `&'a (dyn std::error::Error + Send + Sync + 'static)` — the chain owns the error and lends it to each handler in turn. Handlers downcast, then either claim the error (`Some(response)`) or fall through (`None`).
+
+Implementing the trait directly suits handlers that match on more than one type:
+
+```rust
+use toni::HttpResponse;
+use toni::context::HttpContext;
+use toni::errors::HttpError;
+
+pub struct StatusPageErrorHandler;
+
+#[async_trait]
+impl ErrorHandler<HttpContext, HttpResponse> for StatusPageErrorHandler {
+    async fn handle_error(&self, error: ChainError<'_>, _ctx: &HttpContext) -> Option<HttpResponse> {
+        let http_error = error.downcast_ref::<HttpError>()?;
+        if http_error.status_code() != 404 {
+            return None; // pass to the next handler
+        }
+        Some(
+            HttpResponse::builder()
+                .status(404)
+                .text("Nothing to see here.")
+                .build(),
+        )
+    }
+}
+```
+
+### Order and registration
+
+Handlers are consulted most-specific first: **method → controller → global**. The first `Some` claims the error; if all return `None`, the transport's default rendering applies (the canonical envelope for `toni::Error` / `HttpError` values, a 500 envelope for unknown errors).
+
+- Method level: `#[use_error_handlers(...)]` on a handler
+- Controller level: `#[use_error_handlers(...)]` on the `#[routes]` / `#[patterns]` / `#[subscriptions]` / `#[grpc_methods]` impl
+- Global: per transport on the factory —
+
+```rust
+factory.use_global_http_error_handler(Arc::new(StatusPageErrorHandler));
+// also: use_global_rpc_error_handler, use_global_ws_error_handler
+```
+
+The chain dispatches on handler-returned errors and framework events alike. For lifted domain errors, the chain sees the *underlying* error — `#[catch(UserError)]` matches a `UserError` returned through `?` even though the wire type wrapped it in `HttpError::AppError`.
+
+## Framework events
+
+When the framework itself is the source of an error, it emits a typed event implementing `toni::Error`. Events flow through the same observer + chain pipeline, so `#[catch]` handlers can reshape them:
+
+| Event | `kind` | Emitted when |
+|---|---|---|
+| `GuardRejection` | `Forbidden` (403) | A guard returned `false` (or panicked). Carries `guard_index` and an optional `reason`. |
+| `MiddlewareFailure` | `Internal` (500) | Middleware returned `Err` before the handler ran. |
+| `PanicRecovered` | `Internal` (500) | A panic was caught anywhere in the pipeline. Carries the `PipelineSegment` it happened in. |
+| `Cancelled` | `Unavailable` | The client gave up — disconnect or deadline. Observer-only by convention. |
+
+All are exported from `toni::errors` (and the crate root). Reshaping a guard rejection:
+
+```rust
+#[catch(toni::errors::GuardRejection)]
+async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+    HttpResponse::builder()
+        .status(toni::errors::http_status(err.kind()))
+        .json(json!({
+            "error": "auth_required",
+            "hint": "Send `x-auth-token: <token>`",
+            "detail": err.message(),
+        }))
+        .build()
+}
+```
+
+## Error observers
+
+An `ErrorObserver` is a transport-agnostic tap on the error pipeline — it fires for errors flowing through the chain but cannot shape the response. Use it for logging, metrics, and tracing:
+
+```rust
+use std::error::Error;
+use toni::async_trait;
+use toni::context::HandlerContext;
+use toni::traits_helpers::ErrorObserver;
+
+pub struct SentryObserver;
+
+#[async_trait]
+impl ErrorObserver for SentryObserver {
+    async fn observe<'a>(
+        &'a self,
+        error: &'a (dyn Error + Send + Sync + 'static),
+        _ctx: &'a (dyn HandlerContext + 'a),
+    ) {
+        tracing::error!(error = %error, "request error");
+    }
+}
+```
+
+```rust
+factory.use_global_error_observer(Arc::new(SentryObserver));
+```
+
+Observers run before the handler chain, so they see every error regardless of whether a handler later claims it. A panicking observer is caught and logged; it never corrupts the dispatch path.
+
+## Panic recovery
+
+Every pipeline segment — guards, interceptors, pipes, the handler body, error handlers, and response rendering — is wrapped in `catch_unwind` on every transport. A panic becomes a `PanicRecovered` event tagged with the segment it happened in (`handler`, `guard`, `pipe`, `middleware`, `error_handler`, `response_rendering`), fans out to observers, and is offered to the error handler chain. If nothing claims it, the transport renders its 500 fallback.
+
+The recovery policy per segment:
+
+- **Guard panic** — treated as a rejection: the request is blocked, not torn down.
+- **Interceptor / pipe panic** — remaining pre-handler steps and the handler are skipped; the event renders through the chain.
+- **Handler panic** — same path as a returned error, with `kind = Internal`.
+- **Error handler panic** — that handler is skipped (`None`) and the chain continues, so one bad handler can't kill error recovery.
+- **Renderer panic** — a minimal hardcoded 500 is substituted, so the client still gets a structured reply.
+
+## Other transports
+
+The same model runs everywhere; only the wire shape differs:
+
+- **RPC** — handlers return `Result<RpcData, RpcError>` or `Result<T, MyError>`; `RpcError::AppError` wraps lifted domain errors and renders `{"status": "error", "kind": "NotFound", "message": "..."}` as the reply payload. Chain handlers are `ErrorHandler<RpcContext, RpcData>`.
+- **WebSocket** — `WsError::AppError` plays the same role; chain handlers are `ErrorHandler<WsContext, WsMessage>` and produce the message sent back to the client.
+- **gRPC** — handlers return `tonic::Status` errors; chain handlers are `ErrorHandler<GrpcContext, GrpcStatus>` and can remap a status before it reaches the wire. gRPC registers per-method and per-service handlers via the same `#[use_error_handlers]` attribute on `#[grpc_methods]` impls.

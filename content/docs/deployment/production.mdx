@@ -35,7 +35,58 @@ PORT=8080
 
 ## Graceful shutdown
 
-Toni handles SIGTERM and SIGINT signals and runs the shutdown hook sequence (`on_module_destroy`, `before_application_shutdown`, `on_application_shutdown`) before exiting. No extra configuration needed.
+Toni installs **no** signal handlers. Wire SIGTERM/SIGINT to the application's `ShutdownHandle` yourself — spawn a task that waits for the signal and calls `shutdown()`:
+
+```rust
+use toni::*;
+use toni_axum::AxumAdapter;
+
+/// Returns the signal name so it can be forwarded to lifecycle hooks.
+async fn shutdown_signal() -> String {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to listen for SIGTERM");
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to listen for SIGINT");
+
+        tokio::select! {
+            _ = sigterm.recv() => "SIGTERM".to_string(),
+            _ = sigint.recv() => "SIGINT".to_string(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for Ctrl+C");
+        "SIGINT".to_string()
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
+    app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+
+    app.bind().await?;
+
+    let shutdown = app.shutdown_handle();
+    tokio::spawn(async move {
+        let signal = shutdown_signal().await;
+        tracing::info!(%signal, "shutting down");
+        shutdown.shutdown();
+    });
+
+    app.run().await;
+    Ok(())
+}
+```
+
+On the shutdown signal, `run()` closes the adapters first so in-flight requests drain, then runs the shutdown hooks in order: `on_module_destroy` → `before_application_shutdown` → `on_application_shutdown`. `ShutdownHandle` is cloneable and `shutdown()` is idempotent, so any task can trigger it.
+
+Without this wiring, SIGTERM kills the process immediately — in-flight requests are dropped and shutdown hooks never run. The full version of this pattern is in [`examples/graceful_shutdown.rs`](https://github.com/ifeanyi-ugwu/toni-rs/blob/master/examples/graceful_shutdown.rs).
 
 ## Listening on all interfaces
 
@@ -43,7 +94,7 @@ For production, listen on `0.0.0.0` (all interfaces) rather than `127.0.0.1` (lo
 
 ```rust
 app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
-app.start().await;
+app.start().await?;
 ```
 
 Or read the host and port from configuration:
@@ -56,8 +107,10 @@ let port: u16 = std::env::var("PORT")
     .expect("PORT must be a number");
 
 app.use_http_adapter(AxumAdapter::new(), port, &host).unwrap();
-app.start().await;
+app.start().await?;
 ```
+
+`start()` returns `Result<()>` — bind failures (port already in use, permission denied) surface here rather than panicking inside the server.
 
 ## Systemd service
 
@@ -87,20 +140,22 @@ sudo systemctl start myapp
 sudo journalctl -u myapp -f
 ```
 
+`systemctl stop` sends SIGTERM, so the [graceful shutdown wiring above](#graceful-shutdown) is what makes it a clean stop.
+
 ## Performance tuning (Axum / Tokio)
 
 ```rust
-fn main() {
+fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(num_cpus::get())
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            let mut app = ToniFactory::create(AppModule).await;
+            let mut app = ToniFactory::new().create_with(AppModule).await;
             app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
-            app.start().await;
-        });
+            app.start().await
+        })
 }
 ```
 

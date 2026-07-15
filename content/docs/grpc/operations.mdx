@@ -1,0 +1,99 @@
+---
+title: Operations
+description: Graceful shutdown and drain, backpressure caps, tracing, non-DI services, and bound-address discovery.
+---
+
+Runtime knobs on `GrpcAdapter` and how the adapter behaves in production. All snippets run inside the [LocalSet block](/docs/grpc/quick-start#the-localset-requirement) from the quick start.
+
+## Graceful shutdown and drain
+
+Shutdown is signalled through the application's `ShutdownHandle` — the framework installs no signal handlers, so wire them yourself:
+
+```rust
+let mut app = ToniFactory::create(AppModule).await;
+app.use_grpc_adapter(toni_grpc::GrpcAdapter::new(addr)).unwrap();
+
+let bound = app.bind().await.unwrap();
+let shutdown = app.shutdown_handle();
+tokio::task::spawn_local(async move {
+    tokio::signal::ctrl_c().await.ok();
+    shutdown.shutdown();
+});
+app.run().await;
+```
+
+On shutdown the adapter signals tonic's `serve_with_incoming_shutdown` and starts a drain timer. Tonic stops accepting connections and waits for in-flight calls — including open streams — to finish. The default budget is 10 seconds:
+
+```rust
+use std::time::Duration;
+
+let adapter = toni_grpc::GrpcAdapter::new(addr)
+    .with_drain_timeout(Duration::from_secs(30));
+
+// Wait forever — no abort:
+let adapter = adapter.with_drain_timeout(None);
+```
+
+When the timer elapses with calls still running, the serve future is dropped: connections close, streaming clients see `UNAVAILABLE`, and shutdown proceeds to the next step. The timer starts when shutdown is signalled, not at startup — a long-lived server is unaffected until drain begins. A never-closing bidirectional stream is the case this exists for: without the budget, one parked client would pin shutdown indefinitely.
+
+## Backpressure
+
+Two concurrency caps, off by default, both surfacing as `RESOURCE_EXHAUSTED`:
+
+```rust
+let adapter = toni_grpc::GrpcAdapter::new(addr)
+    .with_max_inflight(1024)        // across the whole server
+    .with_max_per_connection(64);   // per client connection
+```
+
+- `with_max_inflight(n)` bounds in-flight handlers across all connections. At the cap, additional requests are **rejected immediately** (load-shed), not queued — a misbehaving client can't pin server memory by spawning unlimited calls. Permits release as calls complete.
+- `with_max_per_connection(n)` bounds one connection's parallel calls, so a single client opening many streams can't monopolise the server even below the global cap.
+
+The two stack; reaching either limit rejects the call. Pass `None` to remove a cap.
+
+## Tracing
+
+Every dispatched call runs inside a span:
+
+```
+rpc.request{transport="grpc", pattern="toni_examples.orders.Orders/Create", id=..., peer=...}
+```
+
+`pattern` is the full proto method path; `id` is the caller's `x-request-id` metadata, falling back to `grpc-trace-id` (gRPC has no built-in correlation id); `peer` is the remote address. Events emitted from handlers and enhancers inherit these fields, so log lines correlate back to the originating call without threading context by hand.
+
+The span is installed unconditionally and surfaces only when a `tracing` subscriber is installed:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into()),
+    )
+    .init();
+```
+
+The same `rpc.request` span shape (with `transport = "tcp"` / `"udp"`) is emitted by the RPC adapters; the repository's `rpc_tracing` example runs all three side by side.
+
+## Mixing DI and plain tonic services
+
+`GrpcAdapter::add_service` accepts any tonic-generated service handle, so manually built services can sit alongside `#[grpc_service]`-registered ones:
+
+```rust
+let adapter = toni_grpc::GrpcAdapter::new(addr)
+    .add_service(SomeOtherServer::new(other_handler));
+app.use_grpc_adapter(adapter).unwrap();
+```
+
+Services added this way are a passthrough to tonic — no DI, no guards, no interceptors, no error handlers, no panic recovery. Useful for stock services such as `tonic-health` or `tonic-reflection`.
+
+## Bound address
+
+The socket binds synchronously inside `app.bind()`, so a port conflict surfaces there as `Err` rather than a panic in the serve loop. The bound address comes back in `BoundAdapters`:
+
+```rust
+let bound = app.bind().await.unwrap();
+let grpc_addr = bound.grpc.expect("gRPC adapter registered");
+println!("gRPC listening on {grpc_addr}");
+```
+
+`bound.grpc` is `Option<SocketAddr>` — `None` when no gRPC adapter is registered. Binding to port 0 and reading the real port back from `bound.grpc` is the pattern the integration suite uses for test isolation.

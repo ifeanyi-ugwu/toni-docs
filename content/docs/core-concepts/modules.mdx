@@ -19,6 +19,7 @@ This is the same mental model as NestJS's `@Module()`. The attribute arguments m
 | `controllers` | `controllers` |
 | `providers` | `providers` |
 | `exports` | `exports` |
+| `@Global()` | `global: true` |
 </Bridge>
 
 ## Basic module
@@ -51,12 +52,12 @@ pub struct DatabaseModule;
 #[module(
     imports: [DatabaseModule],    // DatabaseService is now injectable here
     controllers: [UsersController],
-    providers: [UsersService],    // UsersService can @inject DatabaseService
+    providers: [UsersService],    // UsersService can #[inject] DatabaseService
 )]
 pub struct UsersModule;
 ```
 
-A provider listed in `exports` must also be listed in `providers`. Only exported providers are visible outside the module; everything else is private to that module's scope.
+`exports` lists providers from this module's `providers` by type name. Only exported providers are visible outside the module; everything else is private to that module's scope.
 
 ## The module tree
 
@@ -75,41 +76,41 @@ pub struct AppModule;
 
 // main.rs
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(AppModule).await;
-    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1")?;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-The root module itself typically has no controllers or providers — it just composes feature modules.
+The root module itself typically has no controllers or providers — it composes feature modules.
 
-## Global providers
+## Global modules
 
-If a provider needs to be available everywhere without explicitly importing its module everywhere, put it in a module imported at the root level and export it there. All downstream modules that import the root (or any module that re-exports it) will have access.
-
-A common pattern for cross-cutting infrastructure:
+Marking a module `global: true` makes its exports available to every module in the tree without importing it:
 
 ```rust
 // infrastructure/infrastructure_module.rs
 #[module(
+    global: true,
     providers: [LoggerService, ConfigService, MetricsService],
     exports: [LoggerService, ConfigService, MetricsService],
 )]
 pub struct InfrastructureModule;
 
-// app_module.rs
+// app_module.rs — imported once, at the root
 #[module(
     imports: [InfrastructureModule, UsersModule, AuthModule],
 )]
 pub struct AppModule;
 ```
 
-Now every module that's part of the app has access to `LoggerService`, `ConfigService`, and `MetricsService` by importing `InfrastructureModule`.
+Every module in the application can now inject `LoggerService`, `ConfigService`, or `MetricsService` without listing `InfrastructureModule` in its own `imports`. Reserve this for genuinely cross-cutting infrastructure — explicit imports keep dependencies visible.
 
 ## Lifecycle hooks on modules
 
-You can attach lifecycle callbacks directly to the module by switching from `pub struct` to `impl` and declaring the hooks inside that block:
+Attach lifecycle callbacks directly to the module by switching from `pub struct` to `impl` and declaring the hooks inside that block. Module hooks share the provider hook shape — `async fn`, with startup hooks returning `toni::InitResult` — and run before the provider hooks of the same phase:
 
 ```rust
 #[module(
@@ -118,29 +119,69 @@ You can attach lifecycle callbacks directly to the module by switching from `pub
 )]
 impl DatabaseModule {
     #[on_module_init]
-    fn init(&self) {
+    async fn init(&self) -> toni::InitResult {
         println!("DatabaseModule initialized");
+        Ok(())
     }
 }
 ```
 
-Module-level hooks are synchronous and run before the provider hooks of the same phase.
-
 See [Lifecycle Hooks](/docs/lifecycle-hooks) for the full sequence.
+
+## Module-scoped middleware
+
+The `impl` form also accepts a `configure_middleware` method for applying middleware to route patterns:
+
+```rust
+use toni::traits_helpers::MiddlewareConsumer;
+
+#[module(controllers: [UsersController], providers: [RequestTrackingMiddleware])]
+impl UsersModule {
+    fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
+        consumer
+            .apply(LoggerMiddleware::new())
+            .for_routes(vec!["/users/*"]);
+
+        // DI-resolved middleware (constructor dependencies injected)
+        consumer
+            .apply_token::<RequestTrackingMiddleware>()
+            .exclude(vec!["/users/public/*"])
+            .for_routes(vec!["/users/*"]);
+    }
+}
+```
+
+See [Middleware](/docs/request-lifecycle/middleware) for route patterns and the `Middleware` trait.
 
 ## Dynamic modules
 
-For cases where a module's configuration depends on runtime values (connection strings, API keys, feature flags), create the module definition programmatically:
+For cases where a module's configuration depends on runtime values (connection strings, API keys, feature flags), a function builds the module at runtime and the call goes directly in `imports`:
 
 ```rust
-// config is just a normal Rust struct you build at runtime
-let db_module = DatabaseModule::for_root(DatabaseConfig {
-    url: std::env::var("DATABASE_URL").unwrap(),
-    pool_size: 10,
-});
-
-#[module(imports: [db_module, UsersModule])]
+#[module(
+    imports: [
+        SeaOrmModule::for_root("postgres://localhost/mydb"),
+        UsersModule,
+    ],
+)]
 pub struct AppModule;
 ```
 
-The `for_root` pattern is a convention, not a framework feature. It's just a function that returns a `ModuleDefinition` — a struct that carries the module metadata Toni needs.
+`DynamicModule` is a first-class framework type: a module whose providers and exports are determined at runtime rather than compile time. All integration crates (`toni-seaorm`, `toni-redis`, …) implement their `for_root` functions with it, and you can build your own:
+
+```rust
+use toni::DynamicModule;
+
+pub struct FeatureFlagsModule;
+
+impl FeatureFlagsModule {
+    pub fn for_root(api_key: &str) -> DynamicModule {
+        DynamicModule::builder("FeatureFlagsModule")
+            .provider(FeatureFlagsClientFactory::new(api_key))
+            .export::<FeatureFlagsClient>()
+            .build()
+    }
+}
+```
+
+The builder's `export::<T>()` exports by type, `export_token("NAME")` exports a string-token provider, and `global()` marks the module global.

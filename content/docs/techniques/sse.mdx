@@ -3,27 +3,37 @@ title: Server-Sent Events
 description: Stream events from server to client over a persistent HTTP connection.
 ---
 
-Server-Sent Events (SSE) let you push a stream of events to the browser over a single long-lived HTTP response. Toni provides `SseEvent` to build individual events and `sse()` / `Sse::new()` to wrap a stream into an HTTP response.
+Server-Sent Events (SSE) push a stream of events to the browser over a single long-lived HTTP response. Toni provides the `#[sse]` route attribute for declaring SSE handlers, `SseEvent` for building individual events, and lower-level `sse()` / `Sse::new()` helpers for wrapping a stream manually.
 
-## Basic usage
+## The #[sse] attribute
 
-Return `sse(stream)` from any handler. The stream yields `SseEvent` values:
+`#[sse("/path")]` declares an SSE handler. It always routes as GET, and the handler returns a bare stream of events — no response wrapping:
 
 ```rust
-use futures::stream;
-use toni::{sse, SseEvent};
+use futures::{stream, Stream};
+use toni::SseEvent;
 
-#[get("/events")]
-async fn events(&self) -> impl IntoResponse {
-    let s = stream::iter([
-        SseEvent::data("hello").event("greet"),
-        SseEvent::data("world").id("2"),
-    ]);
-    sse(s)
+#[sse("/events")]
+async fn events(&self) -> impl Stream<Item = SseEvent> {
+    stream::iter([
+        SseEvent::data("hello"),
+        SseEvent::data("world"),
+    ])
 }
 ```
 
-Toni sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` automatically.
+When individual events may fail, return a stream of `Result` — the macro detects which variant from the return type:
+
+```rust
+#[sse("/events")]
+async fn events(&self) -> impl Stream<Item = Result<SseEvent, std::io::Error>> {
+    stream::iter([Ok(SseEvent::data("ok-event"))])
+}
+```
+
+Toni sets `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no` (tells nginx/caddy not to buffer) on the response.
+
+For setup that can fail *before* streaming starts — validating a subscription token, say — use a guard, or a `#[get]` handler returning `Result<impl IntoResponse, E>` with an explicit `sse(stream)` call (see [below](#the-lower-level-helpers)).
 
 ## Building events
 
@@ -40,25 +50,122 @@ Only `data` is required. Multi-line data is split into multiple `data:` lines pe
 
 ```rust
 use std::time::Duration;
-use futures::stream;
-use toni::{sse, SseEvent};
+use futures::{stream, Stream};
+use toni::SseEvent;
 
-#[get("/counter")]
-async fn counter(&self) -> impl IntoResponse {
-    let s = stream::unfold(0u32, |n| async move {
+#[sse("/counter")]
+async fn counter(&self) -> impl Stream<Item = SseEvent> {
+    stream::unfold(0u32, |n| async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         Some((SseEvent::data(format!("count: {n}")).id(n.to_string()), n + 1))
-    });
-    sse(s)
+    })
 }
 ```
 
-## Fallible streams
+Test with `curl -N http://127.0.0.1:3000/sse/counter`, or in a browser:
 
-Use `Sse::new` when your stream yields `Result<SseEvent, E>`. Any error type that implements `Into<Box<dyn Error + Send + Sync>>` works:
+```js
+const es = new EventSource("http://127.0.0.1:3000/sse/counter");
+es.onmessage = (e) => console.log(e.data);
+```
+
+## Service-level broadcaster
+
+A service holding a `broadcast::Sender` fans out to every connected client — the Rust equivalent of NestJS's `Subject` + `asObservable` pattern:
 
 ```rust
-use toni::http_helpers::Sse;
+use std::pin::Pin;
+use futures::{stream, Stream};
+use tokio::sync::broadcast;
+use toni::extractors::Bytes;
+use toni::*;
+
+#[injectable]
+pub struct EventsService {
+    tx: broadcast::Sender<String>,
+}
+impl EventsService {
+    #[new]
+    pub fn new() -> Self {
+        // The initial receiver is discarded; senders still accept messages
+        // and each connection creates its own receiver via `subscribe()`.
+        let (tx, _) = broadcast::channel(64);
+        Self { tx }
+    }
+
+    /// Push a message to all connected subscribers.
+    pub fn emit(&self, data: String) {
+        let _ = self.tx.send(data);
+    }
+
+    /// Each call returns an independent stream that receives every message
+    /// emitted after the subscription point.
+    pub fn subscribe(&self) -> Pin<Box<dyn Stream<Item = SseEvent> + Send + Sync + 'static>> {
+        let rx = self.tx.subscribe();
+        Box::pin(stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(data) => return Some((SseEvent::data(data), rx)),
+                    // Slow consumer missed events — continue rather than disconnect
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        }))
+    }
+}
+
+#[controller("/sse")]
+pub struct SseController {
+    #[inject]
+    events: EventsService,
+}
+
+#[routes]
+impl SseController {
+    /// Every connected client receives every emitted message.
+    #[get("/live")]
+    async fn live(&self) -> impl IntoResponse {
+        sse(self.events.subscribe())
+    }
+
+    /// Push a message to all current /sse/live subscribers.
+    #[post("/emit")]
+    async fn emit_event(&self, Bytes(data): Bytes) -> impl IntoResponse {
+        self.events
+            .emit(String::from_utf8_lossy(&data).into_owned());
+        HttpResponse::no_content().build()
+    }
+}
+
+#[module(controllers: [SseController], providers: [EventsService])]
+impl AppModule {}
+```
+
+Open two terminals to watch the fan-out:
+
+```bash
+curl -N http://127.0.0.1:3000/sse/live
+curl -X POST http://127.0.0.1:3000/sse/emit -d 'hello everyone'
+```
+
+## The lower-level helpers
+
+`#[sse]` is sugar over two helpers usable from any `#[get]` handler:
+
+- `sse(stream)` — wraps an infallible `Stream<Item = SseEvent>` into an SSE response.
+- `Sse::new(stream)` — wraps a `Stream<Item = Result<SseEvent, E>>`; any `E: Into<Box<dyn Error + Send + Sync>>` works.
+
+```rust
+use toni::{sse, Sse, SseEvent};
+
+#[get("/events")]
+async fn events(&self) -> impl IntoResponse {
+    sse(stream::iter([
+        SseEvent::data("hello").event("greet"),
+        SseEvent::data("world").id("2"),
+    ]))
+}
 
 #[get("/feed")]
 async fn feed(&self) -> impl IntoResponse {
@@ -67,73 +174,23 @@ async fn feed(&self) -> impl IntoResponse {
 }
 ```
 
-`sse()` is a shorthand for infallible streams — it wraps each `SseEvent` in `Ok` before passing it to `Sse::new`.
-
-## Service-level broadcaster
-
-Inject a service that holds a `broadcast::Sender` to fan out to all connected clients:
-
-```rust
-use tokio::sync::broadcast;
-use toni::{injectable, sse, SseEvent};
-
-#[injectable(pub struct EventsService {
-    tx: broadcast::Sender<String>,
-})]
-impl EventsService {
-    pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(64);
-        Self { tx }
-    }
-
-    pub fn emit(&self, data: String) {
-        let _ = self.tx.send(data);
-    }
-
-    pub fn subscribe(&self) -> impl futures::Stream<Item = SseEvent> + Send + 'static {
-        let rx = self.tx.subscribe();
-        futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(data) => return Some((SseEvent::data(data), rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        })
-    }
-}
-
-#[controller("/sse", pub struct SseController {
-    #[inject]
-    events: EventsService,
-})]
-impl SseController {
-    pub fn new(events: EventsService) -> Self { Self { events } }
-
-    #[get("/live")]
-    async fn live(&self) -> impl IntoResponse {
-        sse(self.events.subscribe())
-    }
-
-    #[post("/emit")]
-    async fn emit(&self, body: String) -> impl IntoResponse {
-        self.events.emit(body);
-        HttpResponse::no_content().build()
-    }
-}
-```
+Reach for them when the handler must branch before streaming — return an error response on bad input, an SSE response otherwise.
 
 ## API reference
 
 ```rust
+// Route attribute — always GET; handler returns the stream directly
+#[sse("/path")]
+async fn handler(&self) -> impl Stream<Item = SseEvent>                // infallible
+async fn handler(&self) -> impl Stream<Item = Result<SseEvent, E>>    // per-event fallible
+
 // Build an event
 SseEvent::data(impl Into<String>) -> SseEvent
     .event(impl Into<String>) -> Self      // named event type
     .id(impl Into<String>) -> Self         // Last-Event-ID
     .retry_ms(u64) -> Self                 // reconnect delay hint (ms)
 
-// Wrap a stream into an SSE response
+// Wrap a stream manually (from a #[get] handler)
 sse<S: Stream<Item = SseEvent>>(stream: S) -> impl IntoResponse
 
 // For fallible streams

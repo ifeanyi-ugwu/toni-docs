@@ -3,100 +3,222 @@ title: Broadcasting
 description: Send messages to multiple connected clients from anywhere in your application.
 ---
 
-Toni's broadcast system lets you send messages to all connected clients, specific clients, or subsets of clients — from anywhere in your application, not just from within a gateway.
-
-## BroadcastService
-
-Inject `BroadcastService` into any provider or gateway to send messages without needing a direct reference to individual clients:
-
-```rust
-use toni::injectable;
-use toni::websocket::BroadcastService;
-
-#[injectable(pub struct NotificationService {
-    #[inject]
-    broadcast: BroadcastService,
-})]
-impl NotificationService {
-    pub fn new(broadcast: BroadcastService) -> Self { Self { broadcast } }
-
-    pub async fn notify_all(&self, message: &str) {
-        self.broadcast.broadcast_text(message).await;
-    }
-
-    pub async fn notify_client(&self, client_id: &str, message: &str) {
-        self.broadcast.send_to(client_id, WsMessage::text(message)).await;
-    }
-}
-```
-
-## Broadcasting from an HTTP controller
-
-```rust
-#[controller("/events", pub struct EventsController {
-    #[inject]
-    broadcast: BroadcastService,
-})]
-impl EventsController {
-    pub fn new(broadcast: BroadcastService) -> Self { Self { broadcast } }
-
-    #[post("/announce")]
-    async fn announce(&self, Json(body): Json<AnnouncementDto>) -> HttpResponse {
-        self.broadcast
-            .broadcast_text(&format!("[Announcement] {}", body.message))
-            .await;
-        HttpResponse::ok().build()
-    }
-}
-```
-
-## BroadcastService API
-
-```rust
-broadcast.broadcast_text("message")              // to all clients
-broadcast.broadcast(WsMessage)                    // any message type to all
-broadcast.send_to(client_id, WsMessage)           // to specific client
-broadcast.send_to_many(client_ids, WsMessage)     // to multiple clients
-broadcast.get_client_count()                      // number of connected clients
-broadcast.get_client_ids()                        // list of all client IDs
-```
+`BroadcastService` sends messages to all connected clients, specific clients, or subsets of clients — from gateways, services, or HTTP controllers. It exposes a Socket.io-style fluent API: pick a target, then send.
 
 ## Enabling broadcast support
 
-Add the `BroadcastModule` to your app — it provides the `BroadcastService` and the `ConnectionManagerProvider` that tracks connected clients:
+Import `BroadcastModule::new()` in any module whose gateways or services need `BroadcastService`. The module is global, so one import makes the service injectable everywhere:
 
 ```rust
 use toni::websocket::BroadcastModule;
 
 #[module(
-    imports: [BroadcastModule],
-    controllers: [EventsController],
-    providers: [NotificationService],
+    imports: [BroadcastModule::new()],
+    providers: [ChatGateway],
 )]
 pub struct AppModule;
 ```
 
-## Example: Server-sent events from a background task
+Without the import, gateways still work — each message is handled request-response, with no cross-client delivery. The import is what wires connections into the shared connection registry that broadcasting reads.
+
+## Broadcasting from a gateway
+
+```rust
+use toni::websocket::{BroadcastModule, BroadcastService, WsClient, WsError, WsHandlerOutput, WsMessage};
+use toni::WsHandlerResult;
+use toni_macros::{module, new, subscriptions, websocket_gateway};
+
+#[websocket_gateway("/chat")]
+pub struct ChatGateway {
+    #[inject]
+    broadcast: BroadcastService,
+}
+
+#[subscriptions]
+impl ChatGateway {
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
+    }
+
+    #[subscribe_message("message")]
+    async fn handle_message(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
+        let text = message
+            .as_text()
+            .ok_or_else(|| WsError::InvalidMessage("Expected text message".into()))?;
+
+        // Deliver to every connected client, including the sender
+        self.broadcast
+            .to_all()
+            .send_event("message", format!("{}: {}", client.id, text))
+            .await?;
+
+        Ok(WsHandlerOutput::Empty)
+    }
+}
+
+#[module(imports: [BroadcastModule::new()], providers: [ChatGateway])]
+struct ChatModule;
+```
+
+The handler returns `Ok(WsHandlerOutput::Empty)` because delivery already happened through the broadcast — returning a message would additionally reply to the sender.
+
+## The fluent API
+
+Every send starts from a target:
+
+```rust
+broadcast.to_all()                // all connected clients
+broadcast.to_room("lobby")        // all clients in a named room
+broadcast.to_client(client_id)    // one specific client
+broadcast.except(client_id)       // all connected clients except one
+```
+
+Targets can be refined before sending:
+
+```rust
+.and_room("room2")            // add a room (to_room targets only): union of members
+.in_namespace("lobby")        // keep only clients in this namespace
+```
+
+Then send:
+
+```rust
+// Any WsMessage. Returns how many clients accepted the message.
+.send(WsMessage) -> Result<usize, BroadcastError>
+
+// Wraps in the JSON envelope {"event": "...", "data": "..."}.
+// Both arguments are Into<String> — serialize structs yourself before passing.
+.send_event(event, data) -> Result<usize, BroadcastError>
+```
+
+`to_client` works through the **auto-room** pattern: every client automatically joins a room named after its own ID on connect, so private messages are ordinary room sends.
+
+Room membership management (`join_room`, `leave_room`, and queries) is covered in [Rooms](/docs/websocket/rooms).
+
+## Broadcasting from services
+
+`BroadcastService` is `Clone` and injects into any provider:
+
+```rust
+use toni::websocket::{BroadcastService, WsMessage};
+use toni_macros::{injectable, new};
+
+#[injectable]
+pub struct NotificationService {
+    #[inject]
+    broadcast: BroadcastService,
+}
+
+impl NotificationService {
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
+    }
+
+    pub async fn notify_all(&self, message: &str) {
+        self.broadcast
+            .to_all()
+            .send(WsMessage::text(message.to_string()))
+            .await
+            .ok();
+    }
+}
+```
+
+## Pushing from HTTP handlers
+
+A gateway is a DI provider, so it can be injected into an HTTP controller. Both share the same `BroadcastService`, letting a REST endpoint push to every live WebSocket connection:
+
+```rust
+use serde::Deserialize;
+use toni::extractors::Json;
+use toni::websocket::{BroadcastModule, BroadcastService, WsMessage};
+use toni::*;
+use toni_macros::{module, new, subscriptions, websocket_gateway};
+
+#[websocket_gateway("/notifications")]
+pub struct NotificationGateway {
+    #[inject]
+    broadcast: BroadcastService,
+}
+
+#[subscriptions]
+impl NotificationGateway {
+    #[new]
+    pub fn new(broadcast: BroadcastService) -> Self {
+        Self { broadcast }
+    }
+
+    /// Called by NotifyController to push a message to all connected clients.
+    pub async fn push(&self, message: &str) {
+        self.broadcast
+            .to_all()
+            .send(WsMessage::text(message.to_string()))
+            .await
+            .ok();
+    }
+}
+
+#[derive(Deserialize)]
+struct NotifyPayload {
+    message: String,
+}
+
+#[controller("/notify")]
+pub struct NotifyController {
+    #[inject]
+    gateway: NotificationGateway,
+}
+
+#[routes]
+impl NotifyController {
+    #[post("/")]
+    async fn notify(&self, Json(payload): Json<NotifyPayload>) -> Body {
+        self.gateway.push(&payload.message).await;
+        Body::text(format!("broadcast: {}", payload.message))
+    }
+}
+
+#[module(
+    providers: [NotificationGateway],
+    controllers: [NotifyController],
+    imports: [BroadcastModule::new()],
+)]
+impl AppModule {}
+```
+
+This is the pattern for server-initiated notifications: `POST /notify` fans out to everyone connected at `ws://…/notifications`.
+
+## Broadcasting from a background task
+
+Fetch the service from the container before starting the app and hand it to a task:
 
 ```rust
 use tokio::time::{interval, Duration};
+use toni::websocket::{BroadcastService, WsMessage};
 
-async fn start_heartbeat(broadcast: BroadcastService) {
+async fn heartbeat(broadcast: BroadcastService) {
     let mut ticker = interval(Duration::from_secs(30));
     loop {
         ticker.tick().await;
-        broadcast.broadcast_text("ping").await;
+        broadcast.to_all().send(WsMessage::text("ping")).await.ok();
     }
 }
 
 #[tokio::main]
-async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
 
-    let broadcast = app.get::<BroadcastService>().await.unwrap();
-    tokio::spawn(start_heartbeat(broadcast));
+    let broadcast = app.get::<BroadcastService>().await?;
+    tokio::spawn(heartbeat(broadcast));
 
-    app.start().await;
+    app.start().await?;
+    Ok(())
 }
 ```
+
+## Scaling beyond one process
+
+`BroadcastService` only reaches clients connected to the current process. To broadcast across multiple instances, replace `BroadcastModule` with [Redis Broadcast](/docs/websocket/redis-broadcast).

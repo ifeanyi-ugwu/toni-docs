@@ -13,7 +13,7 @@ Add the dependency:
 [dependencies]
 toni = "0.2"
 toni-redis = "0.1"
-redis = { version = "0.27", features = ["tokio-comp"] }
+redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
 ```
 
 ## Registration
@@ -45,14 +45,13 @@ The connection is established at startup and panics on failure. An invalid URL o
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 
-#[injectable(pub struct CacheService {
+#[injectable]
+pub struct CacheService {
+    #[inject]
     redis: ConnectionManager,
-})]
-impl CacheService {
-    pub fn new(redis: ConnectionManager) -> Self {
-        Self { redis }
-    }
+}
 
+impl CacheService {
     pub async fn get(&self, key: &str) -> redis::RedisResult<Option<String>> {
         let mut conn = self.redis.clone();
         conn.get(key).await
@@ -84,6 +83,10 @@ impl CacheService {
 )]
 pub struct AppModule;
 ```
+
+## Health checks
+
+Enable the `health` feature to have `for_root` also register a `RedisHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
 
 ## API reference
 

@@ -18,48 +18,48 @@ use toni::ToniFactory;
 use toni_axum::AxumAdapter;
 
 #[tokio::main]
-async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 8080, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-No separate WebSocket adapter is needed for the common case. If you need WebSocket on a different port than HTTP, call `use_websocket_adapter()` with a separate `AxumAdapter`.
+No separate WebSocket adapter is needed for the common case. To run a gateway on its own port, declare `port = N` on the gateway and register a `WebSocketAdapter` — see [Separate-Port Gateways](/docs/websocket/separate-port).
 
 ## Defining a gateway
 
-Use the `#[websocket_gateway]` macro with the connection path and an optional struct body for injected fields:
+`#[websocket_gateway("/path")]` goes on the struct — exactly like `#[injectable]`. Message handlers live in a sibling impl marked `#[subscriptions]`, with `#[new]` marking the constructor:
 
 ```rust
 use toni::*;
-use toni_macros::{module, websocket_gateway};
+use toni_macros::{module, new, subscriptions, websocket_gateway};
 
-#[websocket_gateway("/chat", pub struct EchoGateway {})]
+#[websocket_gateway("/chat")]
+pub struct EchoGateway {}
+
+#[subscriptions]
 impl EchoGateway {
-    pub fn new() -> Self { Self {} }
+    #[new]
+    pub fn new() -> Self {
+        Self {}
+    }
 
     #[subscribe_message("message")]
-    async fn handle_message(
-        &self,
-        client: WsClient,
-        message: WsMessage,
-    ) -> Result<Option<WsMessage>, WsError> {
+    async fn handle_message(&self, client: WsClient, message: WsMessage) -> WsHandlerResult {
         let text = message
             .as_text()
-            .ok_or_else(|| WsError::InvalidMessage("Expected text".into()))?;
+            .ok_or_else(|| WsError::InvalidMessage("Expected text message".into()))?;
 
         println!("[{}] {}", client.id, text);
-        Ok(Some(WsMessage::text(format!("Echo: {text}"))))
+
+        Ok(WsMessage::text(format!("Echo: {}", text)).into())
     }
 
     #[subscribe_message("ping")]
-    async fn handle_ping(
-        &self,
-        _client: WsClient,
-        _message: WsMessage,
-    ) -> Result<Option<WsMessage>, WsError> {
-        Ok(Some(WsMessage::text("pong")))
+    async fn handle_ping(&self, _client: WsClient, _message: WsMessage) -> WsHandlerResult {
+        Ok(WsMessage::text("pong").into())
     }
 }
 
@@ -67,113 +67,173 @@ impl EchoGateway {
 struct AppModule;
 ```
 
-Each `#[subscribe_message("event")]` method handles one named event type. The client sends:
+Attribute arguments: a path string (defaults to `"/"`), `namespace = "…"`, and `port = N`. The gateway is registered by listing it in a module's `providers` — Toni discovers it and binds the route at `app.bind()`.
+
+## Message routing
+
+Incoming text frames must be JSON with an `event` field. The value routes the message to the matching `#[subscribe_message("event")]` handler:
 
 ```json
 {"event": "message", "data": "Hello"}
 {"event": "ping"}
 ```
 
+The handler receives the **entire frame** as its `WsMessage` argument — `message.as_text()` returns the full JSON string, and extracting `data` fields is up to the handler (see [Rooms](/docs/websocket/rooms) for `serde_json` parsing patterns).
+
+Routing edge cases:
+
+- An `event` value with no matching handler produces a `NotFound` error frame; the connection stays open.
+- Frames that are not JSON, or lack the `event` field, are answered with an error frame; the connection stays open.
+- Binary frames are not routed to handlers.
+- Ping/pong control frames are handled at the adapter layer and never reach the gateway.
+
+The routing field name comes from `GatewayTrait::event_field()`, which defaults to `"event"`. Overriding it (e.g. to `"type"` for graphql-ws protocol compatibility) requires implementing `GatewayTrait` by hand instead of using the macro.
+
+## Handler results
+
+Every `#[subscribe_message]` handler has the signature:
+
+```rust
+async fn(&self, client: WsClient, message: WsMessage) -> WsHandlerResult
+```
+
+where `WsHandlerResult = Result<WsHandlerOutput, WsError>`:
+
+```rust
+Ok(WsHandlerOutput::Empty)           // no reply
+Ok(WsHandlerOutput::Single(msg))     // one reply frame to the sender
+Ok(msg.into())                       // shorthand for Single via From<WsMessage>
+Ok(WsHandlerOutput::Stream(stream))  // a sequence of frames (see below)
+Err(ws_error)                        // error frame to the sender
+```
+
+Handlers that push through [broadcasting](/docs/websocket/broadcasting) instead of replying directly return `Ok(WsHandlerOutput::Empty)`.
+
+## Streaming responses
+
+`WsHandlerOutput::Stream` carries a `BoxStream<'static, WsMessage>`. The framework drives the stream in the adapter layer, pushing each item to the client until the stream exhausts or the connection closes:
+
+```rust
+use futures::stream;
+use toni::websocket::{WsClient, WsHandlerOutput, WsHandlerResult, WsMessage};
+
+#[subscribe_message("count")]
+async fn on_count(&self, _client: WsClient, _msg: WsMessage) -> WsHandlerResult {
+    let items = stream::iter(
+        ["one", "two", "three"]
+            .into_iter()
+            .map(|s| WsMessage::text(s.to_string())),
+    );
+    Ok(WsHandlerOutput::Stream(Box::pin(items)))
+}
+```
+
+The handler returns immediately; delivery happens in a background task.
+
+## Connection lifecycle hooks
+
+`#[on_connect]`, `#[on_disconnect]`, and `#[after_init]` are standalone per-method macros — they go in a plain impl block and need no `#[subscriptions]`:
+
+```rust
+use toni::websocket::{WsClient, WsError};
+use toni_macros::{after_init, on_connect, on_disconnect, websocket_gateway};
+
+#[websocket_gateway("/presence")]
+pub struct PresenceGateway {}
+
+impl PresenceGateway {
+    #[on_connect]
+    async fn connected(&self, client: &WsClient) -> Result<(), WsError> {
+        println!("client {} connected", client.id);
+        Ok(())
+    }
+
+    #[on_disconnect]
+    async fn disconnected(&self, client: &WsClient) {
+        println!("client {} disconnected", client.id);
+    }
+
+    #[after_init]
+    async fn ready(&self) {
+        println!("gateway path registered");
+    }
+}
+```
+
+- `#[on_connect]` — `async fn(&self, client: &WsClient) -> Result<(), WsError>`. Returning `Err` rejects the connection.
+- `#[on_disconnect]` — `async fn(&self, client: &WsClient)`. Runs when the client disconnects.
+- `#[after_init]` — `async fn(&self)`. Runs once after the gateway path is registered with the adapter, before any connections.
+
+A gateway with no `#[subscriptions]` impl at all is valid: it accepts connections (and can broadcast to them) without routing any messages. `#[websocket_gateway]` alone is a complete connection-only gateway.
+
 ## WsClient
 
 `WsClient` carries connection metadata for the current client:
 
 ```rust
-client.id          // unique client identifier (String field, not a method)
-client.headers     // HTTP handshake headers
+client.id                     // String — unique per connection
+client.handshake.headers      // HashMap<String, String> — upgrade request headers
+client.handshake.query        // HashMap<String, String> — query params from the handshake URL
+client.handshake.remote_addr  // Option<String>
+client.extensions             // Extensions — per-connection storage (auth data, user info)
 ```
 
-To send a message back to the caller, return `Ok(Some(WsMessage))` from the handler. Returning `Ok(None)` sends nothing.
+Header keys are stored lowercase, so look up `"x-auth-token"` regardless of how the client sent it.
 
-## WsMessage types
+## WsMessage
 
 ```rust
 WsMessage::text("hello")             // text frame
-WsMessage::binary(vec![0u8, 1, 2])  // binary frame
-WsMessage::ping()                    // ping control frame
-WsMessage::pong()                    // pong control frame
+WsMessage::binary(vec![0u8, 1, 2])   // binary frame
+WsMessage::close()                   // close frame
+
+message.as_text()    // Option<&str>
+message.as_binary()  // Option<&[u8]>
 ```
 
-## Registering a gateway
+## Error handling
 
-Gateways are regular DI providers. List them in a module's `providers`:
+Returning `Err(WsError)` from a handler sends a JSON error frame to the sender and keeps the connection open. The canonical envelope is:
 
-```rust
-#[module(providers: [ChatGateway])]
-pub struct ChatModule;
+```json
+{"status": "error", "kind": "BadRequest", "message": "Expected text message"}
 ```
 
-Toni discovers that `ChatGateway` was annotated with `#[websocket_gateway]` and registers the upgrade route automatically when `start()` is called.
+The `kind` per variant:
 
-## Dependency injection in gateways
+| `WsError` variant | `kind` |
+|---|---|
+| `InvalidMessage(msg)` | `BadRequest` |
+| `AuthFailed(msg)` | `Unauthorized` |
+| `EventNotFound(msg)` | `NotFound` |
+| `ConnectionClosed(msg)` | `Unavailable` |
+| `Internal(msg)` / `BroadcastError(msg)` | `Internal` |
 
-Declare injected services as fields in the struct body of the macro:
-
-```rust
-#[websocket_gateway("/chat", pub struct ChatGateway {
-    #[inject]
-    message_service: MessageService,
-})]
-impl ChatGateway {
-    pub fn new(message_service: MessageService) -> Self {
-        Self { message_service }
-    }
-
-    #[subscribe_message("message")]
-    async fn on_message(
-        &self,
-        client: WsClient,
-        msg: WsMessage,
-    ) -> Result<Option<WsMessage>, WsError> {
-        if let Some(text) = msg.as_text() {
-            self.message_service.store(&client.id, text).await;
-        }
-        Ok(None)
-    }
-}
-```
-
-## Error handling in handlers
-
-Return `Err(WsError)` to signal an error. Toni sends the error as a JSON text frame and continues — it does not close the connection unless the error is `WsError::ConnectionClosed` or `WsError::AuthFailed`:
+Domain error types implementing `toni::Error` (via `#[derive(toni::Error)]` + `#[error_kind(KIND)]`) lift into `WsError::AppError` automatically through `?` — the envelope then carries the error's own `kind`, `message`, and optional `details`:
 
 ```rust
 #[subscribe_message("create")]
-async fn create(
-    &self,
-    _client: WsClient,
-    msg: WsMessage,
-) -> Result<Option<WsMessage>, WsError> {
+async fn create(&self, _client: WsClient, msg: WsMessage) -> WsHandlerResult {
     let text = msg
         .as_text()
         .ok_or_else(|| WsError::InvalidMessage("Expected text payload".into()))?;
 
     // ... handle message
-    Ok(Some(WsMessage::text("created")))
+    Ok(WsMessage::text("created").into())
 }
 ```
 
-## Multiple event types
+`BroadcastError` from `.send()` calls also converts via `?`. Panics in handlers are caught by the framework, rendered as an error frame, and do not tear down the connection.
 
-A gateway can subscribe to as many events as needed:
+## Namespaces
+
+A gateway can declare a namespace:
 
 ```rust
-#[websocket_gateway("/notifications", pub struct NotificationGateway {})]
-impl NotificationGateway {
-    #[subscribe_message("subscribe")]
-    async fn subscribe(&self, client: WsClient, msg: WsMessage)
-        -> Result<Option<WsMessage>, WsError> { /* ... */ Ok(None) }
-
-    #[subscribe_message("unsubscribe")]
-    async fn unsubscribe(&self, client: WsClient, msg: WsMessage)
-        -> Result<Option<WsMessage>, WsError> { /* ... */ Ok(None) }
-
-    #[subscribe_message("ping")]
-    async fn ping(&self, _client: WsClient, _msg: WsMessage)
-        -> Result<Option<WsMessage>, WsError> {
-        Ok(Some(WsMessage::text("pong")))
-    }
-}
+#[websocket_gateway("/chat", namespace = "lobby")]
+pub struct LobbyGateway {}
 ```
 
-See [Broadcasting](/docs/websocket/broadcasting) for sending messages to other clients and [Rooms](/docs/websocket/rooms) for group messaging.
+Clients connecting through that gateway are tagged with the namespace, and broadcast targets can filter on it with `.in_namespace("lobby")` — see [Broadcasting](/docs/websocket/broadcasting).
+
+See [Broadcasting](/docs/websocket/broadcasting) for sending messages to other clients, [Rooms](/docs/websocket/rooms) for group messaging, and [WebSocket + DI](/docs/websocket/with-di) for guards and interceptors.

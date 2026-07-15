@@ -1,0 +1,81 @@
+---
+title: MQTT Adapter
+description: MQTT v5 topics as patterns — request-response via response_topic and correlation_data.
+---
+
+`toni-mqtt` maps each RPC pattern to an MQTT topic. It uses MQTT **v5**, which carries request-response natively — a PUBLISH names a `response_topic` and `correlation_data` — so the message body is raw `RpcData` bytes and addressing lives in the PUBLISH properties. Built on `rumqttc`; a v5-capable broker must be reachable from both sides.
+
+## Server setup
+
+Add the dependencies:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-mqtt = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_mqtt::MqttAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(MqttAdapter::new("127.0.0.1", 1883))?;
+    app.start().await?;
+    Ok(())
+}
+```
+
+A broker that is down at startup does not panic the process — the event loop retries with a 500 ms backoff until it connects. Connections use a unique client id per process, a 5-second keep-alive, and QoS `AtLeastOnce` for every subscribe and publish.
+
+## How patterns map to topics
+
+Each pattern subscribes to a topic with the pattern string as its name — exact topic per handler; routing matches the received message's topic against the registered patterns. Subscriptions are re-issued on **every** broker connect, not once at startup: the underlying client reconnects a dropped socket but does not replay subscriptions, so both server and client re-subscribe on each `ConnAck`.
+
+## Wire behavior
+
+- **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
+- **Request-response** — a PUBLISH carrying a `response_topic` gets the framed response published there with the request's `correlation_data` echoed back. A `response_topic` addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
+- **Fire-and-forget** — no `response_topic`; nothing is published back.
+- **Metadata** — per-call metadata rides in the v5 `user_properties`. MQTT permits repeated property keys; the metadata map is flat, so the last value wins.
+
+Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+## Client transport
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_mqtt::MqttClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(MqttClientTransport::new("127.0.0.1", 1883))
+)
+```
+
+Connection is lazy on first use. Each transport instance subscribes one private reply topic, `toni/rpc/reply/{client-id}`, and a background task drives the event loop, routing every reply back to its waiting call by `correlation_data`. The first call waits up to 5 seconds for the reply subscription to be acknowledged before publishing, so a reply cannot outrun the subscription that routes it.
+
+### Custom timeout
+
+Default request-response timeout is 5 seconds:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    MqttClientTransport::new("127.0.0.1", 1883)
+        .with_timeout(Duration::from_secs(10))
+)
+```
+
+## Operational limits
+
+- MQTT v3.x brokers are not supported — the request-response mechanism requires v5 properties.
+- The constructor takes host and port only; TLS and broker authentication are not exposed.
+- QoS `AtLeastOnce` means a handler can see the same message twice after a reconnect window — make event handlers idempotent.
+- No drain timeout or in-flight cap — each inbound PUBLISH spawns an unbounded task; shutdown disconnects without waiting for in-flight handlers.
+- No per-request tracing span; `BoundAdapters.rpc` is `None`.

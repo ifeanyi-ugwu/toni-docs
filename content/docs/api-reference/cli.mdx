@@ -17,28 +17,45 @@ cargo install toni-cli
 toni new <project-name>
 ```
 
-Scaffolds a new Toni project. Creates:
-- `Cargo.toml` with framework dependencies
-- `src/main.rs`
-- `src/app_module.rs`
-- `src/app_controller.rs`
-- `src/app_service.rs`
-
-### toni generate
+Scaffolds a new Toni project:
 
 ```
-toni generate <type> <name>
+<project-name>/
+├── Cargo.toml                 # toni 0.2.0, toni-axum 0.1.0, tokio
+└── src/
+    ├── main.rs                # ToniFactory + AxumAdapter on 127.0.0.1:3000
+    └── app/
+        ├── mod.rs             # #[path]-based module declarations
+        ├── app.module.rs      # AppModule wiring AppController + AppService
+        ├── app.controller.rs  # #[controller("/app")] with CRUD routes
+        └── app.service.rs     # #[injectable] AppService
 ```
 
-| Type | Creates |
-|------|---------|
-| `module` | `src/<name>/<name>_module.rs` with `#[module]` |
-| `controller` | `src/<name>/<name>_controller.rs` with `#[controller]` |
-| `service` | `src/<name>/<name>_service.rs` with `#[injectable]` |
+Project names may contain only alphanumerics, `-`, and `_`. The target directory must not already exist.
+
+### toni generate resource
+
+```
+toni generate resource <name>
+```
+
+Run from the project root. Creates `src/app/<name>/`:
+
+```
+src/app/<name>/
+├── mod.rs
+├── <name>.module.rs      # <Name>Module
+├── <name>.controller.rs  # #[controller("/<name>")] with CRUD routes + GET /{id}
+└── <name>.service.rs     # #[injectable] <Name>Service
+```
+
+The resource is wired in automatically: `<Name>Module` is added to the `imports` list in `src/app/app.module.rs`, and the new directory is declared in `src/app/mod.rs`.
+
+`resource` is the only generate type.
 
 ## Version
 
 ```bash
-toni --version
+toni --version   # prints the installed toni-cli crate version
 toni --help
 ```

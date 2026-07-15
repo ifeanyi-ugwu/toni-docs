@@ -5,51 +5,156 @@ description: API reference for the configuration management crate.
 
 ## Config derive macro
 
+`#[env]` and `#[default]` are separate attributes, one per line. A field with `#[default]` falls back to the given expression when the env var is unset; a field without it is required and fails loading when missing. Fields without `#[env]` read the SCREAMING_SNAKE_CASE of the field name.
+
 ```rust
 use toni_config::Config;
 
 #[derive(Config, Clone)]
 pub struct AppConfig {
-    // Required — panics at startup if not set
+    // Required — loading fails if DATABASE_URL is not set
     #[env("DATABASE_URL")]
     pub database_url: String,
 
-    // Optional with default
-    #[env("PORT", default = "3000")]
+    // Optional with a typed default expression
+    #[env("PORT")]
+    #[default(3000u16)]
     pub port: u16,
 
-    // Nested config struct
+    // No #[env] — reads LOG_LEVEL (field name uppercased)
+    #[default("info".to_string())]
+    pub log_level: String,
+
+    // Option<T> — None when the env var is missing
+    #[env("REDIS_URL")]
+    pub redis_url: Option<String>,
+
+    // Nested config struct, loaded recursively
     #[nested]
     pub auth: AuthConfig,
 }
 ```
 
-## AppConfig::load()
+| Attribute | Effect |
+|-----------|--------|
+| `#[env("VAR")]` | Read from `VAR` instead of the uppercased field name |
+| `#[default(expr)]` | Typed fallback expression used when the env var is unset |
+| `#[nested]` | Load the field's own `Config` struct recursively |
 
-Reads values from the environment (and `.env` file if the `dotenv` feature is enabled):
+Default expressions are typed — use suffixed literals (`3000u16`) or explicit conversions (`"info".to_string()`).
+
+---
+
+## ConfigModule&lt;T&gt;
+
+Loads the config eagerly and registers `ConfigService<T>` with the DI system. Import an instance in a module:
 
 ```rust
-let config = AppConfig::load()?;
-// Returns Err if required fields are missing or values can't be parsed
+#[module(
+    imports: [ConfigModule::<AppConfig>::from_env().unwrap()],
+    controllers: [ConfigController],
+    providers: [AppService],
+)]
+impl AppModule {}
 ```
-
-## AppConfig::load_and_validate()
-
-Same as `load()` plus runs `validator` crate validation (requires `validation` feature):
 
 ```rust
-let config = AppConfig::load_and_validate()?;
-// Returns Err if required fields are missing, parse fails, or validation fails
+ConfigModule::<T>::new() -> Self                                       // exits the process on failure
+ConfigModule::<T>::from_env() -> Result<Self, ConfigError>
+ConfigModule::<T>::from_file(path: impl Into<PathBuf>) -> Result<Self, ConfigError>
+ConfigModule::<T>::from_env_file(env: Environment) -> Result<Self, ConfigError>
+
+module.get() -> T        // clones the config
+module.get_ref() -> &T
 ```
 
-## Features
+- `new()` loads from the environment and calls `std::process::exit(1)` if loading or validation fails (fail-fast).
+- `from_file(path)` loads the given `.env` file, then reads the environment.
+- `from_env_file(Environment::Production)` loads `.env.production`; `Environment::Custom(name)` loads `.env.<name>`.
+- `.env` file loading is built in — the crate has no Cargo features.
 
-| Feature | Description |
-|---------|-------------|
-| `dotenv` | Load `.env` file via the `dotenv` crate |
-| `validation` | Enable `load_and_validate()` via the `validator` crate |
+---
+
+## ConfigService&lt;T&gt;
+
+Injectable accessor, registered and exported automatically by `ConfigModule<T>`:
+
+```rust
+#[injectable]
+pub struct AppService {
+    #[inject]
+    config: ConfigService<AppConfig>,
+}
+
+impl AppService {
+    pub fn database_url(&self) -> &str {
+        &self.config.get_ref().database_url
+    }
+}
+```
+
+```rust
+service.get() -> T        // clones the config
+service.get_ref() -> &T   // zero-copy
+```
+
+`get()` needs a type annotation on the binding (`let cfg: AppConfig = self.config.get();`) — returning it directly from a method without one causes lifetime errors. Prefer `get_ref()` when a reference suffices.
+
+---
+
+## Environment
+
+```rust
+pub enum Environment {
+    Development,
+    Production,
+    Test,
+    Custom(String),
+}
+
+Environment::from_str(s: &str) -> Self   // "dev"/"development", "prod"/"production", "test"; anything else → Custom
+Environment::current() -> Self           // reads NODE_ENV, then APP_ENV; defaults to Development
+```
+
+---
+
+## Validation
+
+Opt-in per field via the `validator` crate — there is no Cargo feature. Derive `Validate` alongside `Config` and mark fields with `#[validate(...)]`; the attribute presence is the gate. Validation runs when the config loads, before the app starts. A config without `#[validate]` attrs never references `validator`.
 
 ```toml
 [dependencies]
-toni-config = { version = "0.1", features = ["dotenv", "validation"] }
+toni-config = "0.1"
+validator = { version = "0.20", features = ["derive"] }
+```
+
+```rust
+use toni_config::Config;
+use validator::Validate;
+
+#[derive(Config, Validate, Clone)]
+pub struct AppConfig {
+    #[env("DATABASE_URL")]
+    #[validate(url)]
+    pub database_url: String,
+
+    #[env("PORT")]
+    #[default(8080u16)]
+    #[validate(range(min = 1024, max = 65535))]
+    pub port: u16,
+}
+```
+
+---
+
+## ConfigError
+
+```rust
+pub enum ConfigError {
+    MissingEnvVar(String),                        // required field's env var not set
+    ParseError { key: String, message: String },  // env var set but not parseable as the field type
+    ValidationError(String),                      // a #[validate] rule failed
+    DotenvError(dotenv::Error),                   // .env file could not be loaded
+    MultipleErrors(Vec<String>),
+}
 ```

@@ -17,15 +17,15 @@ When `ToniFactory::create` runs:
 
 1. The module tree is scanned recursively from the root module
 2. Each module's `providers` and `controllers` are registered with their dependency lists
-3. A dependency graph is built from `#[inject]` field declarations
+3. A dependency graph is built from the `#[inject]` field and `#[new]` parameter declarations
 4. The graph is topologically sorted — providers with no dependencies are instantiated first
 5. Each subsequent provider receives already-instantiated dependencies
 
-If there's a circular dependency, the scanner reports it at startup. There's no runtime failure.
+Any failure in this phase — a missing provider, a circular dependency — is logged as a critical initialization error and the process exits with status 1. There's no runtime failure.
 
 ## Provider tokens
 
-Every provider is identified by a **token** — by default, the type name of the struct. When you write `providers: [UsersService]`, the token is `"UsersService"`.
+Every provider is identified by a **token**. The default token is the fully-qualified type name (`std::any::type_name`) — when you write `providers: [UsersService]`, the token is something like `"my_app::users::UsersService"`, and that's the string you'll see in resolution errors. An untagged `#[inject]` field resolves by its type's token; `#[inject("TOKEN")]` resolves by an explicit string token.
 
 Custom tokens let you register multiple providers of the same type under different names, or register non-struct values:
 
@@ -35,7 +35,7 @@ Custom tokens let you register multiple providers of the same type under differe
         UsersService,
         provider_value!("APP_NAME", "MyApp".to_string()),
         provider_factory!("DB_POOL", || create_pool()),
-        provider_alias!("Users", UsersService),       // alternate name for same service
+        provider_alias!("Users", UsersService),         // alternate name for same service
         provider_token!("PRIMARY_DB", DatabaseService), // custom token for a type
     ],
 )]
@@ -65,10 +65,9 @@ This scoping is enforced at startup. Attempting to inject a provider that isn't 
 After the application is created, you can pull instances directly from the container. This is useful for scripting, CLI tools, and testing.
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+let app = ToniFactory::create(AppModule).await;
 
-// Get by type
+// Get by type, searching all modules
 let users_service = app.get::<UsersService>().await?;
 
 // Get by type from a specific module
@@ -76,6 +75,9 @@ let service = app.get_from::<UsersService>("UsersModule").await?;
 
 // Get by custom token
 let db_pool = app.get_by_token::<Pool>("DB_POOL").await?;
+
+// Get by custom token from a specific module
+let db_pool = app.get_from_by_token::<Pool>("AppModule", "DB_POOL").await?;
 ```
 
 ## Standalone application context
@@ -95,47 +97,48 @@ async fn main() -> anyhow::Result<()> {
     println!("Total users: {count}");
 
     // Runs shutdown lifecycle hooks
-    ctx.close().await?;
+    ctx.close().await;
 
     Ok(())
 }
 ```
 
-`create_application_context` initializes the full DI container and runs all lifecycle hooks, but doesn't start an HTTP server.
+`create_application_context` initializes the full DI container and runs all lifecycle hooks, but doesn't start an HTTP server. `close()` returns `()` — it runs the shutdown hooks unconditionally.
 
-## Injection via constructor
-
-Toni calls `new()` to construct each provider, passing resolved dependencies as arguments. The `#[inject]` fields and the `new()` signature must match:
+`get` refuses request-scoped providers, since there is no active request. To exercise a request-scoped or transient provider outside a handler, `resolve` builds it against a synthetic request:
 
 ```rust
-#[injectable(pub struct OrdersService {
+let parts = http::Request::builder().body(()).unwrap().into_parts().0;
+let service = ctx.resolve::<RequestScopedService>(&parts).await?;
+
+// or by custom token
+let service = ctx.resolve_by_token::<RequestScopedService>("TOKEN", &parts).await?;
+```
+
+## How instances are built
+
+By default the container builds each provider directly from its fields: `#[inject]` fields are resolved from the graph, `#[default(expr)]` fields get their expression, untagged fields get `Default::default()`. No constructor is involved:
+
+```rust
+#[injectable]
+pub struct OrdersService {
     #[inject]
     users_service: UsersService,
     #[inject]
     logger: LoggerService,
-    // internal_value is NOT injected — it has a default
+    #[default("default".to_string())]
     internal_value: String,
-})]
-impl OrdersService {
-    // new() receives ONLY the injected fields, in declaration order
-    pub fn new(users_service: UsersService, logger: LoggerService) -> Self {
-        Self {
-            users_service,
-            logger,
-            internal_value: "default".into(),
-        }
-    }
 }
 ```
 
-The `new()` function signature defines what the DI container provides. Fields without `#[inject]` are your responsibility to initialize inside `new()`.
+Tagging a constructor with `#[new]` switches to constructor injection: the container resolves each parameter and calls the function, so dependencies can be consumed without being stored. See [Services & Providers](/docs/core-concepts/services) for when to prefer each.
 
 ## Circular dependency detection
 
-Toni detects circular dependencies at startup and panics with a diagnostic. If `ServiceA` injects `ServiceB` and `ServiceB` injects `ServiceA`, you'll see an error like:
+Circular dependencies are caught during the topological sort at startup. If `ServiceA` injects `ServiceB` and `ServiceB` injects `ServiceA`, initialization fails with:
 
 ```
-Circular dependency detected: ServiceA → ServiceB → ServiceA
+Circular dependency detected for provider: my_app::services::ServiceA
 ```
 
-The standard solution is to break the cycle by introducing an intermediate abstraction or moving the shared logic into a third service that both depend on.
+and the process exits with status 1. The standard solution is to break the cycle by introducing an intermediate abstraction or moving the shared logic into a third service that both depend on.

@@ -1,0 +1,118 @@
+---
+title: Separate-Port Gateways
+description: Run WebSocket gateways on their own ports with a dedicated WebSocketAdapter.
+---
+
+By default a gateway shares the HTTP server's port — the HTTP adapter serves it as an upgrade route. A gateway can instead run on its own listener by declaring `port = N` in the macro. Separate-port gateways are routed to a `WebSocketAdapter` registered on the application, independent of the HTTP adapter.
+
+Use this to isolate WebSocket traffic from HTTP (separate load balancing, firewall rules, resource limits) or to run WebSocket-only services.
+
+## Declaring a separate-port gateway
+
+```rust
+use toni::websocket::{WsClient, WsHandlerResult, WsMessage};
+use toni_macros::{module, new, subscriptions, websocket_gateway};
+
+#[websocket_gateway("/ws", port = 4000)]
+pub struct PingGateway {}
+
+#[subscriptions]
+impl PingGateway {
+    #[new]
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    #[subscribe_message("ping")]
+    async fn on_ping(&self, _client: WsClient, _msg: WsMessage) -> WsHandlerResult {
+        Ok(WsMessage::text("pong").into())
+    }
+}
+
+#[module(providers: [PingGateway])]
+struct PingModule;
+```
+
+Port semantics:
+
+- **No `port`** — the gateway shares the HTTP listener (upgrade route).
+- **`port = N`** — the gateway gets its own listener on `N`, served by the registered `WebSocketAdapter`. Requires `use_websocket_adapter()`.
+- **`port = N` equal to the HTTP port** (non-zero) — treated as same-port; the HTTP adapter serves it.
+- **`port = 0`** — always a separate listener with an OS-assigned port, even when HTTP also requested `0`. Read the assigned address from `BoundAdapters`.
+
+The listener binds on the HTTP adapter's hostname (or `0.0.0.0` when no HTTP adapter is registered).
+
+## Registering a WebSocket adapter
+
+`toni-tungstenite` provides `TungsteniteAdapter`, a raw-TCP WebSocket server built on tokio-tungstenite — purpose-built for separate-port deployment:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-tungstenite = "0.1"
+```
+
+```rust
+use toni::ToniFactory;
+use toni_tungstenite::TungsteniteAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(PingModule).await;
+
+    app.use_http_adapter(toni_axum::AxumAdapter::new(), 3000, "127.0.0.1")
+        .unwrap();
+    app.use_websocket_adapter(TungsteniteAdapter::new()).unwrap();
+
+    // Gateways with port = 4000 bind to 4000 via TungsteniteAdapter.
+    app.start().await?;
+    Ok(())
+}
+```
+
+Multiple gateways on different ports each get their own listener from the same adapter registration. Adapters must be registered before `bind()`/`start()`.
+
+## OS-assigned ports
+
+With `port = 0`, read the assigned address from the `BoundAdapters` returned by `app.bind()`. `BoundAdapters.websocket` holds one `SocketAddr` per separate-port listener:
+
+```rust
+let mut app = ToniFactory::create(PingModule).await;
+app.use_http_adapter(toni_axum::AxumAdapter::new(), 0, "127.0.0.1").unwrap();
+app.use_websocket_adapter(TungsteniteAdapter::new()).unwrap();
+
+let bound = app.bind().await?;
+let ws_addr = bound.websocket.first().expect("WS adapter not bound");
+println!("WebSocket listening on ws://{}", ws_addr);
+
+app.run().await;
+```
+
+`bind()` returns with sockets live; `run()` blocks until shutdown. `start()` is the combination of both when you don't need the addresses.
+
+## TungsteniteAdapter characteristics
+
+The adapter accepts raw TCP connections and performs the WebSocket handshake itself, without an HTTP server in front. That brings three quirks:
+
+- **No handshake data.** The upgrade request is not surfaced to the framework — `client.handshake.headers` and `client.handshake.query` are empty. Guards that read handshake headers always see none; authenticate separate-port clients through a first-message protocol instead.
+- **One gateway per port.** Raw TCP routing has no path concept — all connections on a port go to the first registered path binding, regardless of the URL path the client used. Give each gateway its own `port` value.
+- **Ping/pong frames are ignored.** The read loop drops them; they are never routed to handlers (the same is true of same-port gateways — control frames stay in the adapter layer).
+
+Everything else works as on the shared port: `#[subscribe_message]` routing, connection hooks, guards and interceptors, broadcasting, and `WsHandlerOutput::Stream`.
+
+## Using an HTTP adapter for separate-port WebSocket
+
+`AxumAdapter` also implements `WebSocketAdapter` (as do the salvo and poem adapters). Register a second instance to get separate-port listeners with a full HTTP upgrade — path routing and handshake headers/query intact:
+
+```rust
+app.use_http_adapter(toni_axum::AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_websocket_adapter(toni_axum::AxumAdapter::new()).unwrap();
+```
+
+Choose this over `TungsteniteAdapter` when separate-port clients need header-based guards or multiple gateway paths on one port.
+
+## Shutdown
+
+Separate-port listeners participate in graceful shutdown like every other adapter: `app.shutdown_handle().shutdown()` stops the WebSocket servers along with HTTP.
+
+A failed WebSocket bind (e.g. the port is already in use) is logged at `bind()` time and leaves no entry in `BoundAdapters.websocket` — check the vector when the listener is critical.

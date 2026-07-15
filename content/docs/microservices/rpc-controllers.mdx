@@ -1,6 +1,6 @@
 ---
 title: RPC Controllers
-description: Defining message handlers with #[rpc_controller], #[message_pattern], and #[event_pattern].
+description: Defining message handlers with #[rpc_controller], #[patterns], #[message_pattern], and #[event_pattern].
 ---
 
 RPC controllers are the microservice equivalent of HTTP controllers. They group pattern-matched message handlers and live in the DI container like any other provider.
@@ -9,104 +9,131 @@ RPC controllers are the microservice equivalent of HTTP controllers. They group 
 
 | NestJS | Toni |
 |--------|------|
-| `@Controller()` class with `@MessagePattern()` | `#[rpc_controller]` struct with `#[message_pattern]` |
+| `@Controller()` class with `@MessagePattern()` | `#[rpc_controller]` struct with a `#[patterns]` impl |
 | `@EventPattern()` method | `#[event_pattern]` method |
-| `MessagePattern` payload type | `RpcData` |
+| `@Payload()` typed payload | typed first parameter (auto-parsed) |
 | `RpcException` | `RpcError` |
 
 </Bridge>
 
 ## Defining a controller
 
-The `#[rpc_controller]` macro wraps a struct definition. Injected dependencies are declared as fields:
+`#[rpc_controller]` goes on the struct — dependencies are `#[inject]` fields, exactly as with `#[injectable]`. A separate `#[patterns]` attribute on the impl block scans the handlers. The DI constructor is marked `#[new]`:
 
 ```rust
-use toni::*;
-use toni_macros::rpc_controller;
+use toni::{module, new, patterns, rpc_controller};
 
-#[rpc_controller(pub struct OrdersController {
+#[rpc_controller]
+pub struct OrdersController {
     #[inject]
     service: OrdersService,
-})]
+}
+
+#[patterns]
 impl OrdersController {
+    #[new]
     pub fn new(service: OrdersService) -> Self {
         Self { service }
+    }
+
+    // handlers go here
+}
+```
+
+Register it in a module's `providers` list:
+
+```rust
+#[module(providers: [OrdersService, OrdersController])]
+pub struct OrdersModule;
+```
+
+A bare `#[rpc_controller]` with no `#[patterns]` impl is valid — it registers as a provider and routes nothing.
+
+## Typed payloads and returns
+
+Handlers take the payload as their first parameter and `&RpcContext` as the second. The payload parameter can be any `Deserialize` type — the macro parses the inbound data into it before invoking the handler. Likewise the `Ok` side of the return can be any `Serialize` type — the macro serializes it into the reply:
+
+```rust
+#[derive(serde::Deserialize)]
+struct CreateOrderDto {
+    item: String,
+    qty: u32,
+}
+
+#[derive(serde::Serialize)]
+struct OrderDto {
+    id: u64,
+    item: String,
+    qty: u32,
+    status: &'static str,
+}
+
+#[patterns]
+impl OrdersRpcController {
+    #[new]
+    pub fn new(service: OrdersService) -> Self {
+        Self { service }
+    }
+
+    #[message_pattern("order.create")]
+    async fn create_order(
+        &self,
+        payload: CreateOrderDto,
+        _ctx: &toni::RpcContext,
+    ) -> Result<OrderDto, toni::RpcError> {
+        if payload.qty == 0 {
+            return Err(toni::RpcError::Internal("qty must be positive".into()));
+        }
+        Ok(self.service.create_order(&payload.item, payload.qty))
     }
 }
 ```
 
-Register it in a module just like any other provider:
+A payload that fails to parse never reaches the handler — the caller receives an error envelope with kind `Internal` (see [Errors on the wire](#errors-on-the-wire)).
 
-```rust
-#[module(
-    providers: [OrdersService, OrdersController],
-)]
-pub struct OrdersModule;
-```
-
-## Request-response handlers
-
-`#[message_pattern]` marks a method that expects a reply. The handler receives the incoming payload as `RpcData` and an `RpcContext` with transport metadata. Return `Ok(RpcData)` to send the reply, or `Err(RpcError)` to send an error envelope:
+Manual `RpcData` handling remains available: declare the payload parameter as `RpcData` and/or return `Result<RpcData, RpcError>`, and the macro forwards the raw data in both directions:
 
 ```rust
 #[message_pattern("order.create")]
 async fn create_order(
     &self,
-    data: RpcData,
-    _ctx: RpcContext,
-) -> Result<RpcData, RpcError> {
-    let payload: CreateOrderDto = data
-        .parse()
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    data: toni::RpcData,
+    _ctx: &toni::RpcContext,
+) -> Result<toni::RpcData, toni::RpcError> {
+    let payload = data
+        .as_json()
+        .ok_or_else(|| toni::RpcError::Internal("expected JSON payload".into()))?;
 
-    let order = self.service.create(payload).await
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    let item = payload["item"].as_str().unwrap_or("unknown");
+    let qty = payload["qty"].as_u64().unwrap_or(1) as u32;
 
-    RpcData::from_serialize(&order)
-        .map_err(|e| RpcError::Internal(e.to_string()))
-}
-
-#[message_pattern("order.get")]
-async fn get_order(
-    &self,
-    data: RpcData,
-    _ctx: RpcContext,
-) -> Result<RpcData, RpcError> {
-    let id: u64 = data
-        .parse()
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-
-    let order = self.service.find(id).await
-        .ok_or_else(|| RpcError::PatternNotFound(format!("order {id}")))?;
-
-    RpcData::from_serialize(&order)
-        .map_err(|e| RpcError::Internal(e.to_string()))
+    Ok(toni::RpcData::json(self.service.create_order(item, qty)))
 }
 ```
 
-## Fire-and-forget handlers
+## Request-response vs fire-and-forget
 
-`#[event_pattern]` marks a method that handles events with no reply. Return `Ok(())` on success or `Err(RpcError)` if processing fails (the error is logged but no reply is sent):
+`#[message_pattern]` marks a handler whose result is sent back to the caller.
+
+`#[event_pattern]` marks a handler for events with no reply. It must return `Result<(), RpcError>` — any other return type is a compile error:
 
 ```rust
 #[event_pattern("order.shipped")]
 async fn on_order_shipped(
     &self,
-    data: RpcData,
-    _ctx: RpcContext,
-) -> Result<(), RpcError> {
-    let order_id: u64 = data
-        .parse()
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-
-    self.service.mark_shipped(order_id).await
-        .map_err(|e| RpcError::Internal(e.to_string()))
+    payload: ShipOrderDto,
+    _ctx: &toni::RpcContext,
+) -> Result<(), toni::RpcError> {
+    self.service.handle_shipment(payload.order_id);
+    Ok(())
 }
 ```
 
+When a caller addresses an `#[event_pattern]` handler but requests a reply anyway (sends a correlation id / reply-to), the adapter sends a `null` ack so the caller's pending request closes instead of timing out.
+
 ## RpcData
 
-`RpcData` is the message payload carrier. It has three variants:
+`RpcData` is the payload carrier with three variants:
 
 ```rust
 RpcData::Json(serde_json::Value)
@@ -114,85 +141,194 @@ RpcData::Text(String)
 RpcData::Binary(Vec<u8>)
 ```
 
-Constructors:
+Constructors and accessors:
 
 ```rust
 RpcData::json(serde_json::json!({ "key": "value" }))
 RpcData::text("hello")
 RpcData::binary(vec![0u8, 1, 2])
-```
 
-Reading the payload:
-
-```rust
 data.as_json()    // Option<&serde_json::Value>
 data.as_text()    // Option<&str>
 data.as_binary()  // Option<&[u8]>
-
-// Deserialize into a concrete type (JSON across all variants):
-let dto: CreateOrderDto = data.parse()?;
 ```
 
-Building a reply payload from a serializable type:
+`parse` deserializes any variant as JSON (`Json` via `from_value`, `Text` via `from_str`, `Binary` via `from_slice`); `from_serialize` builds an `RpcData::Json` from any `Serialize` type:
 
 ```rust
+let dto: CreateOrderDto = data.parse()?;
 let reply = RpcData::from_serialize(&order)?;
 ```
 
 ## RpcContext
 
-`RpcContext` carries transport metadata for the current message:
+Handlers receive `&RpcContext`. Its fields are private — read through methods:
 
 ```rust
-ctx.pattern              // the matched pattern string
-ctx.metadata             // HashMap<String, String> — transport headers/properties
+ctx.pattern()            // &str — the matched pattern
+ctx.metadata()           // &HashMap<String, String> — transport headers / envelope metadata
 ctx.get_metadata("key")  // Option<&str>
+ctx.data()               // &RpcData — the raw inbound payload
 ```
+
+Enhancers that run before the handler get `&mut RpcContext` and can also use `metadata_mut()`. `RpcContext` implements `HandlerContext`, so `extensions()` / `extensions_mut()` (cross-cutting per-request data), `cancellation()`, and `abort()` are available as on every context type.
+
+Where metadata travels on the wire is transport-specific: NATS headers, AMQP headers, MQTT v5 user properties, Kafka headers, a `metadata` field in the TCP/UDP frame, or the Redis request envelope. Each transport page states its mapping.
 
 ## RpcError
 
 ```rust
-RpcError::PatternNotFound(String)   // 404-equivalent — pattern not registered
-RpcError::Forbidden(String)         // guard rejected the message
-RpcError::Internal(String)          // handler error
+RpcError::PatternNotFound(String)   // no handler matched the pattern
+RpcError::Forbidden(String)         // a guard rejected the message
+RpcError::Internal(String)          // generic server-side failure
+RpcError::AppError(Arc<dyn Error>)  // a domain error implementing toni::Error
 ```
 
-Errors are serialized into a transport-specific error envelope and returned to the caller (for `#[message_pattern]`) or logged (for `#[event_pattern]`).
-
-## RpcClient — calling remote services
-
-To send messages from one service to another, inject an `RpcClient`. Construct one with any client transport and register it as a provider:
+`AppError` is not built by hand. Any type implementing `toni::Error` converts into `RpcError` via a blanket `From`, so domain errors lift with `?`. `#[derive(toni::Error)]` supplies the trait impl, with `#[error_kind(...)]` picking the `ErrorKind`; `Display` and `std::error::Error` impls are still required (a `thiserror` derive fits):
 
 ```rust
-use toni::RpcClient;
-use toni_tcp::TcpClientTransport;
+#[derive(Debug, toni::Error)]
+enum OrderError {
+    #[error_kind(NotFound)]
+    Missing(u64),
+}
+
+impl std::fmt::Display for OrderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(id) => write!(f, "order {id} not found"),
+        }
+    }
+}
+
+impl std::error::Error for OrderError {}
+
+#[message_pattern("order.get")]
+async fn get_order(
+    &self,
+    id: u64,
+    _ctx: &toni::RpcContext,
+) -> Result<OrderDto, toni::RpcError> {
+    let order = self.service.find(id).ok_or(OrderError::Missing(id))?;
+    Ok(order)
+}
+```
+
+The handler's declared error type can also be the domain error itself — `Result<OrderDto, OrderError>` — and the macro converts it to `RpcError` at the dispatch boundary.
+
+## Errors on the wire
+
+An error **returned by a handler** — any `RpcError` variant, a lifted domain error, or a payload parse failure — is rendered as the canonical error envelope and delivered as a normal reply:
+
+```json
+{"response": {"status": "error", "kind": "Internal", "message": "qty must be positive"}}
+```
+
+`kind` is `Internal` / `NotFound` / `Forbidden` for the framework variants, or the domain error's `kind()` name for `AppError`; a domain error's `details()` merge in as a `details` field. A handler **panic** is caught, reported to error observers as `PanicRecovered`, and rendered through the same envelope (kind `Internal`) — the connection stays usable.
+
+A wire-level **error frame** is reserved for messages the framework refused or failed to dispatch:
+
+```json
+{"err": {"message": "Pattern not found: does.not.exist", "status": "not_found"}}
+```
+
+| `status` | Cause |
+|---|---|
+| `not_found` | no handler registered for the pattern |
+| `forbidden` | a guard rejected the message (or panicked) |
+| `error` | framework-level failure (e.g. a pipe aborted the message) |
+| `overloaded` | TCP/UDP only — `with_max_inflight` cap reached |
+
+On the client, error frames surface as `RpcClientError::Remote { message, status }`. Envelope errors arrive as ordinary reply data — a raw `send` returns them as `RpcData`, and a typed `send_json::<_, R>` fails to decode into `R` unless `R` accommodates the envelope shape.
+
+## Guards, interceptors, pipes
+
+Enhancers are plain `#[injectable]` providers implementing the typed traits — `Guard<RpcContext>`, `Interceptor<RpcContext>`, `Pipe<RpcContext>`, `ErrorHandler<RpcContext, RpcData>`:
+
+```rust
+use toni::traits_helpers::Guard;
+use toni::{async_trait, injectable, RpcContext};
+
+#[injectable]
+pub struct ApiKeyGuard {}
+impl ApiKeyGuard {}
+
+#[async_trait]
+impl Guard<RpcContext> for ApiKeyGuard {
+    async fn can_activate(&self, ctx: &RpcContext) -> bool {
+        ctx.get_metadata("api-key") == Some("secret")
+    }
+}
+```
+
+Apply with `#[use_guards]` / `#[use_interceptors]` / `#[use_pipes]` / `#[use_error_handlers]` — on the `#[patterns]` impl for every handler in the controller, or on an individual handler:
+
+```rust
+#[patterns]
+#[use_interceptors(RpcLoggingInterceptor)]   // controller-level
+impl OrdersRpcController {
+    #[new]
+    pub fn new(service: OrdersService) -> Self {
+        Self { service }
+    }
+
+    #[message_pattern("order.create")]
+    #[use_guards(ApiKeyGuard)]               // handler-level
+    async fn create_order(
+        &self,
+        payload: CreateOrderDto,
+        _ctx: &toni::RpcContext,
+    ) -> Result<OrderDto, toni::RpcError> {
+        // ...
+    }
+}
+```
+
+The enhancer providers must be listed in a module's `providers` alongside the controller. A guard rejection produces the `forbidden` error frame — guards return `bool` and cannot attach a custom error.
+
+Global RPC enhancers register on the factory before the app is created:
+
+```rust
+let mut factory = ToniFactory::new();
+factory.use_global_rpc_guards(Arc::new(ApiKeyGuard {}));
+let mut app = factory.create_with(AppModule).await;
+```
+
+`use_global_rpc_interceptors`, `use_global_rpc_pipes`, and `use_global_rpc_error_handler` follow the same shape.
+
+## RpcClient
+
+To send messages from one service to another, inject an `RpcClient`. Construct it with any client transport and register it under a token:
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_nats::NatsClientTransport;
 
 #[module(
     providers: [
         OrdersService,
         provider_value!(
             "INVENTORY_CLIENT",
-            RpcClient::new(TcpClientTransport::new("127.0.0.1", 4001))
+            RpcClient::new(NatsClientTransport::new("nats://127.0.0.1:4222"))
         ),
     ],
 )]
 pub struct OrdersModule;
 ```
 
-Inject into a service:
-
 ```rust
-#[injectable(pub struct OrdersService {
+#[injectable]
+pub struct OrdersService {
     #[inject("INVENTORY_CLIENT")]
     inventory: RpcClient,
-})]
+}
+
 impl OrdersService {
     pub async fn check_stock(&self, item_id: u64) -> Result<bool, RpcClientError> {
         let reply = self.inventory
             .send("inventory.check", RpcData::json(serde_json::json!({ "id": item_id })))
             .await?;
-        let available: bool = reply.parse()?;
-        Ok(available)
+        reply.parse().map_err(|e| RpcClientError::Transport(e.to_string()))
     }
 
     pub async fn notify_restock(&self, item_id: u64) -> Result<(), RpcClientError> {
@@ -203,45 +339,45 @@ impl OrdersService {
 }
 ```
 
+`send` is request-response; `emit` is fire-and-forget.
+
 ### Typed helpers
 
-`send_json` and `emit_json` serialize the input and deserialize the response automatically:
+`send_json` and `emit_json` serialize the input and (for `send_json`) deserialize the reply:
 
 ```rust
-// Sends payload as JSON, deserializes response into StockStatus
 let status: StockStatus = self.inventory
     .send_json("inventory.status", &CheckRequest { item_id })
     .await?;
 
-// Emits payload as JSON, returns ()
 self.inventory
     .emit_json("inventory.restock", &RestockRequest { item_id, qty: 100 })
     .await?;
 ```
 
+### Per-call metadata
+
+`request(pattern)` opens a builder that attaches metadata entries (auth tokens, trace ids, tenant) before dispatch. Finish with `send` / `emit` or their `_json` variants:
+
+```rust
+self.inventory
+    .request("inventory.restock")
+    .metadata("trace-id", trace_id)
+    .metadata("tenant", tenant)
+    .send(RpcData::json(payload))
+    .await?;
+```
+
+The server reads these through `ctx.metadata()` / `ctx.get_metadata(key)`.
+
+### Connection lifecycle
+
+Transports connect lazily on the first `send` or `emit`. `connect()` establishes the connection eagerly — call it in an `#[on_application_bootstrap]` hook to surface connection failures at startup. `close()` flushes pending messages and closes; call it in an `#[on_application_shutdown]` hook.
+
 ### RpcClientError
 
 ```rust
 RpcClientError::Transport(String)              // connection or I/O error
-RpcClientError::Timeout                        // reply did not arrive within the timeout
-RpcClientError::Remote { message, status }     // the remote handler returned RpcError
-```
-
-### Eager connection
-
-By default transports connect lazily on the first `send` or `emit`. To surface connection failures at startup, call `connect()` in a lifecycle hook:
-
-```rust
-#[injectable(pub struct OrdersService {
-    #[inject("INVENTORY_CLIENT")]
-    inventory: RpcClient,
-})]
-impl OrdersService {
-    #[on_application_bootstrap]
-    async fn connect(&self) {
-        if let Err(e) = self.inventory.connect().await {
-            tracing::error!("Failed to connect to inventory service: {e}");
-        }
-    }
-}
+RpcClientError::Timeout                        // no reply within the timeout (default 5 s)
+RpcClientError::Remote { message, status }     // the remote returned an error frame
 ```

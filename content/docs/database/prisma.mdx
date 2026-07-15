@@ -53,14 +53,13 @@ The client is injected by its concrete Rust type — no token string needed:
 ```rust
 use db::PrismaClient;
 
-#[injectable(pub struct UsersService {
+#[injectable]
+pub struct UsersService {
+    #[inject]
     db: PrismaClient,
-})]
-impl UsersService {
-    pub fn new(db: PrismaClient) -> Self {
-        Self { db }
-    }
+}
 
+impl UsersService {
     pub async fn find_all(&self) -> Vec<db::user::Data> {
         self.db
             .user()

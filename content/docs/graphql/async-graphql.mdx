@@ -41,7 +41,9 @@ pub type AppSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
 
 ## 2. Build the context
 
-The `ContextBuilder` trait populates `async-graphql`'s `Data` container before each request executes. It receives the incoming `RequestPart` so you can read headers (e.g. to verify an auth token) alongside injected services.
+The `ContextBuilder` trait populates `async-graphql`'s `Data` container before each request executes. It receives the incoming `RequestPart` so you can read headers (e.g. to verify an auth token) alongside the services it carries.
+
+The builder is passed by value to `for_root` — it is not resolved through the DI container. Construct it, and any services it captures, when building the module:
 
 ```rust
 use async_graphql::Data;
@@ -49,10 +51,10 @@ use async_trait::async_trait;
 use toni::RequestPart;
 use toni_async_graphql::ContextBuilder;
 
-#[injectable(pub struct AppContextBuilder {
-    #[inject]
+pub struct AppContextBuilder {
     users_service: UsersService,
-})]
+}
+
 impl AppContextBuilder {
     pub fn new(users_service: UsersService) -> Self {
         Self { users_service }
@@ -79,17 +81,20 @@ let graphql_module = GraphQLModule::for_root(schema, DefaultContextBuilder);
 
 ## 3. Register the GraphQL module
 
+Module `imports` entries are expressions, so a helper function that builds the schema and the context builder keeps the declaration readable:
+
 ```rust
 use toni_async_graphql::GraphQLModule;
 
-let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription).finish();
-
-let graphql_module = GraphQLModule::for_root(schema, AppContextBuilder { /* ... */ })
-    .with_path("/graphql")       // default: "/graphql"
-    .with_playground(true);      // default: enabled in debug builds, disabled in release
+fn graphql_module() -> GraphQLModule<QueryRoot, EmptyMutation, EmptySubscription, AppContextBuilder> {
+    let schema = Schema::build(QueryRoot, EmptyMutation, EmptySubscription).finish();
+    GraphQLModule::for_root(schema, AppContextBuilder::new(UsersService::new()))
+        .with_path("/graphql")       // default: "/graphql"
+        .with_playground(true)       // default: enabled in debug builds, disabled in release
+}
 
 #[module(
-    imports: [graphql_module, UsersModule],
+    imports: [graphql_module(), UsersModule],
 )]
 pub struct AppModule;
 ```
@@ -104,7 +109,7 @@ use toni_axum::AxumAdapter;
 async fn main() {
     let mut app = ToniFactory::create(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await.unwrap();
 }
 ```
 
@@ -155,7 +160,7 @@ Sec-WebSocket-Protocol: graphql-transport-ws
 
 ### Subscription context
 
-Use `.with_subscription_context()` to inject per-connection data into subscription resolvers. The builder receives a `&WsClient` (carrying handshake headers) and the `connection_init` payload:
+Use `.with_subscription_context()` to inject per-connection data into subscription resolvers. The builder receives a `&WsClient` (carrying handshake headers) and the `connection_init` payload. Like the request-context builder, it is passed by value and constructed by hand:
 
 ```rust
 use async_graphql::Data;
@@ -164,12 +169,14 @@ use serde_json::Value;
 use toni::WsClient;
 use toni_async_graphql::SubscriptionContextBuilder;
 
-#[injectable(pub struct AppSubscriptionContextBuilder {
-    #[inject]
+pub struct AppSubscriptionContextBuilder {
     auth_service: AuthService,
-})]
+}
+
 impl AppSubscriptionContextBuilder {
-    pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
+    pub fn new(auth_service: AuthService) -> Self {
+        Self { auth_service }
+    }
 }
 
 #[async_trait]
@@ -194,7 +201,7 @@ impl SubscriptionContextBuilder for AppSubscriptionContextBuilder {
 // Wire it in:
 GraphQLModule::for_root(schema, DefaultContextBuilder)
     .with_subscription_path("/graphql/ws")
-    .with_subscription_context(AppSubscriptionContextBuilder { /* ... */ })
+    .with_subscription_context(AppSubscriptionContextBuilder::new(auth_service))
 ```
 
 When you don't need subscription context data, `DefaultSubscriptionContextBuilder` is used automatically.

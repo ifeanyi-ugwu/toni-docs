@@ -6,6 +6,6 @@
     "guards",
     "interceptors",
     "pipes",
-    "exception-filters"
+    "error-handling"
   ]
 }

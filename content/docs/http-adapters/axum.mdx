@@ -1,9 +1,9 @@
 ---
 title: Axum Adapter
-description: Using the toni-axum adapter — setup, configuration, and Axum-specific features.
+description: Using the toni-axum adapter — setup, WebSocket support, streaming, graceful shutdown, and Tower layers.
 ---
 
-The `toni-axum` crate wraps [Axum](https://github.com/tokio-rs/axum) to handle HTTP for Toni applications. It's built on Tokio and is the recommended choice for most applications.
+The `toni-axum` crate wraps [Axum](https://github.com/tokio-rs/axum) 0.8 to handle HTTP for Toni applications. It implements both `HttpAdapter` and `WebSocketAdapter`, streams bodies in both directions, and is the recommended choice for most applications.
 
 ## Installation
 
@@ -17,76 +17,90 @@ tokio = { version = "1", features = ["full"] }
 ## Basic setup
 
 ```rust
-use toni::ToniFactory;
+use toni::*;
 use toni_axum::AxumAdapter;
 
 #[tokio::main]
-async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-`AxumAdapter::new()` creates a default adapter. `use_http_adapter` registers all routes from the module tree onto it, then `start()` begins listening.
+`use_http_adapter` registers all routes from the module tree onto the adapter. `start()` binds the socket and serves until shutdown; bind failures (port in use) surface as the returned error.
 
-## With global middleware and configuration
+Route paths use Toni's `:param` syntax; the adapter rewrites them to Axum's `{param}` form at bind time. Unmatched paths hit a fallback that returns Toni's standard 404 envelope — the global middleware chain runs on those requests too.
+
+## Global enhancers
+
+Global middleware, guards, and error handlers are registered on the factory before the app is created:
 
 ```rust
-use toni::ToniFactory;
-use toni_axum::AxumAdapter;
 use std::sync::Arc;
+use toni::*;
+use toni_axum::AxumAdapter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut factory = ToniFactory::new();
     factory
         .use_global_middleware(Arc::new(LoggerMiddleware))
-        .use_global_guards(Arc::new(ThrottleGuard::default()))
-        .use_global_error_handler(Arc::new(GlobalErrorHandler));
+        .use_global_http_guards(Arc::new(ThrottleGuard::default()))
+        .use_global_http_error_handler(Arc::new(GlobalErrorHandler));
 
     let mut app = factory.create_with(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
-    app.start().await;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-For CORS, see [CORS](/docs/security/cors).
+Guards, interceptors, pipes, and error handlers are registered per transport (`use_global_http_*`, `use_global_rpc_*`, `use_global_ws_*`); `use_global_middleware` is HTTP-wide. For CORS, see [CORS](/docs/security/cors).
+
+## Streaming bodies
+
+Both directions stream:
+
+- **Requests** are handed to Toni as a stream — the `BodyStream` extractor sees frames as they arrive; `Bytes`, `Json`, and friends collect on demand.
+- **Responses** built with `Body::stream(...)` reach the client chunk by chunk, so [SSE](/docs/techniques/sse) and long-lived streaming responses work without buffering.
 
 ## WebSocket support
 
-`toni-axum` supports WebSocket gateways out of the box. See [WebSocket Gateways](/docs/websocket/gateways) for how to define gateways. WebSocket upgrade routes are wired onto the same HTTP port automatically — no separate adapter needed for the common case.
+Same-port gateways (`#[websocket_gateway("/path")]`) are wired onto the HTTP listener automatically — registering the HTTP adapter is enough:
 
 ```rust
-// Gateways annotated with #[websocket_gateway] are discovered automatically.
-// Just register the HTTP adapter and call start():
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::new().create_with(AppModule).await;
 app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-app.start().await;
+app.start().await?;
 ```
 
-## Environment variables
-
-`toni-axum` respects standard Tokio and Axum environment variables. For connection limits, worker threads, and other runtime settings, configure the Tokio runtime directly:
+Separate-port gateways (`#[websocket_gateway("/path", port = N)]`) need a `WebSocketAdapter` as well — register a second `AxumAdapter` instance:
 
 ```rust
-fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let mut app = ToniFactory::create(AppModule).await;
-            app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
-            app.start().await;
-        });
-}
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_websocket_adapter(AxumAdapter::new()).unwrap();
 ```
+
+Sub-protocols are negotiated by echoing the first protocol the client offers in `Sec-WebSocket-Protocol`. See [WebSocket Gateways](/docs/websocket/gateways) for gateway definitions.
+
+## Graceful shutdown
+
+The adapter forwards Toni's shutdown signal to Axum's `with_graceful_shutdown`, so in-flight requests drain before the serve loop exits. Trigger it via the application's [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) — the framework installs no signal handlers of its own.
+
+If the serve loop fails after a successful bind, the adapter logs the error and exits the process with status 1.
 
 ## Tower layers
 
-Any [`tower::Layer`](https://docs.rs/tower/latest/tower/trait.Layer.html) can be used in Toni via `TowerLayer`. Register it globally to apply to every request, or scoped to specific routes via `configure_middleware`:
+Any [`tower::Layer`](https://docs.rs/tower/latest/tower/trait.Layer.html) can run as Toni middleware via `TowerLayer`. This requires the `tower-compat` feature on `toni`:
+
+```toml
+[dependencies]
+toni = { version = "0.2", features = ["tower-compat"] }
+```
+
+Register globally, or scope to routes in a module's `configure_middleware` — `apply_tower(layer)` is sugar for `apply(TowerLayer::new(layer))`:
 
 ```rust
 use std::sync::Arc;
@@ -99,18 +113,32 @@ factory.use_global_middleware(Arc::new(TowerLayer::new(TraceLayer::new_for_http(
 // Scoped — specific routes only
 fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
     consumer
-        .apply(TowerLayer::new(TraceLayer::new_for_http()))
+        .apply_tower(TraceLayer::new_for_http())
         .for_routes(vec!["/api/*"]);
+}
+```
+
+`TowerLayer` is Toni middleware, not an Axum feature — the same registration works on every HTTP adapter. One limitation: layers that call the inner service more than once (`tower::retry`, `tower::hedge`) panic at runtime; use an interceptor for retry logic.
+
+## Runtime tuning
+
+`toni-axum` delegates threading to Tokio. For worker-thread counts and other runtime settings, build the runtime explicitly:
+
+```rust
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut app = ToniFactory::new().create_with(AppModule).await;
+            app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+            app.start().await
+        })
 }
 ```
 
 ## HTTPS/TLS
 
-TLS termination is typically handled at the load balancer or reverse proxy level (nginx, Cloudflare, etc.). If you need TLS at the application level:
-
-```toml
-[dependencies]
-axum-server = { version = "0.6", features = ["tls-rustls"] }
-```
-
-Set this up in the `main` function after `ToniFactory::create`, before calling `listen`.
+The adapter binds a plain TCP listener; there is no hook for terminating TLS in-process. Terminate TLS at a load balancer or reverse proxy (nginx, Cloudflare, etc.) — see [Production](/docs/deployment/production#reverse-proxy-nginx).

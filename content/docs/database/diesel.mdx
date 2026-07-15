@@ -59,14 +59,13 @@ use toni_diesel::PgPool; // re-exported from toni_diesel
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
 
-#[injectable(pub struct UsersService {
+#[injectable]
+pub struct UsersService {
+    #[inject]
     pool: PgPool,
-})]
-impl UsersService {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
+}
 
+impl UsersService {
     pub async fn find_all(&self) -> Result<Vec<User>, diesel::result::Error> {
         let mut conn = self.pool.get().await
             .map_err(|_| diesel::result::Error::DatabaseError(
@@ -105,6 +104,10 @@ pub struct AppModule;
 ## Shutdown
 
 `DieselModule` calls `pool.close()` when `app.close()` is called, draining the connection pool.
+
+## Health checks
+
+Enable the `health` feature to have each constructor also register a health indicator — `PgHealthIndicator` for PostgreSQL, `MySqlHealthIndicator` for MySQL — exposing `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
 
 ## API reference
 

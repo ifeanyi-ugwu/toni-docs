@@ -1,0 +1,75 @@
+---
+title: Error Handling
+description: GrpcStatus and GrpcCode, the error-handler chain, and panic recovery on gRPC calls.
+---
+
+Handlers return `Err(tonic::Status)` as in plain tonic. The framework adds a layer on top: every user-returned error and every recovered panic is offered to an error-handler chain that can remap it to a different status before it reaches the wire.
+
+## GrpcStatus and GrpcCode
+
+`toni::GrpcStatus` is the transport-neutral mirror of `tonic::Status` — it lets guards, interceptors, and error handlers name a gRPC error without depending on tonic. The adapter converts to and from `tonic::Status` at the wire boundary.
+
+```rust
+pub struct GrpcStatus {
+    pub code: GrpcCode,
+    pub message: String,
+}
+```
+
+Constructors: `GrpcStatus::new(code, message)` plus shorthands `permission_denied`, `invalid_argument`, `internal`, `not_found`, and `unauthenticated`.
+
+`GrpcCode` covers all 17 canonical codes (`Ok`, `Cancelled`, `Unknown`, `InvalidArgument`, `DeadlineExceeded`, `NotFound`, `AlreadyExists`, `PermissionDenied`, `ResourceExhausted`, `FailedPrecondition`, `Aborted`, `OutOfRange`, `Unimplemented`, `Internal`, `Unavailable`, `DataLoss`, `Unauthenticated`). Its numeric values match `tonic::Code`, so `as i32` round-trips.
+
+## Error handlers
+
+An error handler implements `ErrorHandler<GrpcContext, GrpcStatus>`. The chain offers it two error sources: a user-returned `Err(Status)` (wrapped as `GrpcStatus`) and a caught handler panic (as a typed `PanicRecovered` event). Returning `Some(GrpcStatus)` claims the response; `None` passes to the next handler; when no handler claims, the original status reaches the wire unchanged.
+
+```rust
+use toni::{GrpcCode, GrpcContext, GrpcStatus};
+use toni::traits_helpers::{ChainError, ErrorHandler};
+
+#[injectable]
+pub struct QtyErrorHandler {}
+impl QtyErrorHandler {}
+
+#[toni::async_trait]
+impl ErrorHandler<GrpcContext, GrpcStatus> for QtyErrorHandler {
+    async fn handle_error(
+        &self,
+        error: ChainError<'_>,
+        _ctx: &GrpcContext,
+    ) -> Option<GrpcStatus> {
+        if error.to_string().contains("invalid-qty") {
+            Some(GrpcStatus::new(
+                GrpcCode::FailedPrecondition,
+                "qty must be positive",
+            ))
+        } else {
+            None
+        }
+    }
+}
+```
+
+Applied with `#[use_error_handlers(QtyErrorHandler)]` at the impl or method level, this turns the handler's `Err(Status::invalid_argument("invalid-qty:0"))` into `FAILED_PRECONDITION` on the wire; any other error passes through untouched.
+
+### Chain order
+
+Method-level handlers run before service-level ones; within each level the chain walks in reverse registration order. The first `Some` claims the response and stops the walk.
+
+## Panic recovery
+
+Every pipeline segment runs under panic recovery. A panic never tears down the connection or the process — the server keeps answering subsequent calls:
+
+| Panic in | Wire status | Message carries |
+|---|---|---|
+| Handler body | `Internal` | the panic payload (`handler panicked: ...` when unclaimed) |
+| Guard | `PermissionDenied` | `guard N panicked: ...` — matches the "guard said no" semantic |
+| Interceptor | `Internal` | `interceptor panicked: ...` |
+| Error handler | none — the handler is skipped | chain continues; the original error is kept |
+
+Handler panics go through the error-handler chain like ordinary errors, so a handler can claim and remap them; the statuses above are the defaults when nothing claims.
+
+## Error observers
+
+Every error entering the chain, every guard rejection, and every recovered panic fans out to the observers registered with `use_global_error_observer` before any remapping happens — the observer sees the original event (including typed `GuardRejection` and `PanicRecovered`), regardless of what the chain returns to the client.

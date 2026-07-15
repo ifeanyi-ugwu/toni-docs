@@ -3,181 +3,439 @@ title: toni-macros
 description: Reference for all procedural macros provided by the toni-macros crate.
 ---
 
-All macros are re-exported through the `toni` crate — you don't need to add `toni-macros` as a direct dependency.
+All macros are re-exported through the `toni` crate — no direct `toni-macros` dependency is needed.
 
-## Struct-level macros
+There are no `#[guard]` / `#[interceptor]` / `#[pipe]` / `#[middleware]` / `#[error_handler]` marker macros. Enhancer roles are detected from the trait impl: declare `#[injectable]`, implement `Guard<C>` / `Interceptor<C>` / `Pipe<C>` / `ErrorHandler<C, R>` / `Middleware`, list the type in `providers`, and apply it with `#[use_*]` or a factory `use_global_*` call.
+
+## Module
 
 ### `#[module]`
 
-Defines a module with its dependency graph:
+**Target:** unit struct (`pub struct AppModule;`) or an impl block.
 
 ```rust
 #[module(
-    imports: [OtherModule, AnotherModule],       // modules to import
-    controllers: [MyController, OtherController], // controllers owned by this module
-    providers: [MyService, provider_value!("KEY", value)], // providers
-    exports: [MyService, "KEY"],                  // what's visible to importers
+    imports: [OtherModule, SeaOrmModule::for_root(url)],  // expressions — module types or DynamicModule calls
+    controllers: [UsersController],                        // identifiers
+    providers: [UserService, provide!("KEY", value)],      // identifiers or provider-macro calls
+    exports: [UserService],                                // identifiers
+    global: true,                                          // optional bool; exports visible everywhere
 )]
-pub struct MyModule;
+pub struct AppModule;
 ```
 
-All fields are optional. An empty module is valid.
+All keys are optional. Modules pass directly to the factory: `ToniFactory::create(AppModule).await`.
 
-### `#[controller]`
+The impl form allows two kinds of methods:
 
-Defines an HTTP controller with a base path:
+- lifecycle hooks (`#[on_module_init]`, etc. — same signatures as on providers),
+- `fn configure_middleware(&self, consumer: &mut MiddlewareConsumer)` for module-scoped middleware.
 
 ```rust
-#[controller("/path", pub struct MyController {
-    #[inject]
-    service: MyService,       // injected from DI
-    internal: String,         // not injected
-})]
-impl MyController {
-    pub fn new(service: MyService) -> Self {
-        Self { service, internal: "default".into() }
-    }
+#[module(controllers: [UsersController], providers: [UserService])]
+impl AppModule {
+    #[on_module_init]
+    async fn init(&self) -> toni::InitResult { Ok(()) }
 }
 ```
+
+## Providers and controllers
+
+Providers, controllers, gateways, and RPC controllers all share one declaration shape: the attribute goes on the struct; handlers live in a separately-attributed impl block. The inline-struct forms (`#[controller("/p", pub struct X {...})]` etc.) are rejected with migration errors.
 
 ### `#[injectable]`
 
-Marks a struct as a DI-managed provider:
+**Target:** struct.
 
 ```rust
-#[injectable(pub struct MyService {
-    #[inject]
-    dep: OtherService,
-    state: u32,
-})]
-impl MyService {
-    pub fn new(dep: OtherService) -> Self {
-        Self { dep, state: 0 }
+#[injectable]                          // singleton (default)
+#[injectable(scope = "request")]       // or "transient"
+#[injectable(init = "create")]         // assemble via Self::create(...) — prefer #[new] instead
+pub struct UserService {
+    #[inject] repo: UserRepo,          // dependency, resolved by type
+    #[inject("TOKEN")] key: String,    // dependency, resolved by custom token
+    #[default(1000)] max: u32,         // owned state; untagged fields get Default::default()
+}
+```
+
+Adds the `Clone` impl the container needs. Construction logic (`#[new]`) and lifecycle hooks live on the struct's plain `impl`.
+
+### `#[inject]` / `#[default]` (field attributes)
+
+- `#[inject]` — resolve by type (token is the fully qualified `type_name`).
+- `#[inject("TOKEN")]` — resolve by custom token; also accepts a type or a `SCREAMING_SNAKE_CASE` const.
+- `#[default(expr)]` — owned field initialized with `expr`.
+
+A field cannot carry both `#[inject]` and `#[default]`.
+
+### `#[new]`
+
+**Target:** `fn name(deps…) -> Self` in the struct's impl. Not auto-detected — a bare `new()` without the attribute is ignored by DI.
+
+Each parameter is resolved from the container (by type, or `#[inject("TOKEN")]` on the parameter), so a dependency can be a constructor argument without being a stored field.
+
+```rust
+#[injectable]
+pub struct Server { port: u16 }
+
+impl Server {
+    #[new]
+    fn new(config: ConfigService) -> Self {      // config injected, not stored
+        Self { port: config.port() }
     }
 }
 ```
 
----
+### `#[controller]`
 
-## Route macros
-
-Applied to methods inside a `#[controller]` impl block:
+**Target:** struct. Same field rules as `#[injectable]`; `init = "…"` is rejected (use `#[new]`).
 
 ```rust
-#[get("/path")]       // HTTP GET
-#[post("/path")]      // HTTP POST
-#[put("/path")]       // HTTP PUT
-#[delete("/path")]    // HTTP DELETE
+#[controller("/users")]                       // route prefix
+#[controller("/users", scope = "request")]    // per-request controller instance
+pub struct UsersController {
+    #[inject] svc: UserService,
+}
 ```
 
-Path segments with `:name` are route parameters: `#[get("/:id")]`.
+A controller with no `#[routes]` impl is valid and exposes no routes.
 
----
+### `#[routes]`
 
-## Enhancer application macros
-
-Applied to a controller or method:
+**Target:** the controller's impl block. Scans HTTP-verb methods into routes; also hosts controller-level `#[use_*]` attributes (on the impl, not the struct).
 
 ```rust
-#[use_guards(GuardStruct {}, AnotherGuard::new())]
-#[use_interceptors(InterceptorStruct {}, LoggingInterceptor::new())]
-#[use_pipes(PipeStruct {})]
-#[use_error_handlers(ErrorHandlerStruct {})]
+#[routes]
+impl UsersController {
+    #[get("/")]
+    async fn list(&self) -> impl IntoResponse { ... }
 
-#[set_metadata(MyMetadata { key: "value" })]
+    #[post("/")]
+    async fn create(&self, Json(dto): Json<CreateUserDto>) -> impl IntoResponse { ... }
+}
 ```
 
----
+## HTTP handler attributes
 
-## Enhancer marker macros
+### Verb macros — `#[get]`, `#[post]`, `#[put]`, `#[delete]`
 
-Mark a `#[injectable]` struct as implementing an enhancer trait so Toni can detect and register it:
+**Target:** methods in a `#[routes]` impl. The path argument is required; it is joined to the controller prefix (`"/users"` + `"/{id}"` → `"/users/{id}"`).
 
 ```rust
-#[guard]           // implements Guard
-#[interceptor]     // implements Interceptor
-#[pipe]            // implements Pipe
-#[middleware]      // implements Middleware
-#[error_handler]   // implements ErrorHandler
+#[get("/{id}")]
+async fn find(&self, Path(id): Path<i64>) -> impl IntoResponse { ... }
 ```
 
----
+Handlers take extractors as parameters (`Path`, `Query`, `Json`, `Bytes`, `Body`, `BodyStream`, `Multipart`, `Validated`, or a whole `HttpRequest`) and return any `IntoResponse` type, or `Result<T: IntoResponse, E>` where `E` converts into `HttpError`.
 
-## Provider macros (used inside `providers: [...]`)
+These four are the exported verb macros. `PATCH`/`HEAD`/`OPTIONS` attributes are not currently exported by `toni-macros`.
+
+### `#[sse]`
+
+**Target:** method in a `#[routes]` impl. Declares a Server-Sent Events handler; always routes as GET.
+
+The handler returns a stream of events, not a response:
 
 ```rust
-// Static value
-provider_value!("TOKEN", expression)
+// Infallible
+#[sse("/events")]
+async fn events(&self) -> impl Stream<Item = SseEvent> { ... }
 
-// Sync factory with optional dependencies
-provider_factory!("TOKEN", || expression)
-provider_factory!("TOKEN", |dep: DepType| expression)
-
-// Async factory
-provider_factory!("TOKEN", async |dep: DepType| async_expression)
-
-// Alias — alternate token for existing provider
-provider_alias!("NEW_TOKEN", ExistingService)
-provider_alias!("NEW_TOKEN", "EXISTING_TOKEN")
-
-// Register type under custom token
-provider_token!("CUSTOM_TOKEN", ServiceType)
-
-// Unified macro
-provide!(value => "TOKEN" = expr)
-provide!(factory => "TOKEN" = || expr)
-provide!(alias => "TOKEN" = Original)
+// Per-event fallible
+#[sse("/events")]
+async fn events(&self) -> impl Stream<Item = Result<SseEvent, MyError>> { ... }
 ```
 
----
+For setup that can fail before streaming starts, use a `#[get]` handler returning `Result<impl IntoResponse, E>` with an explicit `sse(stream)` call.
+
+### `#[set_metadata]`
+
+**Target:** route/handler methods. Attaches typed metadata, stored once at startup and read by enhancers via `ctx.route_metadata().and_then(|m| m.get::<T>())`. Repeatable.
+
+```rust
+#[derive(Clone)]
+pub struct Roles(pub Vec<&'static str>);
+
+#[set_metadata(Roles(vec!["admin"]))]
+#[set_metadata(RateLimit { max: 100, window: 60 })]
+#[get("/admin")]
+async fn admin_panel(&self) -> impl IntoResponse { ... }
+```
+
+## Enhancer attributes
+
+### `#[use_guards]`, `#[use_interceptors]`, `#[use_pipes]`, `#[use_error_handlers]`
+
+**Target:** handler methods (method-level), or the `#[routes]` / `#[subscriptions]` / `#[patterns]` / `#[grpc_methods]` impl block (controller-level, applies to every handler in it).
+
+Three argument forms, each repeatable and combinable:
+
+```rust
+#[use_guards(AuthGuard)]                      // type name — resolved from the DI container
+#[use_guards(SimpleGuard{})]                  // struct literal — instantiated directly
+#[use_guards(RoleGuard::new("admin"))]        // constructor call
+```
+
+Execution order: global → controller → method for guards/interceptors/pipes; method → controller → global for error handlers (most specific first). Interceptors run their after-phase in reverse order.
+
+```rust
+#[routes]
+#[use_guards(AuthGuard)]                      // all routes in this controller
+impl AdminController {
+    #[use_interceptors(TimingInterceptor{})]  // this route only
+    #[get("/stats")]
+    async fn stats(&self) -> impl IntoResponse { ... }
+}
+```
+
+### `#[catch]`
+
+**Target:** free `async fn`. Lowers the function into a unit struct implementing `ErrorHandler<C, R>` that downcasts to `T` and returns `None` on no match (the chain advances).
+
+```rust
+#[catch(GuardRejection)]
+async fn shape_rejection(err: &GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+    HttpResponse::forbidden()
+        .json(serde_json::json!({ "denied_by_guard": err.guard_index }))
+        .build()
+}
+
+// Apply like any error handler:
+#[use_error_handlers(shape_rejection)]
+```
+
+The primary error path needs no `#[catch]` — a domain type implementing `toni::Error` renders automatically on every transport. Reach for `#[catch]` to reshape framework events or apply per-route custom rendering.
 
 ## Lifecycle hook attributes
 
-Used inside `impl` blocks of providers, controllers, or modules:
+**Target:** methods in a provider/controller impl or a `#[module]` impl block. All hooks must be `async fn`. Startup hooks on request/transient providers are a compile error.
+
+| Attribute | Signature | Runs |
+|---|---|---|
+| `#[on_module_init]` | `async fn(&self) -> toni::InitResult` | after the DI container is built |
+| `#[on_application_bootstrap]` | `async fn(&self) -> toni::InitResult` | after all modules init, before serving |
+| `#[on_module_destroy]` | `async fn(&self)` | module teardown during shutdown |
+| `#[before_application_shutdown]` | `async fn(&self, signal: Option<String>)` | before shutdown begins |
+| `#[on_application_shutdown]` | `async fn(&self, signal: Option<String>)` | as the application shuts down |
+
+Returning `Err` from a startup hook aborts startup (`BindError::HookFailed` from `app.bind()`).
+
+## WebSocket gateway macros
+
+### `#[websocket_gateway]`
+
+**Target:** struct. Same field rules as `#[injectable]`. Implements `GatewayTrait`.
 
 ```rust
-#[on_module_init]
-async fn hook(&self) { }
-
-#[on_application_bootstrap]
-async fn hook(&self) { }
-
-#[on_module_destroy]
-async fn hook(&self) { }
-
-#[before_application_shutdown]
-async fn hook(&self, signal: Option<String>) { }
-
-#[on_application_shutdown]
-async fn hook(&self, signal: Option<String>) { }
-```
-
----
-
-## Field attributes
-
-```rust
-// In #[injectable] and #[controller] struct definitions:
-#[inject]    // mark field for DI injection
-#[default]   // provide a default value (not injected)
-```
-
----
-
-## Config derive macro (from toni-config)
-
-```rust
-use toni_config::Config;
-
-#[derive(Config, Clone)]
-pub struct AppConfig {
-    #[env("ENV_VAR_NAME")]
-    pub field: Type,
-
-    #[env("ENV_VAR_NAME", default = "value")]
-    pub optional_field: Type,
-
-    #[nested]
-    pub nested_config: NestedConfig,
+#[websocket_gateway]                                          // path defaults to "/"
+#[websocket_gateway("/chat")]                                 // path
+#[websocket_gateway("/chat", namespace = "lobby")]            // namespace
+#[websocket_gateway("/chat", port = 3001)]                    // separate-port listener
+pub struct ChatGateway {
+    #[inject] broadcast: BroadcastService,
 }
+```
+
+Without `port`, the gateway shares the HTTP listener (requires an HTTP adapter with WS upgrade support). With `port = N` (including `0`), it binds its own listener via the registered `WebSocketAdapter`. A bare `#[websocket_gateway]` with no `#[subscriptions]` and no hooks is a valid connection-only gateway.
+
+### `#[subscriptions]`
+
+**Target:** the gateway's impl block. Scans `#[subscribe_message]` methods into the event router; hosts gateway-level `#[use_*]` attributes. Not needed for connection hooks.
+
+### `#[subscribe_message]`
+
+**Target:** method in a `#[subscriptions]` impl.
+
+```rust
+#[subscribe_message("message")]
+async fn on_message(&self, client: WsClient, msg: WsMessage) -> WsHandlerResult {
+    Ok(WsMessage::text("echo").into())      // From<WsMessage> for WsHandlerOutput
+}
+```
+
+Return `Ok(WsHandlerOutput::Empty)` for no reply, `::Single(msg)` (or `msg.into()`) for one, `::Stream(boxed)` for a push stream.
+
+### `#[on_connect]`, `#[on_disconnect]`, `#[after_init]`
+
+**Target:** individual methods in the gateway's impl (standalone single-method attributes, like `#[new]` — no `#[subscriptions]` required).
+
+| Attribute | Signature | Notes |
+|---|---|---|
+| `#[on_connect]` | `async fn(&self, client: &WsClient) -> Result<(), WsError>` | `Err` rejects the connection |
+| `#[on_disconnect]` | `async fn(&self, client: &WsClient)` | |
+| `#[after_init]` | `async fn(&self)` | once, after the path is registered |
+
+## RPC controller macros
+
+### `#[rpc_controller]`
+
+**Target:** struct. Same field rules as `#[injectable]`. Implements `RpcControllerTrait`. RPC has no connection hooks — `#[patterns]` is the only impl marker. A bare `#[rpc_controller]` with no `#[patterns]` is a valid provider that routes nothing.
+
+```rust
+#[rpc_controller]
+pub struct OrdersController {
+    #[inject] svc: OrderService,
+}
+```
+
+### `#[patterns]`
+
+**Target:** the RPC controller's impl block. Scans `#[message_pattern]` / `#[event_pattern]` methods; hosts controller-level `#[use_*]` attributes.
+
+### `#[message_pattern]` / `#[event_pattern]`
+
+**Target:** methods in a `#[patterns]` impl.
+
+- `#[message_pattern("p")]` — request-response; the return value is sent back.
+- `#[event_pattern("p")]` — fire-and-forget; nothing is sent back.
+
+```rust
+#[patterns]
+impl OrdersController {
+    #[message_pattern("order.create")]
+    async fn create(&self, data: RpcData, ctx: &RpcContext) -> Result<RpcData, RpcError> { ... }
+
+    #[event_pattern("order.cancelled")]
+    async fn on_cancelled(&self, data: RpcData, ctx: &RpcContext) -> Result<(), RpcError> { ... }
+}
+```
+
+Typed payloads and returns are supported — declare a `Deserialize` parameter type and/or a `Serialize` return type and the macro inserts `RpcData::parse` / `from_serialize`. Errors may be any `toni::Error` type (auto-lifted to `RpcError::AppError` via `?`).
+
+## gRPC service macros
+
+### `#[grpc_service]`
+
+**Target:** the service's inherent impl block, with the struct definition inline in the attribute (or a separate struct plus a `fn new(...)` constructor in the impl). Registers the struct as a singleton DI provider that the framework hands to the gRPC adapter at bind time.
+
+```rust
+#[grpc_service(pub struct OrdersGrpcService {
+    #[inject] repo: OrdersRepo,
+})]
+impl OrdersGrpcService {
+    pub fn new(repo: OrdersRepo) -> Self { Self { repo } }
+}
+```
+
+### `#[grpc_methods]`
+
+**Target:** the `impl ProtoTrait for YourService` block (the tonic-generated service trait). Passes the impl through unchanged and emits the `GrpcServiceTrait` wiring that wraps the service in its tonic `*Server` and routes calls through the enhancer pipeline. `#[use_*]` attributes apply at the impl (service) or method level.
+
+The `*Server` wrapper type is inferred from the trait name; override with `server = …`:
+
+```rust
+#[grpc_methods(server = orders_proto::OrdersServer)]
+#[tonic::async_trait]
+#[use_guards(AuthGuard)]
+impl Orders for OrdersGrpcService {
+    #[use_interceptors(LoggingInterceptor)]
+    async fn create(&self, req: tonic::Request<CreateOrderRequest>)
+        -> Result<tonic::Response<CreateOrderResponse>, tonic::Status> { ... }
+}
+```
+
+## Derive macros
+
+### `#[derive(toni::Error)]`
+
+Derives the `toni::Error` trait. Tag the type — or each enum variant — with `#[error_kind(KIND)]`, where `KIND` is an `ErrorKind` variant: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `UnprocessableEntity`, `TooManyRequests`, `Timeout`, `Unavailable`, `Unimplemented`, `Internal`. Untagged variants fall back to a top-level `#[error_kind(...)]`, otherwise to `Internal`.
+
+```rust
+#[derive(Debug, thiserror::Error, toni::Error)]
+enum BillingError {
+    #[error("invoice {0} not found")]
+    #[error_kind(NotFound)]
+    InvoiceNotFound(String),
+
+    #[error("card declined")]
+    #[error_kind(UnprocessableEntity)]
+    CardDeclined,
+}
+```
+
+Handlers returning `Result<T, BillingError>` render the canonical envelope on every transport with no further code.
+
+### `#[derive(Config)]`
+
+Derives environment-variable loading for a config struct (used with `toni-config`'s `ConfigModule`). Field attributes are separate — `#[env]` and `#[default]` are never combined into one attribute:
+
+```rust
+#[derive(Clone, Config)]
+pub struct AppConfig {
+    #[env("PORT")]              // read from $PORT
+    #[default(3000u16)]         // typed expression fallback when unset
+    port: u16,
+
+    database_url: String,       // no #[env] — defaults to SCREAMING_SNAKE_CASE of the field name
+
+    #[nested]                   // load the field's type via its own Config derive
+    redis: RedisConfig,
+}
+```
+
+- `#[env("VAR")]` — source variable; defaults to the upper-cased field name.
+- `#[default(expr)]` — typed expression used when the variable is unset. A set-but-unparseable variable is an error.
+- `#[nested]` — delegate to the field type's own `Config` derive.
+- Validation is gated on `#[validate(...)]` attributes: derive `validator::Validate` and mark fields, and values are checked at load time. No Cargo feature involved.
+
+## Function-like provider macros
+
+Used inside a module's `providers: [...]` list. Token position accepts a string literal (`"API_KEY"`), a type path (token becomes `type_name::<T>()`), or a `SCREAMING_SNAKE_CASE` const.
+
+### `provider_value!`
+
+```rust
+provider_value!("APP_NAME", "ToniApp".to_string())
+provider_value!(Duration, Duration::from_secs(60))     // type-based token
+```
+
+Registers a constant value.
+
+### `provider_factory!`
+
+```rust
+provider_factory!("REQUEST_ID", || uuid::new_v4().to_string())
+provider_factory!("APP_INFO", |config: ConfigService| build_info(config))   // typed params are injected
+provider_factory!("STATUS", async |logger: LoggerService| check(logger).await)
+```
+
+Closure parameters are resolved from the container by type. Optional trailing arguments (comma-separated, any order): `scope = "request"` / `"transient"`, `lifecycle` (the produced value participates in lifecycle hooks — e.g. an `RpcClient` connecting at bootstrap), and a type hint naming the produced type.
+
+### `provider_alias!`
+
+```rust
+provider_alias!("Config", ConfigService)    // new token → existing type-based provider
+provider_alias!("APP_PORT", "PORT")         // new token → existing token
+```
+
+Both tokens resolve to the same instance.
+
+### `provider_token!`
+
+```rust
+provider_token!("PRIMARY_CONFIG", ConfigService)
+provider_token!(APP_GUARD, AuthGuard)       // const token
+```
+
+Registers the type under a custom token (instantiated via its own DI declaration).
+
+### `provide!`
+
+Unified macro with auto-detection — covers all the above:
+
+```rust
+provide!("API_KEY", "secret".to_string())               // value (auto-detected)
+provide!("MAX_CONN", || 100_i32)                        // factory (auto-detected from closure)
+provide!("LOGGER", |config: ConfigService| ...)         // factory with injected deps
+
+// Explicit markers
+provide!("EXPLICIT_VALUE", value("explicit".to_string()))
+provide!("EXPLICIT_FACTORY", factory(|| build()))
+provide!("CACHE_ALIAS", existing(CacheService))          // alias to existing provider
+provide!("ALIAS", existing("TOKEN", ConcreteType))       // alias with explicit concrete type
+provide!("PRIMARY_DB", provider(DatabaseService))        // type under custom token
+
+// Multi-provider: several contributions under one token, collected into a Vec
+provide!("PLUGINS", PluginA, multi(dyn Plugin + Send + Sync))
+provide!("PLUGINS", PluginB, multi(Plugin))              // shorthand synthesizes dyn Plugin + Send + Sync
 ```

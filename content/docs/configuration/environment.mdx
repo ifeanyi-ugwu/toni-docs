@@ -19,9 +19,18 @@ let port: u16 = env::var("PORT")
     .expect("PORT must be a valid port number");
 ```
 
-## With dotenv
+## Loading .env files
 
-For local development, use the `dotenv` crate to load a `.env` file:
+`toni-config` loads `.env` files itself — no extra dependency or feature flag:
+
+```rust
+use toni_config::ConfigModule;
+
+// Loads .env into the process environment, then reads the config from it
+let module = ConfigModule::<AppConfig>::from_file(".env")?;
+```
+
+For direct `std::env` access outside `toni-config`, the `dotenv` crate works as usual:
 
 ```toml
 [dependencies]
@@ -30,7 +39,6 @@ dotenv = "0.15"
 
 ```rust
 dotenv::dotenv().ok();  // loads .env if it exists, silently ignores if missing
-let config = AppConfig::load()?;
 ```
 
 ## .env file format
@@ -46,7 +54,7 @@ LOG_LEVEL=debug
 
 ## Environment-specific configuration
 
-A common pattern is to load a base config and then override specific values per environment:
+Keep one `.env.<environment>` file per environment:
 
 ```bash
 # .env.development
@@ -58,11 +66,19 @@ LOG_LEVEL=error
 DATABASE_URL=postgresql://prod-server/myapp
 ```
 
+`ConfigModule::from_env_file` picks the file from an `Environment` value:
+
 ```rust
-let env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
-dotenv::from_filename(format!(".env.{env}")).ok();
-dotenv::dotenv().ok();  // base .env as fallback
+use toni_config::{ConfigModule, Environment};
+
+// Loads .env.development, .env.production, or .env.test
+let module = ConfigModule::<AppConfig>::from_env_file(Environment::current())?;
+
+// Or pin one explicitly
+let module = ConfigModule::<AppConfig>::from_env_file(Environment::Production)?;
 ```
+
+`Environment::current()` reads `NODE_ENV`, falling back to `APP_ENV`, and defaults to `Development` when neither is set. Recognized values are `development`/`dev`, `production`/`prod`, and `test`; anything else becomes `Environment::Custom(name)`, which maps to `.env.<name>`.
 
 ## Provider value from environment
 
@@ -87,3 +103,5 @@ Register environment-derived values directly in a module:
 )]
 pub struct EnvModule;
 ```
+
+Consumers inject these by token: `#[inject("DATABASE_URL")] database_url: String`.

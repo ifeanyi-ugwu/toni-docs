@@ -1,9 +1,9 @@
 ---
 title: Actix-web Adapter
-description: Using the toni-actix adapter for CPU-intensive workloads.
+description: Using the toni-actix adapter — setup, graceful shutdown, and its buffering and WebSocket limitations.
 ---
 
-The `toni-actix` crate integrates Toni with [Actix-web](https://actix.rs/). It uses Actix's multi-threaded worker model, which is well-suited for CPU-bound request processing.
+The `toni-actix` crate integrates Toni with [Actix-web](https://actix.rs/) 4. It implements `HttpAdapter` only — no WebSocket support — and buffers request and response bodies. Reach for it when you're integrating Toni into an existing Actix-web deployment.
 
 ## Installation
 
@@ -11,31 +11,37 @@ The `toni-actix` crate integrates Toni with [Actix-web](https://actix.rs/). It u
 [dependencies]
 toni = "0.2"
 toni-actix = "0.1"
-tokio = { version = "1", features = ["full"] }
+actix-web = "4"
 ```
 
 ## Basic setup
 
 ```rust
-use toni::ToniFactory;
+use toni::*;
 use toni_actix::ActixAdapter;
 
-#[tokio::main]
-async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
+#[actix_web::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
     app.use_http_adapter(ActixAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-The API is identical to `toni-axum`. Switching between adapters is a one-line change in `main.rs`.
+The Toni API surface is identical to the other adapters — controllers, guards, interceptors, pipes, extractors, and global middleware all work the same. Route paths use Toni's `:param` syntax; the adapter rewrites them to Actix's `{param}` form at bind time.
 
-## When to choose Actix
+## Graceful shutdown
 
-- Request handlers perform significant CPU work (encoding, hashing, compression)
-- You're migrating from an existing Actix-web application
-- You need Actix's specific actor-based patterns alongside Toni's module system
+The adapter forwards Toni's shutdown signal to Actix's server handle with graceful stop, so worker threads finish in-flight requests before exiting. Trigger it via the application's [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) — the framework installs no signal handlers of its own.
 
 ## Limitations
 
-The Actix adapter has the same Toni API surface as the Axum adapter. Some Axum-specific features (certain Tower middleware, `axum::extract::State`) aren't available — but Toni's built-in middleware, guards, interceptors, and extractors work identically on both adapters.
+- **No WebSocket.** The adapter implements neither same-port upgrades nor the `WebSocketAdapter` trait. A `#[websocket_gateway]` cannot be served through `toni-actix` on the HTTP port; pair it with a separate-port WebSocket adapter ([`toni-tungstenite`](/docs/websocket/separate-port)) for gateways declared with `port = N`.
+- **Buffered request bodies.** The full body is read into memory before the handler runs. The `BodyStream` extractor still works, but sees the payload as a single chunk.
+- **Buffered response bodies.** The response body is collected in full before it is sent. Streaming responses — [SSE](/docs/techniques/sse), large downloads built with `Body::stream` — do not work on this adapter; an unbounded stream never completes. Use `toni-axum`, `toni-salvo`, or `toni-poem` for streaming workloads.
+
+## When to choose Actix
+
+- You're migrating from or embedding into an existing Actix-web application
+- Your workload is plain request/response JSON with no streaming or WebSocket needs

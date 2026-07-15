@@ -39,12 +39,17 @@ Inject `RedisBroadcastService` anywhere you need to push messages across process
 use toni_redis_broadcast::RedisBroadcastService;
 use toni::websocket::{WsClient, WsError, WsHandlerOutput, WsMessage};
 use toni::WsHandlerResult;
-use toni_macros::websocket_gateway;
+use toni_macros::{new, subscriptions, websocket_gateway};
 
-#[websocket_gateway("/chat", pub struct ChatGateway {
+#[websocket_gateway("/chat")]
+pub struct ChatGateway {
+    #[inject]
     broadcast: RedisBroadcastService,
-})]
+}
+
+#[subscriptions]
 impl ChatGateway {
+    #[new]
     pub fn new(broadcast: RedisBroadcastService) -> Self {
         Self { broadcast }
     }
@@ -99,7 +104,16 @@ async fn handle_join(
     client: WsClient,
     message: WsMessage,
 ) -> WsHandlerResult {
-    let room = message.as_text().unwrap_or_default().trim_start_matches("join:");
+    // Frame: {"event": "join", "data": {"room": "lobby"}}
+    let text = message
+        .as_text()
+        .ok_or_else(|| WsError::InvalidMessage("Expected text message".into()))?;
+    let data: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| WsError::InvalidMessage(format!("Invalid JSON: {}", e)))?;
+    let room = data["data"]["room"]
+        .as_str()
+        .ok_or_else(|| WsError::InvalidMessage("Missing room field".into()))?;
+
     self.broadcast.join_room(&client.id, room).await.ok();
     self.broadcast
         .to_room(room)
@@ -118,7 +132,6 @@ async fn handle_join(
 | Injectable | `BroadcastService` | `RedisBroadcastService` |
 | Room queries | Sync (`get_room_clients` → `Vec`) | Async (`get_room_clients` → `Vec`) |
 | Send return | `Result<usize>` (actual count) | `Result<usize>` (always `Ok(0)`) |
-| `except()` | Not available | Available |
 | Dependency | None | Redis |
 
 `BroadcastService` is still registered internally — the gateway framework uses it for connection lifecycle hooks. You inject `RedisBroadcastService` for all cross-process sends.

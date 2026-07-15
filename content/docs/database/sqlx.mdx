@@ -63,14 +63,13 @@ The injected type depends on the database:
 ```rust
 use sqlx::PgPool; // re-exported from toni_sqlx
 
-#[injectable(pub struct UsersService {
+#[injectable]
+pub struct UsersService {
+    #[inject]
     pool: PgPool,
-})]
-impl UsersService {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
+}
 
+impl UsersService {
     pub async fn find_all(&self) -> sqlx::Result<Vec<User>> {
         sqlx::query_as!(User, "SELECT id, name, email FROM users")
             .fetch_all(&self.pool)
@@ -108,6 +107,10 @@ pub struct AppModule;
 ## Shutdown
 
 `SqlxModule` calls `pool.close().await` when `app.close()` is called. In-flight queries are allowed to complete before the pool is closed.
+
+## Health checks
+
+Enable the `health` feature to have each constructor also register a `SqlxHealthIndicator<DB>` (aliased per database as `PostgresHealthIndicator`, `MySqlHealthIndicator`, `SqliteHealthIndicator`), which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
 
 ## API reference
 

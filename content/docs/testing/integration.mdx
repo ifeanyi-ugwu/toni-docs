@@ -28,13 +28,15 @@ async fn test_user_creation_flow() {
     assert!(order.id > 0);
     assert_eq!(order.user_id, user.id);
 
-    ctx.close().await.unwrap();
+    ctx.close().await;
 }
 ```
 
+`ctx.close()` runs the shutdown lifecycle hooks and returns `()` — there is no `Result` to unwrap.
+
 ## HTTP integration tests
 
-For HTTP-level integration tests, start a real server and send requests with a test HTTP client:
+For HTTP-level tests, start a real server and send requests with an HTTP client:
 
 ```toml
 [dev-dependencies]
@@ -42,68 +44,95 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
+Two framework facts shape the harness:
+
+- The application is not `Send`, so it can't be moved into `tokio::spawn`. Drive it on a [`LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html) with `spawn_local`.
+- Passing port `0` to `use_http_adapter` lets the OS pick a free port. `app.bind().await` returns `BoundAdapters` with the real address once the socket is live — no sleeps, no free-port scanning, no conflicts between parallel tests.
+
 ```rust
-use toni::ToniFactory;
+use std::net::SocketAddr;
+
+use toni::module_helpers::module_enum::ModuleDefinition;
+use toni::{ShutdownHandle, ToniFactory};
 use toni_axum::AxumAdapter;
 
-async fn start_test_server() -> String {
-    let port = find_free_port();
-    let mut app = ToniFactory::create(TestModule).await;
-    app.use_http_adapter(AxumAdapter::new(), port, "127.0.0.1").unwrap();
+/// Spawns the app on the current LocalSet; returns its base URL and a
+/// handle for graceful teardown. Call from inside a LocalSet.
+async fn start_server(module: impl Into<ModuleDefinition> + 'static) -> (String, ShutdownHandle) {
+    let (addr_tx, addr_rx) = tokio::sync::oneshot::channel::<SocketAddr>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<ShutdownHandle>();
 
-    tokio::spawn(async move {
-        app.start().await;
+    tokio::task::spawn_local(async move {
+        let mut app = ToniFactory::create(module).await;
+        app.use_http_adapter(AxumAdapter::new(), 0, "127.0.0.1").unwrap();
+
+        let bound = app.bind().await.unwrap();
+        let _ = addr_tx.send(bound.http.expect("HTTP adapter not bound"));
+        let _ = shutdown_tx.send(app.shutdown_handle());
+
+        app.run().await;
     });
 
-    // Give the server a moment to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-    format!("http://127.0.0.1:{port}")
-}
-
-fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    let addr = addr_rx.await.unwrap();
+    let shutdown = shutdown_rx.await.unwrap();
+    (format!("http://{addr}"), shutdown)
 }
 
 #[tokio::test]
 async fn test_get_users() {
-    let base_url = start_test_server().await;
-    let client = reqwest::Client::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (base_url, shutdown) = start_server(TestModule).await;
+            let client = reqwest::Client::new();
 
-    let response = client.get(format!("{base_url}/users"))
-        .send()
-        .await
-        .unwrap();
+            let response = client
+                .get(format!("{base_url}/users"))
+                .send()
+                .await
+                .unwrap();
 
-    assert_eq!(response.status(), 200);
-    let users: Vec<serde_json::Value> = response.json().await.unwrap();
-    assert!(!users.is_empty());
+            assert_eq!(response.status(), 200);
+            let users: Vec<serde_json::Value> = response.json().await.unwrap();
+            assert!(!users.is_empty());
+
+            // Graceful teardown: runs shutdown hooks, closes connections
+            shutdown.shutdown();
+            shutdown.completed().await;
+        })
+        .await;
 }
 
 #[tokio::test]
 async fn test_create_user() {
-    let base_url = start_test_server().await;
-    let client = reqwest::Client::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (base_url, shutdown) = start_server(TestModule).await;
+            let client = reqwest::Client::new();
 
-    let response = client.post(format!("{base_url}/users"))
-        .json(&serde_json::json!({
-            "name": "Alice",
-            "email": "alice@test.com"
-        }))
-        .send()
-        .await
-        .unwrap();
+            let response = client
+                .post(format!("{base_url}/users"))
+                .json(&serde_json::json!({
+                    "name": "Alice",
+                    "email": "alice@test.com"
+                }))
+                .send()
+                .await
+                .unwrap();
 
-    assert_eq!(response.status(), 201);
-    let user: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(user["name"], "Alice");
+            assert_eq!(response.status(), 201);
+            let user: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(user["name"], "Alice");
+
+            shutdown.shutdown();
+            shutdown.completed().await;
+        })
+        .await;
 }
 ```
+
+Skipping the `shutdown.shutdown()` teardown is fine for pure request/response tests — the server task is dropped with the `LocalSet` — but shutdown-dependent assertions (lifecycle hooks, connection cleanup) need the explicit handle.
 
 ## Testing a specific module in isolation
 
@@ -115,15 +144,20 @@ Create a test-only module that provides only what you need:
     providers: [
         UsersService,
         // Use a fake database service instead of the real one
-        provider_value!("DB", FakeDatabase::new()),
+        provide!("DB", FakeDatabase::new()),
     ],
 )]
 pub struct UsersTestModule;
 
 #[tokio::test]
 async fn test_users_controller() {
-    let base_url = start_test_server_with_module(UsersTestModule).await;
-    // ... run HTTP tests against UsersController with fake dependencies
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (base_url, _shutdown) = start_server(UsersTestModule).await;
+            // ... run HTTP tests against UsersController with fake dependencies
+        })
+        .await;
 }
 ```
 
@@ -133,4 +167,10 @@ Lifecycle hooks run normally in integration tests. If `on_module_init` makes rea
 
 ## Tip: test isolation
 
-Run integration tests with `cargo test --test-threads 1` if tests share state (ports, databases) that can conflict. Or use unique ports per test via `find_free_port()`.
+Port `0` means parallel tests never fight over ports. Serialize only when tests share external state (a database, a message broker):
+
+```bash
+cargo test -- --test-threads=1
+```
+
+or annotate the conflicting tests with the [`serial_test`](https://docs.rs/serial_test) crate and leave the rest parallel.

@@ -1,6 +1,6 @@
 ---
 title: Request Lifecycle
-description: How a request moves through middleware, guards, interceptors, the handler, and back.
+description: How a request moves through middleware, guards, interceptors, pipes, the handler, and back.
 ---
 
 Every request travels through a predictable sequence of processing layers before the route handler runs, and through a symmetric sequence on the way back out.
@@ -11,25 +11,31 @@ Every request travels through a predictable sequence of processing layers before
 Incoming request
     │
     ▼
-Middleware (runs before routing)
+Global middleware (wraps routing — runs on every request, including 404s)
     │
     ▼
-Guards (authorization check — can this request proceed?)
+Route resolution
     │
     ▼
-Interceptors (before — can transform request, short-circuit)
+Route-scoped middleware (matched by path pattern)
     │
     ▼
-Pipes (validate and transform extracted data)
+Guards (authorization check — false blocks with 403)
+    │
+    ▼
+Interceptors, before next.run (can short-circuit)
+    │
+    ▼
+Pipes (sync — transform context, or abort with a response)
     │
     ▼
 Route handler (your fn)
     │
     ▼
-Interceptors (after — can transform response)
+Interceptors, after next.run (can transform the response)
     │
     ▼
-Exception filters / Error handlers (if handler or chain threw)
+Error handlers (only when a step produced an error or event)
     │
     ▼
 Response sent
@@ -39,30 +45,34 @@ Response sent
 
 | Layer | Runs when | Can block? | Has response access? |
 |-------|-----------|-----------|----------------------|
-| Middleware | Before routing | Yes (by returning error) | Response (after next) |
-| Guards | After routing, before handler | Yes (return false) | No |
-| Interceptors | Around handler | Yes (skip calling next) | Yes (both sides) |
-| Pipes | During param extraction | No (throws instead) | No |
-| Error handlers | On any error | — | Writes the response |
+| Middleware | Global: before routing. Route-scoped: after routing | Yes (return a response or `Err`) | Yes (after `next.run()`) |
+| Guards | Before interceptors and handler | Yes (return `false` → 403) | No |
+| Interceptors | Around handler | Yes (skip calling `next.run`) | Yes (both sides) |
+| Pipes | After interceptors, before handler | Yes (`set_response` + `abort`) | Only what they set |
+| Error handlers | On errors and framework events | — | Produce the response |
+
+## Contexts and transports
+
+Enhancers are generic over the per-request context. `Guard<HttpContext>` runs on HTTP routes; `Guard<RpcContext>`, `Guard<WsContext>`, and `Guard<GrpcContext>` run on RPC, WebSocket, and gRPC. The same struct can implement a trait for several contexts and serve all of those transports. Interceptors, pipes, and error handlers follow the same pattern (gRPC runs guards, interceptors, and error handlers, but not pipes).
 
 ## Scope levels
 
-Guards, interceptors, pipes, and error handlers can be applied at three scopes, in execution order:
+Guards, interceptors, and pipes apply at three scopes, in execution order:
 
-1. **Global** — registered on `ToniFactory`, applies to every route
-2. **Controller** — annotated on the controller struct with `#[use_guards]` etc., applies to all routes in that controller
-3. **Method** — annotated on a specific route handler, applies only to that route
+1. **Global** — registered per transport on `ToniFactory` (`use_global_http_guards`, `use_global_rpc_pipes`, `use_global_ws_interceptors`, ...)
+2. **Controller** — `#[use_guards]` etc. on the `#[routes]` impl block (or `#[patterns]` / `#[subscriptions]` / `#[grpc_methods]`), applies to every handler in it
+3. **Method** — the same attributes on a specific handler
 
-All levels run, in that order. Method-level runs *in addition to* controller-level and global, not instead.
+All levels run, in that order. Method-level runs *in addition to* controller-level and global, not instead. Error handlers run in the opposite direction — most specific first (method → controller → global), with the first claim winning.
 
 <Bridge>
-This is the same execution order as NestJS. The scope levels — global, controller, method — are identical. The main difference is that NestJS uses class-based decorators while Toni uses attribute macros, but the mental model translates directly.
+This is the same execution order as NestJS, and the scope levels — global, controller, method — are identical. Differences: attribute macros instead of class decorators, global registration is per transport, and error handlers replace exception filters (consulted most-specific-first, same as NestJS filter precedence).
 </Bridge>
 
 ## Sections in this chapter
 
-- [Middleware](/docs/request-lifecycle/middleware) — request processing before routing
+- [Middleware](/docs/request-lifecycle/middleware) — request/response interception, route patterns, Tower layers
 - [Guards](/docs/request-lifecycle/guards) — authorization and access control
 - [Interceptors](/docs/request-lifecycle/interceptors) — cross-cutting logic wrapping handlers
-- [Pipes](/docs/request-lifecycle/pipes) — data transformation and validation
-- [Exception Filters](/docs/request-lifecycle/exception-filters) — structured error handling
+- [Pipes](/docs/request-lifecycle/pipes) — context transformation before the handler
+- [Error Handling](/docs/request-lifecycle/error-handling) — domain errors, the `#[catch]` chain, observers, panic recovery

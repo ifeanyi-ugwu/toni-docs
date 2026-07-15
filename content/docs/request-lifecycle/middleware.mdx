@@ -1,154 +1,100 @@
 ---
 title: Middleware
-description: Request processing that runs before routing — logging, CORS, authentication headers, rate limiting.
+description: Request/response interception around the HTTP pipeline — logging, auth headers, rate limiting, Tower layers.
 ---
 
-Middleware runs before requests are dispatched to any route handler. It receives the request, can modify it or short-circuit with a response, and passes it to the next middleware in the chain via `next.run(req)`.
+Middleware intercepts an HTTP request before it reaches the controller pipeline. Each middleware receives a `NextHandle` carrying the in-flight request: read it, pass it downstream with `next.run()`, replace it with `next.run_with(new_req)`, or return a response directly to short-circuit.
+
+Middleware runs at two positions:
+
+- **Global middleware** (`factory.use_global_middleware`) wraps the adapter's routing itself — it runs on every request, including ones that end in a 404.
+- **Module-scoped middleware** (`configure_middleware`) is matched to routes by path pattern and runs after routing, before guards, interceptors, and pipes.
 
 <Bridge>
-Toni middleware works like Express middleware (which NestJS is built on) but with Rust's type system. The `next` function concept is identical: call it to pass the request forward, skip it to short-circuit.
+Toni middleware works like Express middleware (which NestJS builds on): call `next` to pass the request forward, skip it to short-circuit. The module-scoped `configure_middleware` + `MiddlewareConsumer` API mirrors NestJS's `NestModule.configure(consumer)` — `apply(...)`, `forRoutes(...)`, `exclude(...)` translate directly.
 </Bridge>
 
 ## The Middleware trait
 
 ```rust
-use toni::{async_trait, Middleware, Next, HttpRequest, HttpResponse, MiddlewareResult};
+use toni::async_trait;
+use toni::middleware::{Middleware, MiddlewareResult, NextHandle};
 
 #[async_trait]
 pub trait Middleware: Send + Sync {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult;
+    async fn handle(&self, next: NextHandle) -> MiddlewareResult;
 }
 ```
 
 `MiddlewareResult` is `Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>>`.
 
-## A minimal example
+`NextHandle` owns the request and the rest of the chain:
+
+| Method | Purpose |
+|--------|---------|
+| `next.request()` | `&HttpRequest` — read method, URI, headers |
+| `next.request_mut()` | `&mut HttpRequest` — mutate in place |
+| `next.run().await` | Pass the request downstream unchanged |
+| `next.run_with(req).await` | Pass a replacement request downstream |
+
+`HttpRequest` dereferences to `http::Request<RequestBody>`, so `next.request().method()`, `.uri()`, `.headers()`, and `.extensions()` are all available.
+
+## An authentication middleware
 
 ```rust
-use toni::{async_trait, Middleware, Next, HttpRequest, MiddlewareResult};
+use serde_json::json;
+use toni::async_trait;
+use toni::http_helpers::{Body, HttpResponse};
+use toni::middleware::{Middleware, MiddlewareResult, NextHandle};
 
-pub struct LoggerMiddleware;
-
-#[async_trait]
-impl Middleware for LoggerMiddleware {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
-        let method = req.method.clone();
-        let uri = req.uri.clone();
-
-        println!("→ {method} {uri}");
-        let response = next.run(req).await?;
-        println!("← {} {method} {uri}", response.status());
-
-        Ok(response)
-    }
-}
-```
-
-Call `next.run(req)` to pass the request to the next middleware (or to the router, if this is the last middleware). Don't call it to short-circuit.
-
-## CORS middleware
-
-```rust
-use toni::{async_trait, Middleware, Next, HttpRequest, HttpResponse, MiddlewareResult};
-
-pub struct CorsMiddleware {
-    pub allowed_origins: Vec<String>,
-}
-
-#[async_trait]
-impl Middleware for CorsMiddleware {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
-        // Handle preflight
-        if req.method == "OPTIONS" {
-            return Ok(HttpResponse::ok()
-                .header("Access-Control-Allow-Origin", "*")
-                .header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-                .header("Access-Control-Allow-Headers", "Content-Type,Authorization")
-                .build());
-        }
-
-        let mut response = next.run(req).await?;
-        response.set_header("Access-Control-Allow-Origin", "*");
-        Ok(response)
-    }
-}
-```
-
-## Authentication middleware
-
-```rust
-pub struct AuthMiddleware {
-    pub header: String,
+struct AuthMiddleware {
+    valid_token: String,
 }
 
 #[async_trait]
 impl Middleware for AuthMiddleware {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
-        let token = req.headers.get(&self.header);
+    async fn handle(&self, next: NextHandle) -> MiddlewareResult {
+        let token = next
+            .request()
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
 
-        if token.is_none() {
-            return Ok(HttpResponse::unauthorized()
-                .json(serde_json::json!({ "message": "Missing token" }))
-                .build());
+        if token == Some(self.valid_token.as_str()) {
+            return next.run().await;
         }
 
-        next.run(req).await
+        // Short-circuit: return a response without calling next.run()
+        let mut response = HttpResponse::new();
+        response.status = 401;
+        response.body = Some(Body::json(json!({
+            "statusCode": 401,
+            "error": "Unauthorized",
+            "message": "Missing or invalid Bearer token"
+        })));
+        Ok(response)
     }
 }
 ```
 
-## Rate limiting middleware
+## A logging middleware
+
+Code after `next.run()` sees the response — the standard onion model:
 
 ```rust
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
-
-pub struct RateLimitMiddleware {
-    max_requests: usize,
-    window_ms: u64,
-    store: Mutex<HashMap<String, (usize, Instant)>>,
-}
-
-impl RateLimitMiddleware {
-    pub fn new(max_requests: usize, window_ms: u64) -> Self {
-        Self { max_requests, window_ms, store: Mutex::new(HashMap::new()) }
-    }
-}
+pub struct LoggerMiddleware;
 
 #[async_trait]
-impl Middleware for RateLimitMiddleware {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
-        let ip = req.headers.get("x-forwarded-for")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+impl Middleware for LoggerMiddleware {
+    async fn handle(&self, next: NextHandle) -> MiddlewareResult {
+        let method = next.request().method().clone();
+        let uri = next.request().uri().clone();
 
-        let now = Instant::now();
-        let window = std::time::Duration::from_millis(self.window_ms);
+        let response = next.run().await?;
+        println!("{method} {uri} -> {}", response.status);
 
-        let allowed = {
-            let mut store = self.store.lock().unwrap();
-            let entry = store.entry(ip.clone()).or_insert((0, now));
-
-            if now.duration_since(entry.1) > window {
-                *entry = (0, now);
-            }
-
-            if entry.0 < self.max_requests {
-                entry.0 += 1;
-                true
-            } else {
-                false
-            }
-        };
-
-        if !allowed {
-            return Ok(HttpResponse::too_many_requests()
-                .json(serde_json::json!({ "message": "Rate limit exceeded" }))
-                .build());
-        }
-
-        next.run(req).await
+        Ok(response)
     }
 }
 ```
@@ -157,77 +103,183 @@ impl Middleware for RateLimitMiddleware {
 
 ### Global middleware
 
-Applies to every route across the entire application:
+Registered on the factory; runs before routing on every request:
 
 ```rust
-use toni::ToniFactory;
 use std::sync::Arc;
+use toni::ToniFactory;
 
-#[tokio::main]
-async fn main() {
-    let mut factory = ToniFactory::new();
-    factory.use_global_middleware(Arc::new(LoggerMiddleware));
-    factory.use_global_middleware(Arc::new(CorsMiddleware { allowed_origins: vec!["*".into()] }));
+let mut factory = ToniFactory::new();
+factory.use_global_middleware(Arc::new(LoggerMiddleware));
 
-    let mut app = factory.create_with(AppModule).await;
-    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
-    app.start().await;
-}
+let mut app = factory.create_with(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1")?;
+app.start().await?;
 ```
 
 ### Module-scoped middleware
 
-Apply middleware to specific routes using the module's middleware configuration. Middleware can be scoped to path patterns:
+Modules declare route-matched middleware in a `configure_middleware` method — use the `#[module]` attribute on an `impl` block:
 
 ```rust
-// In your module configuration
-// (configuration method depends on the adapter — see HTTP Adapters section)
-```
+use toni::traits_helpers::MiddlewareConsumer;
 
-## Middleware execution order
+#[module(controllers: [ApiController], providers: [])]
+impl AppModule {
+    fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
+        consumer
+            .apply(LoggerMiddleware)
+            .for_routes(vec!["/api/*"]);
 
-Middleware executes in registration order for the request path, and in reverse order for the response path:
-
-```
-Request:  Middleware1 → Middleware2 → Middleware3 → Handler
-Response: Middleware3 ← Middleware2 ← Middleware1
-```
-
-This is the standard "onion" model — each middleware wraps the ones that come after it.
-
-## DI-aware middleware
-
-Middleware that needs access to services can be implemented as an injectable:
-
-```rust
-#[injectable(pub struct AuthCheckMiddleware {
-    #[inject]
-    auth_service: AuthService,
-})]
-#[middleware]
-impl AuthCheckMiddleware {
-    pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
-}
-
-#[async_trait]
-impl Middleware for AuthCheckMiddleware {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult {
-        // self.auth_service is available here
-        let valid = self.auth_service.verify_token(&req).await;
-        if !valid {
-            return Ok(HttpResponse::unauthorized().build());
-        }
-        next.run(req).await
+        consumer
+            .apply(AuthMiddleware { valid_token: "secret".into() })
+            .exclude(vec!["/api/public/*", "/api/health"])
+            .for_routes(vec!["/api/*"]);
     }
 }
 ```
 
-Register in the module:
+Route patterns support globs and HTTP-method filtering:
+
+| Pattern | Matches |
+|---------|---------|
+| `"/users"` | Exact path, all methods |
+| `"/api/*"` | Everything under `/api/`, all methods |
+| `("/users", "POST")` | Only POST to `/users` |
+| `("/api/*", ["GET", "POST"])` | Only GET and POST under `/api/` |
+
+`apply` starts a configuration; `for_routes(vec![...])` finalizes it. `apply_also` groups several middleware onto the same routes; `for_route` / `exclude_route` add single patterns and chain, ending with `.done()` or a `for_routes` call.
+
+### DI middleware
+
+Middleware with injected dependencies is declared as an `#[injectable]` provider, listed in `providers`, and applied by type token — the instance is resolved from the container:
 
 ```rust
-#[module(
-    providers: [AuthCheckMiddleware, AuthService],
-    controllers: [ProtectedController],
-)]
-pub struct ProtectedModule;
+#[injectable]
+pub struct AuthCheckMiddleware {
+    #[inject]
+    auth_service: AuthService,
+}
+
+impl AuthCheckMiddleware {
+    #[new]
+    pub fn new(auth_service: AuthService) -> Self {
+        Self { auth_service }
+    }
+}
+
+#[async_trait]
+impl Middleware for AuthCheckMiddleware {
+    async fn handle(&self, next: NextHandle) -> MiddlewareResult {
+        if !self.auth_service.verify(next.request()).await {
+            let mut response = HttpResponse::new();
+            response.status = 401;
+            return Ok(response);
+        }
+        next.run().await
+    }
+}
 ```
+
+```rust
+#[module(controllers: [ProtectedController], providers: [AuthCheckMiddleware, AuthService])]
+impl ProtectedModule {
+    fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
+        consumer
+            .apply_token::<AuthCheckMiddleware>()
+            .for_routes(vec!["/protected/*"]);
+    }
+}
+```
+
+`apply_token_also::<M>()` stacks additional DI middleware onto the same routes.
+
+### Functional middleware
+
+For one-off logic, a closure can stand in for a trait impl:
+
+```rust
+use std::sync::Arc;
+use toni::middleware::{FunctionalMiddleware, MiddlewareFn};
+
+let log_fn: MiddlewareFn = Arc::new(|next| {
+    Box::pin(async move {
+        println!("-> {}", next.request().uri());
+        next.run().await
+    })
+});
+factory.use_global_middleware(Arc::new(FunctionalMiddleware::new(log_fn)));
+```
+
+## Execution order
+
+Middleware executes in registration order on the way in and unwinds in reverse on the way out:
+
+```
+Request:  Global chain → routing → route-scoped chain → guards → interceptors → pipes → handler
+Response: handler → interceptors → route-scoped chain (reverse) → Global chain (reverse)
+```
+
+## Reading the request body
+
+The body arrives as `RequestBody::Streaming` — a one-time consumable stream. Middleware that only reads headers should pass the request through untouched. Middleware that must inspect the body has to buffer it and put it back, otherwise the handler receives an empty body:
+
+```rust
+use toni::http_helpers::{HttpRequest, RequestBody};
+
+#[async_trait]
+impl Middleware for BodyInspector {
+    async fn handle(&self, mut next: NextHandle) -> MiddlewareResult {
+        let placeholder: HttpRequest = HttpRequest::builder()
+            .method("GET")
+            .uri("/")
+            .body(RequestBody::empty())
+            .unwrap()
+            .into();
+        let (parts, body) = std::mem::replace(next.request_mut(), placeholder).into_parts();
+
+        let bytes = body.collect().await?;
+        // inspect bytes...
+
+        let new_req = HttpRequest::from_parts(parts, RequestBody::Buffered(bytes));
+        next.run_with(new_req).await
+    }
+}
+```
+
+## Erroring from middleware
+
+Returning `Err` from route-scoped middleware emits a `MiddlewareFailure` event through the error pipeline — observers see it, error handlers can reshape it, and the fallback is a 500 envelope. If the boxed error is an `HttpError`, it is rendered directly with its own status instead. In the global chain, an unhandled `Err` renders a plain 500. See [Error Handling](/docs/request-lifecycle/error-handling).
+
+## Tower layers
+
+With the `tower-compat` feature enabled on `toni`, `tower::Layer` middleware plugs into the consumer directly:
+
+```toml
+[dependencies]
+toni = { version = "0.2", features = ["tower-compat"] }
+```
+
+```rust
+use tower::ServiceBuilder;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+
+fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
+    // single layer
+    consumer
+        .apply_tower(CorsLayer::permissive())
+        .for_routes(vec!["/*"]);
+
+    // composed stack
+    let stack = ServiceBuilder::new()
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .into_inner();
+    consumer
+        .apply_tower(stack)
+        .for_routes(vec!["/*"]);
+}
+```
+
+`apply_tower` is sugar for `.apply(TowerLayer::new(layer))`; `apply_also_tower` is the chained counterpart. `TowerLayer` is re-exported at the crate root when the feature is on, so a wrapped layer can also be registered globally via `use_global_middleware`.

@@ -1,60 +1,140 @@
 ---
 title: Custom Extractors
-description: Implement FromRequest to extract any data from incoming requests with full type safety.
+description: Implement FromRequestParts or FromRequest to extract any data from incoming requests with full type safety.
 ---
 
-When the built-in extractors don't cover your case, implement `FromRequest` on your own type. The framework will call it automatically whenever your type appears in a handler signature.
+When the built-in extractors don't cover your case, implement one of the two extraction traits on your own type. The framework calls it automatically whenever the type appears in a handler signature.
 
-## The FromRequest trait
+<Bridge>
+Custom extractors are Toni's equivalent of NestJS's `createParamDecorator()`. Where NestJS resolves `@CurrentUser()` at runtime through reflection, Toni resolves `user: CurrentUser` at compile time through a trait impl — same ergonomics, no hidden magic.
+</Bridge>
+
+## Two traits
 
 ```rust
-pub trait FromRequest: Sized {
+/// Sync, reads metadata only (headers, URI, extensions, path/query params).
+/// Safe to use several per handler.
+pub trait FromRequestParts: Sized {
     type Error: std::fmt::Display;
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error>;
+
+    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error>;
+}
+
+/// Async, consumes the owned request (and potentially its body).
+/// At most one body-consuming extractor per handler.
+pub trait FromRequest: Sized {
+    type Error: std::fmt::Display + Send + Sync + 'static;
+
+    fn from_request(
+        req: HttpRequest,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Error>> + Send;
 }
 ```
 
-If `from_request` returns `Err`, the handler is not called and the error flows to the error handler chain.
+Pick by what you read:
 
-## Example: Bearer token extractor
+- **Headers, cookies, path params, query params, extensions** → `FromRequestParts`. It receives `&RequestPart` (a borrow of the request metadata) and never touches the body.
+- **The request body** → `FromRequest`. It receives the owned `HttpRequest` and may drain the body — which is why only one such extractor fits per handler.
+
+Every `FromRequestParts` type gets `FromRequest` for free via a blanket impl that discards the body, so both kinds mix freely in handler signatures.
+
+When an extractor returns `Err`, the handler never runs and the client receives an inline 400: `{"error": "Extraction failed", "details": "<your Error's Display output>"}`. Wrapping the parameter in `Option<T>` turns that failure into `None` instead.
+
+## Example: Bearer token
+
+A header extractor — metadata only, so `FromRequestParts`:
 
 ```rust
-use toni::extractors::FromRequest;
-use toni::HttpRequest;
+use std::fmt;
+use toni::FromRequestParts;
+use toni::http_helpers::RequestPart;
 
+#[derive(Debug, Clone)]
 pub struct BearerToken(pub String);
 
-impl FromRequest for BearerToken {
-    type Error = String;
+#[derive(Debug)]
+pub enum TokenError {
+    Missing,
+    InvalidFormat,
+}
 
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
-        req.headers
-            .get("authorization")
-            .ok_or_else(|| "Missing Authorization header".to_string())
-            .and_then(|header| {
-                header
-                    .strip_prefix("Bearer ")
-                    .ok_or_else(|| "Authorization header must start with 'Bearer '".to_string())
-                    .map(|token| BearerToken(token.to_string()))
-            })
+impl fmt::Display for TokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenError::Missing => write!(f, "Authorization header missing"),
+            TokenError::InvalidFormat => write!(f, "Authorization header must be 'Bearer <token>'"),
+        }
     }
 }
 
-// Usage
-#[get("/me")]
-fn get_me(&self, BearerToken(token): BearerToken) -> HttpResponse {
-    // token is guaranteed to be present and stripped of "Bearer " prefix
+impl FromRequestParts for BearerToken {
+    type Error = TokenError;
+
+    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or(TokenError::Missing)?;
+
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .ok_or(TokenError::InvalidFormat)?
+            .to_string();
+
+        Ok(BearerToken(token))
+    }
+}
+
+// Use it exactly like any built-in extractor
+#[get("/token")]
+fn get_token(&self, BearerToken(token): BearerToken) -> Body {
+    Body::json(serde_json::json!({ "token": token, "length": token.len() }))
 }
 ```
 
-## Example: Pagination extractor
+`parts.headers` is an `http::HeaderMap` — values are `HeaderValue`, so read them with `.get(name).and_then(|v| v.to_str().ok())`.
 
-Encapsulate common query param patterns:
+## Example: Client IP
+
+Same pattern, different headers — respects proxies via `X-Forwarded-For`:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct ClientIp(pub String);
+
+impl FromRequestParts for ClientIp {
+    type Error = String;
+
+    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
+        if let Some(forwarded) = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(ip) = forwarded.split(',').next() {
+                return Ok(ClientIp(ip.trim().to_string()));
+            }
+        }
+
+        if let Some(real_ip) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            return Ok(ClientIp(real_ip.to_string()));
+        }
+
+        Err("No IP address headers found".to_string())
+    }
+}
+```
+
+## Composing extractors
+
+A custom extractor can call other extractors. Built-ins like `Query` implement `FromRequestParts`, so a wrapper stays sync and body-free:
 
 ```rust
 use serde::Deserialize;
-use toni::extractors::{FromRequest, Query};
-use toni::HttpRequest;
+use toni::FromRequestParts;
+use toni::extractors::Query;
+use toni::http_helpers::RequestPart;
 
 pub struct Pagination {
     pub page: u32,
@@ -62,17 +142,17 @@ pub struct Pagination {
     pub offset: u32,
 }
 
-impl FromRequest for Pagination {
+impl FromRequestParts for Pagination {
     type Error = String;
 
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
+    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
         #[derive(Deserialize, Default)]
         struct RawPagination {
             page: Option<u32>,
             per_page: Option<u32>,
         }
 
-        let Query(raw) = Query::<RawPagination>::from_request(req)
+        let Query(raw) = Query::<RawPagination>::from_request_parts(parts)
             .map_err(|e| e.to_string())?;
 
         let page = raw.page.unwrap_or(1).max(1);
@@ -83,92 +163,74 @@ impl FromRequest for Pagination {
     }
 }
 
-// Clean handler signatures
-#[get("")]
-fn list(&self, pagination: Pagination) -> HttpResponse {
+#[get("/")]
+fn list(&self, pagination: Pagination) -> Body {
     let items = self.service.find_page(pagination.offset, pagination.per_page);
-    HttpResponse::ok().json(serde_json::json!({
+    Body::json(serde_json::json!({
         "items": items,
         "page": pagination.page,
         "per_page": pagination.per_page,
-    })).build()
+    }))
 }
 ```
 
-## Example: Request context extractor
+The same composition builds aggregate extractors — an `AuthContext` that combines a `CurrentUser`, `ClientIp`, and user agent into one parameter is three `from_request_parts` calls on the same `parts`.
 
-Extract data set by middleware (user session, request ID, etc.):
+## Body-consuming extractors
+
+Implement `FromRequest` when you need the body. Decompose the request with `into_parts()`, then collect or stream the body:
 
 ```rust
-use toni::extractors::FromRequest;
-use toni::HttpRequest;
+use toni::FromRequest;
+use toni::http_helpers::HttpRequest;
 
-pub struct RequestId(pub String);
+/// Deserializes the body as YAML (via the `serde_yaml` crate).
+pub struct Yaml<T>(pub T);
 
-impl FromRequest for RequestId {
+impl<T: serde::de::DeserializeOwned + Send> FromRequest for Yaml<T> {
     type Error = String;
 
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
-        // X-Request-ID is set by middleware upstream
-        let id = req.headers
-            .get("x-request-id")
-            .cloned()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Ok(RequestId(id))
+    async fn from_request(req: HttpRequest) -> Result<Self, Self::Error> {
+        let (_parts, body) = req.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| format!("Failed to read body: {e}"))?;
+        let value = serde_yaml::from_slice(&bytes).map_err(|e| format!("Invalid YAML: {e}"))?;
+        Ok(Yaml(value))
     }
 }
 ```
 
-## Combining extractors
+A `FromRequest` extractor that reads the body counts as the handler's single body consumer, exactly like `Json` or `Bytes`.
 
-Custom extractors can compose built-in ones:
+## Validation support
+
+`Validated<E>` works with any extractor that implements `ValidatableExtractor`, which exposes the inner value for the `validator` crate:
 
 ```rust
-pub struct AuthenticatedRequest {
-    pub user_id: u32,
-    pub body: serde_json::Value,
-}
+pub trait ValidatableExtractor {
+    type Inner: validator::Validate;
 
-impl FromRequest for AuthenticatedRequest {
-    type Error = String;
-
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
-        let user_id: u32 = req.headers
-            .get("x-user-id")
-            .ok_or("Unauthenticated")?
-            .parse()
-            .map_err(|_| "Invalid user ID")?;
-
-        let body = req.body_as_json::<serde_json::Value>()
-            .map_err(|e| e.to_string())?;
-
-        Ok(AuthenticatedRequest { user_id, body })
-    }
+    fn get_inner(&self) -> &Self::Inner;
 }
 ```
 
-## Validation in custom extractors
-
-Custom extractors can run validation inline. For `validator` crate integration, pair with `Validated<T>` by implementing `ValidatableExtractor`:
+Implement it on your extractor to opt in:
 
 ```rust
-use toni::extractors::{FromRequest, ValidatableExtractor};
+use toni::extractors::ValidatableExtractor;
 
-pub struct TypedBody<T>(pub T);
+impl<T: validator::Validate> ValidatableExtractor for Yaml<T> {
+    type Inner = T;
 
-impl<T: serde::de::DeserializeOwned> FromRequest for TypedBody<T> {
-    type Error = String;
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error> {
-        let body = req.body_as_json::<T>().map_err(|e| e.to_string())?;
-        Ok(TypedBody(body))
-    }
-}
-
-impl<T: validator::Validate + serde::de::DeserializeOwned> ValidatableExtractor for TypedBody<T> {
-    fn get_inner(&self) -> &dyn validator::Validate {
+    fn get_inner(&self) -> &Self::Inner {
         &self.0
     }
 }
 
-// Now Validated<TypedBody<MyDto>> works
+// Now this validates the deserialized value before the handler runs:
+// Validated(Yaml(dto)): Validated<Yaml<CreateUserDto>>
 ```
+
+On failure, `Validated` produces `ValidationError` (exported alongside `ValidatableExtractor` from `toni::extractors`): `ExtractionError` when the inner extractor failed, `ValidationFailed` carrying the `validator::ValidationErrors` when a rule was violated. Both surface as the standard 400 extraction response.

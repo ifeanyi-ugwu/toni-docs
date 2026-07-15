@@ -3,7 +3,7 @@ title: Config Module
 description: Type-safe configuration management with toni-config.
 ---
 
-The `toni-config` crate provides structured, type-safe configuration backed by environment variables. It integrates with the DI container so your configuration is injectable like any other service.
+The `toni-config` crate provides structured, type-safe configuration backed by environment variables. Configuration loads eagerly at startup and is injectable anywhere in the DI graph via `ConfigService<T>`.
 
 ## Installation
 
@@ -15,94 +15,148 @@ toni-config = "0.1"
 
 ## Defining a configuration struct
 
-Use the `Config` derive macro to create a typed configuration struct. Each field maps to an environment variable:
+Derive `Config` (plus `Clone`) on a struct with named fields. `#[env("VAR")]` names the environment variable; `#[default(expr)]` supplies a fallback:
 
 ```rust
 use toni_config::Config;
 
 #[derive(Config, Clone)]
 pub struct AppConfig {
-    #[env("PORT", default = "3000")]
-    pub port: u16,
+    #[env("APP_NAME")]
+    #[default("toni-app".to_string())]
+    pub name: String,
 
-    #[env("HOST", default = "127.0.0.1")]
-    pub host: String,
+    #[env("APP_PORT")]
+    #[default(3000u16)]
+    pub port: u16,
 
     #[env("DATABASE_URL")]
     pub database_url: String,
 
-    #[env("JWT_SECRET")]
-    pub jwt_secret: String,
-
-    #[env("LOG_LEVEL", default = "info")]
+    #[env("LOG_LEVEL")]
+    #[default("info".to_string())]
     pub log_level: String,
 }
 ```
 
-Fields with `default` are optional — if the environment variable isn't set, the default value is used. Fields without `default` are required; the application panics at startup if they're missing.
+`#[env]` and `#[default]` are separate attributes — there is no combined `#[env("VAR", default = ...)]` form. The default is a typed Rust expression, converted into the field type with `.into()`, so numeric fields need a typed literal (`3000u16`, not `"3000"`).
+
+Field behavior:
+
+- **With `#[default]`** — the default is used when the variable is unset. A set-but-unparseable value is an error, not a silent fallback.
+- **Without `#[default]`** — the variable is required; loading fails with `ConfigError::MissingEnvVar` if it's missing.
+- **`Option<T>`** — optional; `None` when the variable is unset. An unparseable value also becomes `None` rather than an error.
+
+Without `#[env]`, the field name is converted to SCREAMING_SNAKE_CASE (`log_level` reads `LOG_LEVEL`).
+
+## Loading
+
+`ConfigModule<T>` loads (and validates) the configuration when constructed:
+
+```rust
+use toni_config::{ConfigModule, Environment};
+
+// From the process environment
+let module = ConfigModule::<AppConfig>::from_env()?;
+
+// From a .env file (loaded via dotenv, then read from the environment)
+let module = ConfigModule::<AppConfig>::from_file(".env")?;
+
+// From an environment-specific file: .env.development, .env.production, .env.test
+let module = ConfigModule::<AppConfig>::from_env_file(Environment::current())?;
+
+// Fail-fast variant: logs the error and exits the process on failure
+let module = ConfigModule::<AppConfig>::new();
+```
+
+`from_env`, `from_file`, and `from_env_file` return `Result<ConfigModule<T>, ConfigError>`. `new()` terminates the process on a load or validation failure, so a bad configuration never reaches request handling.
 
 ## Registering and injecting
 
-Register configuration as a provider using `provider_value!` (pre-loaded) or `provider_factory!` (loaded on demand):
+Import the module in `imports:`. It registers a `ConfigService<T>` provider, injectable by type:
 
 ```rust
-use toni_config::Config;
+use serde_json::json;
+use toni::{controller, get, injectable, module, routes, Body};
+use toni_config::{Config, ConfigModule, ConfigService};
+
+#[injectable]
+pub struct AppService {
+    #[inject]
+    config: ConfigService<AppConfig>,
+}
+
+impl AppService {
+    pub fn get_config(&self) -> AppConfig {
+        self.config.get()
+    }
+}
+
+#[controller("/config")]
+pub struct ConfigController {
+    #[inject]
+    service: AppService,
+}
+
+#[routes]
+impl ConfigController {
+    #[get("/")]
+    fn get_config(&self) -> Body {
+        let cfg = self.service.get_config();
+        Body::json(json!({
+            "name": cfg.name,
+            "port": cfg.port,
+        }))
+    }
+}
 
 #[module(
-    providers: [
-        provider_value!("Config", AppConfig::load().expect("Invalid configuration")),
-    ],
-    exports: [
-        "Config",
-    ],
+    imports: [ConfigModule::<AppConfig>::from_env().unwrap()],
+    controllers: [ConfigController],
+    providers: [AppService],
 )]
-pub struct ConfigModule;
+impl AppModule {}
 ```
 
-Inject by token in services:
+`ConfigService<T>` exposes two accessors:
 
-```rust
-// Services inject the config by its token
-// (custom token injection syntax — see Provider Patterns)
-```
+- `get_ref() -> &T` — borrows the loaded config; prefer this when a clone isn't needed.
+- `get() -> T` — returns a clone; the target type must be inferable (annotate the binding or rely on the function's return type).
 
 ## Nested configuration
 
-Group related settings into nested structs:
+Group related settings into nested structs with `#[nested]`. The nested struct also derives `Config`, and its fields load from their own environment variables:
 
 ```rust
 #[derive(Config, Clone)]
 pub struct DatabaseConfig {
-    #[env("DATABASE_URL")]
-    pub url: String,
+    #[env("DB_HOST")]
+    #[default("localhost".to_string())]
+    pub host: String,
 
-    #[env("DATABASE_POOL_SIZE", default = "10")]
-    pub pool_size: u32,
-
-    #[env("DATABASE_TIMEOUT_MS", default = "5000")]
-    pub timeout_ms: u64,
+    #[env("DB_PORT")]
+    #[default(5432u16)]
+    pub port: u16,
 }
 
 #[derive(Config, Clone)]
 pub struct AppConfig {
-    #[env("PORT", default = "3000")]
+    #[env("APP_PORT")]
+    #[default(3000u16)]
     pub port: u16,
 
     #[nested]
     pub database: DatabaseConfig,
-
-    #[nested]
-    pub auth: AuthConfig,
 }
 ```
 
 ## Validation
 
-Enable the `validation` feature to run `validator` crate validation on your config at startup:
+Add the `validator` crate, derive `Validate` alongside `Config`, and mark fields with `#[validate(...)]`. Validation runs inside the `ConfigModule` constructors, after parsing and before the application starts:
 
 ```toml
 [dependencies]
-toni-config = { version = "0.1", features = ["validation"] }
+toni-config = "0.1"
 validator = { version = "0.20", features = ["derive"] }
 ```
 
@@ -110,37 +164,24 @@ validator = { version = "0.20", features = ["derive"] }
 use toni_config::Config;
 use validator::Validate;
 
-#[derive(Config, Clone, Validate)]
+#[derive(Config, Validate, Clone)]
 pub struct AppConfig {
-    #[env("PORT", default = "3000")]
+    #[env("APP_PORT")]
+    #[default(8080u16)]
     #[validate(range(min = 1024, max = 65535))]
     pub port: u16,
-
-    #[env("DATABASE_URL")]
-    #[validate(url)]
-    pub database_url: String,
-
-    #[env("JWT_SECRET")]
-    #[validate(length(min = 32))]
-    pub jwt_secret: String,
 }
-
-// Load with validation
-let config = AppConfig::load_and_validate()?;
 ```
 
-If any constraint fails, the error is reported at startup before the server begins listening.
+The presence of `#[validate]` attributes is the opt-in — there is no Cargo feature. A config without them never references the `validator` crate. See [Configuration Validation](/docs/configuration/validation) for details.
 
-## Loading configuration
+## Error handling
 
-`AppConfig::load()` reads environment variables from the process environment. To also load from a `.env` file, use the dotenv feature:
+Loading failures surface as `ConfigError`:
 
-```toml
-[dependencies]
-toni-config = { version = "0.1", features = ["dotenv"] }
-```
-
-```rust
-// .env file is loaded automatically when AppConfig::load() is called
-let config = AppConfig::load()?;
-```
+| Variant | Cause |
+| --- | --- |
+| `MissingEnvVar(String)` | A required variable (no default, not `Option`) is unset |
+| `ParseError { key, message }` | The variable's value doesn't parse into the field type |
+| `ValidationError(String)` | A `#[validate]` constraint failed |
+| `DotenvError(...)` | `from_file`/`from_env_file` couldn't load the file |

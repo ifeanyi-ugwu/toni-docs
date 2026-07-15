@@ -18,7 +18,7 @@ Register after `ToniFactory::create`:
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
 app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
-app.start().await;
+app.start().await.unwrap();
 ```
 
 ---
@@ -42,6 +42,21 @@ provider_value!(
     RpcClient::new(NatsClientTransport::new("nats://127.0.0.1:4222"))
 )
 ```
+
+`close()` (via `RpcClient::close`) flushes pending publishes before returning — call it at shutdown so in-flight data is not lost.
+
+### Per-call metadata
+
+Attach metadata (auth tokens, trace ids, tenant) via the request builder:
+
+```rust
+client.request("inventory.restock")
+    .metadata("trace-id", trace_id)
+    .send(RpcData::json(payload))
+    .await?;
+```
+
+Metadata is sent as NATS headers. On the server side, inbound NATS headers surface as handler metadata (`ctx.metadata()` / `ctx.get_metadata(key)`).
 
 ---
 
@@ -70,14 +85,24 @@ NatsAdapter::new(vec!["nats://node1:4222".to_string()])
 
 ## Response envelope
 
-The NATS adapter publishes JSON to the reply-to inbox in the same format as the TCP adapter:
+The NATS adapter publishes JSON to the reply-to inbox in the same format as the TCP adapter.
+
+**Success:**
 
 ```json
 {"response": {...}}
 ```
 
+**Domain errors** — a handler returning a type implementing `toni::Error` produces a wire-success frame carrying the canonical error envelope, not a wire error:
+
 ```json
-{"err": {"message": "...", "status": "Internal"}}
+{"response": {"status": "error", "kind": "NotFound", "message": "...", "details": {...}}}
 ```
 
-`NatsClientTransport` parses this envelope and returns `Ok(RpcData)` or `Err(RpcClientError::Remote { .. })` accordingly. If the payload is not a recognized envelope, it is returned as `RpcData::Binary`.
+**Framework errors** — only `PatternNotFound`, `Forbidden`, and `Internal` (including handler panics) produce a wire-error frame, with lowercase statuses `not_found`, `forbidden`, `error`:
+
+```json
+{"err": {"message": "...", "status": "not_found"}}
+```
+
+`NatsClientTransport` returns `Ok(RpcData)` for `response` frames and `Err(RpcClientError::Remote { message, status })` for `err` frames. JSON without either key is returned as-is; non-JSON payloads come back as `RpcData::Binary`.

@@ -3,69 +3,94 @@ title: Guards
 description: Guards run before route handlers and decide whether the request is authorized to proceed.
 ---
 
-A guard is a struct that implements the `Guard` trait. It has a single method, `can_activate`, which returns `true` to allow the request through or `false` to block it. Guards run after middleware, after routing, and before interceptors and the route handler.
+A guard is a type that implements the `Guard<C>` trait. It has a single method, `can_activate`, which returns `true` to allow the request through or `false` to block it. Guards run after middleware, before interceptors, pipes, and the handler.
+
+`C` is the per-request context type — `HttpContext`, `RpcContext`, `WsContext`, or `GrpcContext`. A guard implemented for `Guard<HttpContext>` runs on HTTP routes; the same struct can implement the trait for other contexts to run on those transports too.
 
 <Bridge>
-Guards in Toni are the direct equivalent of NestJS's `CanActivate` guards. `can_activate` is **async** — you can perform JWT verification, database lookups, or any async work directly inside the guard. Returning `true` allows the request; `false` blocks it with a 403.
+Guards in Toni are the equivalent of NestJS's `CanActivate` guards. `can_activate` is **async** — JWT verification, database lookups, or any async work runs directly inside the guard. Returning `true` allows the request; `false` blocks it with a 403. One difference: Toni guards cannot throw. To send anything other than the default 403, register a `#[catch(GuardRejection)]` error handler (see [Error Handling](/docs/request-lifecycle/error-handling)).
 </Bridge>
 
 ## The Guard trait
 
 ```rust
+use toni::async_trait;
+use toni::context::HandlerContext;
+
 #[async_trait]
-pub trait Guard: Send + Sync {
-    async fn can_activate(&self, context: &Context) -> bool;
+pub trait Guard<C: ?Sized + HandlerContext>: Send + Sync {
+    async fn can_activate(&self, context: &C) -> bool;
 }
 ```
 
-`Context` gives you access to the request, route metadata, and other request-scoped information.
+Import it from `toni::traits_helpers::Guard`. The context is a shared reference — guards read the request, route metadata, and extensions, but cannot modify the response.
 
 ## A simple authentication guard
 
 ```rust
-use async_trait::async_trait;
-use toni::{Guard, Context};
+use toni::async_trait;
+use toni::context::HttpContext;
+use toni::traits_helpers::Guard;
 
 pub struct AuthGuard;
 
 #[async_trait]
-impl Guard for AuthGuard {
-    async fn can_activate(&self, context: &Context) -> bool {
-        let req = context.get_request();
-        req.headers.get("authorization")
+impl Guard<HttpContext> for AuthGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        ctx.request()
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))
-            .map(|token| !token.is_empty())
-            .unwrap_or(false)
+            .map_or(false, |t| !t.is_empty())
     }
 }
 ```
 
+`ctx.request()` returns a `&RequestPart` (an alias for `http::request::Parts`) with `method`, `uri`, `headers`, and `extensions` fields.
+
 ## Role-based guard with route metadata
 
-Guards can read metadata attached to routes with `#[set_metadata]`:
+Guards can read metadata attached to routes with `#[set_metadata]`. Metadata is any `Clone + Send + Sync + 'static` type, retrieved by type via `route_metadata()`:
 
 ```rust
-use async_trait::async_trait;
-use toni::{Guard, Context};
+use toni::async_trait;
+use toni::context::{HandlerContext, HttpContext};
+use toni::traits_helpers::Guard;
 
-pub struct Role(pub Vec<&'static str>);
+/// Required roles to access a route.
+#[derive(Clone)]
+pub struct Roles(pub &'static [&'static str]);
 
-pub struct RoleGuard;
+/// Marks a route as publicly accessible.
+#[derive(Clone)]
+pub struct Public;
+
+pub struct RolesGuard;
 
 #[async_trait]
-impl Guard for RoleGuard {
-    async fn can_activate(&self, context: &Context) -> bool {
-        let required = match context.get_metadata::<Role>() {
-            Some(role) => &role.0,
-            None => return true,  // no role metadata = public route
+impl Guard<HttpContext> for RolesGuard {
+    async fn can_activate(&self, context: &HttpContext) -> bool {
+        let Some(metadata) = context.route_metadata() else {
+            return true;
         };
 
-        let req = context.get_request();
-        let user_role = req.headers.get("x-user-role")
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        if metadata.get::<Public>().is_some() {
+            return true;
+        }
 
-        required.iter().any(|r| *r == user_role)
+        let Some(Roles(required)) = metadata.get::<Roles>() else {
+            return true; // no role metadata = open route
+        };
+
+        let user_role = context
+            .request()
+            .headers
+            .get("x-user-role")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("guest");
+
+        required.iter().any(|&r| r == user_role)
     }
 }
 ```
@@ -73,41 +98,57 @@ impl Guard for RoleGuard {
 Attach metadata to routes:
 
 ```rust
-#[controller("/admin", pub struct AdminController { /* ... */ })]
-impl AdminController {
-    #[get("/dashboard")]
-    #[set_metadata(Role(vec!["admin"]))]
-    fn dashboard(&self) -> HttpResponse { /* ... */ }
+#[controller("/api")]
+pub struct ApiController {}
 
-    #[get("/reports")]
-    #[set_metadata(Role(vec!["admin", "analyst"]))]
-    fn reports(&self) -> HttpResponse { /* ... */ }
+#[routes]
+#[use_guards(RolesGuard {})]
+impl ApiController {
+    #[set_metadata(Public)]
+    #[get("/health")]
+    fn health(&self) -> Body {
+        Body::json(serde_json::json!({ "status": "ok" }))
+    }
+
+    #[set_metadata(Roles(&["admin"]))]
+    #[get("/admin/stats")]
+    fn admin_stats(&self) -> Body {
+        Body::json(serde_json::json!({ "total_users": 1000 }))
+    }
 }
 ```
 
 ## DI-aware guards
 
-Guards that need services (token validation, database lookups) should be implemented as injectables:
+Guards that need services are declared as `#[injectable]` providers and implement `Guard<C>` — no marker attribute. The framework detects the role from the trait impl:
 
 ```rust
-use async_trait::async_trait;
-use toni::{injectable, Guard, Context};
+use toni::async_trait;
+use toni::context::HttpContext;
+use toni::injectable;
+use toni::traits_helpers::Guard;
 
-#[injectable(pub struct JwtGuard {
+#[injectable]
+pub struct JwtGuard {
     #[inject]
     auth_service: AuthService,
-})]
-#[guard]
+}
+
 impl JwtGuard {
-    pub fn new(auth_service: AuthService) -> Self { Self { auth_service } }
+    #[new]
+    pub fn new(auth_service: AuthService) -> Self {
+        Self { auth_service }
+    }
 }
 
 #[async_trait]
-impl Guard for JwtGuard {
-    async fn can_activate(&self, context: &Context) -> bool {
-        let req = context.get_request();
-        let token = req.headers
+impl Guard<HttpContext> for JwtGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        let token = ctx
+            .request()
+            .headers
             .get("authorization")
+            .and_then(|v| v.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "));
 
         match token {
@@ -118,7 +159,7 @@ impl Guard for JwtGuard {
 }
 ```
 
-Register in the module's `providers`:
+Register in the module's `providers` and apply by bare type name — the instance is resolved from the DI container:
 
 ```rust
 #[module(
@@ -128,58 +169,149 @@ Register in the module's `providers`:
 pub struct AppModule;
 ```
 
-## Applying guards
-
-### Global (every route)
-
 ```rust
-let mut factory = ToniFactory::new();
-factory.use_global_guards(Arc::new(AuthGuard));
-let mut app = factory.create_with(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+#[routes]
+#[use_guards(JwtGuard)]   // bare name → resolved from DI
+impl ProtectedController { /* ... */ }
 ```
+
+Guards without dependencies can skip DI entirely and be applied as instantiation expressions: `#[use_guards(AuthGuard {})]` or `#[use_guards(RateLimitGuard::new(100))]`.
+
+## Applying guards
 
 ### Controller level
 
+`#[use_guards]` goes on the `#[routes]` impl block, and applies to every handler in it:
+
 ```rust
-#[controller("/admin", pub struct AdminController { /* ... */ })]
-#[use_guards(AuthGuard {}, RoleGuard {})]
+#[controller("/admin")]
+pub struct AdminController {}
+
+#[routes]
+#[use_guards(AuthGuard {}, RolesGuard {})]
 impl AdminController {
-    // all routes in this controller require auth + role
+    // all routes here require auth + role
 }
 ```
 
 ### Method level
 
 ```rust
-#[controller("/posts", pub struct PostsController { /* ... */ })]
+#[controller("/posts")]
+pub struct PostsController {}
+
+#[routes]
 impl PostsController {
     #[get("")]
-    fn find_all(&self) -> HttpResponse { /* public */ }
+    fn find_all(&self) -> Body { /* public */ }
 
-    #[delete("/:id")]
     #[use_guards(AuthGuard {})]   // only this route requires auth
-    fn remove(&self) -> HttpResponse { /* protected */ }
+    #[delete("/:id")]
+    fn remove(&self) -> Body { /* protected */ }
 }
 ```
 
-When multiple guards are applied, they run in the order listed. If any returns `false`, the request is blocked and the remaining guards are not called.
+### Global (per transport)
 
-## What happens when a guard blocks
-
-When `can_activate` returns `false`, Toni responds with `403 Forbidden`. To return a different status or body, throw an `HttpError` from within the guard instead:
+Global registration is per-transport on `ToniFactory`:
 
 ```rust
+use std::sync::Arc;
+use toni::ToniFactory;
+
+let mut factory = ToniFactory::new();
+factory.use_global_http_guards(Arc::new(AuthGuard));
+
+let mut app = factory.create_with(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1")?;
+app.start().await?;
+```
+
+`use_global_rpc_guards` and `use_global_ws_guards` are the RPC and WebSocket counterparts; each takes an `Arc<dyn Guard<C>>` for the matching context.
+
+Guards run in scope order — global, then controller, then method — and within each scope in the order listed. The first `false` stops the chain; remaining guards and the handler are skipped.
+
+## Guards on other transports
+
+The same `#[use_guards]` attribute works on `#[patterns]` impls (RPC controllers) and `#[subscriptions]` impls (WebSocket gateways), and on `#[grpc_methods]` impls for gRPC services. A single struct can serve several transports by implementing `Guard<C>` once per context:
+
+```rust
+#[injectable]
+pub struct UniversalAuthGuard {}
+impl UniversalAuthGuard {}
+
 #[async_trait]
-impl Guard for StrictAuthGuard {
-    async fn can_activate(&self, context: &Context) -> bool {
-        let req = context.get_request();
-        if req.headers.get("authorization").is_none() {
-            // Returning false yields a 403; throw HttpError for a custom status
-        }
-        false
+impl Guard<HttpContext> for UniversalAuthGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        ctx.request()
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map_or(false, |t| t == "valid-secret")
+    }
+}
+
+#[async_trait]
+impl Guard<RpcContext> for UniversalAuthGuard {
+    async fn can_activate(&self, ctx: &RpcContext) -> bool {
+        ctx.data()
+            .as_json()
+            .and_then(|v| v.get("auth").and_then(|a| a.as_str()))
+            .map_or(false, |t| t == "valid-secret")
+    }
+}
+
+#[async_trait]
+impl Guard<WsContext> for UniversalAuthGuard {
+    async fn can_activate(&self, ctx: &WsContext) -> bool {
+        ctx.client()
+            .handshake
+            .query
+            .get("token")
+            .map_or(false, |t| t == "valid-secret")
     }
 }
 ```
 
-For custom error responses from guards, pair them with an error handler that intercepts the 403 and shapes it.
+Each `impl` is the registration for that transport. Attaching a guard to a transport whose context it doesn't implement is a type error.
+
+## What happens when a guard blocks
+
+Guards cannot throw or set a response — `can_activate` returns only `bool`. When it returns `false`, the framework emits a `GuardRejection` event, which renders as `403 Forbidden` with the canonical envelope:
+
+```json
+{ "statusCode": 403, "message": "Forbidden", "error": "Forbidden" }
+```
+
+A panic inside a guard is caught and treated as a hard rejection — the request does not tear down.
+
+To send a different status or body, register an error handler for the event with `#[catch(GuardRejection)]`:
+
+```rust
+use serde_json::json;
+use toni::{catch, Error};
+use toni::context::HttpContext;
+use toni::HttpResponse;
+
+#[catch(toni::errors::GuardRejection)]
+async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+    HttpResponse::builder()
+        .status(toni::errors::http_status(err.kind()))
+        .json(json!({
+            "error": "auth_required",
+            "hint": "Send `x-auth-token: <token>`",
+            "detail": err.message(),
+        }))
+        .build()
+}
+```
+
+```rust
+#[routes]
+#[use_guards(AuthGuard {})]
+#[use_error_handlers(auth_failure)]
+impl AdminController { /* ... */ }
+```
+
+`GuardRejection` carries `guard_index` (the position of the rejecting guard in the resolved chain) and an optional `reason`. See [Error Handling](/docs/request-lifecycle/error-handling) for the full error pipeline.

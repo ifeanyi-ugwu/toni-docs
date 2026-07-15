@@ -1,0 +1,82 @@
+---
+title: RabbitMQ Adapter
+description: AMQP queues as patterns — native reply_to/correlation_id request-response with direct reply-to clients.
+---
+
+`toni-rabbitmq` maps each RPC pattern to an AMQP queue. AMQP carries request-response natively — a message names a `reply_to` queue and a `correlation_id` — so there is no envelope: the message body is the raw `RpcData` bytes and addressing lives in the message properties. Built on `lapin`; a RabbitMQ broker must be reachable from both sides.
+
+## Server setup
+
+Add the dependencies:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-rabbitmq = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_rabbitmq::RabbitMqAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(RabbitMqAdapter::new("amqp://127.0.0.1:5672/%2f"))?;
+    app.start().await?;
+    Ok(())
+}
+```
+
+The initial connection retries for about 10 seconds before panicking. After startup, lapin's auto-recovery reconnects a dropped connection and replays topology — queues are re-declared and consumers resume without manual re-setup.
+
+## How patterns map to queues
+
+Each pattern declares a queue named after the pattern string, reachable through the default exchange (publish to exchange `""` with the queue name as routing key). The adapter consumes each queue and acks every delivery after the handler runs.
+
+Multiple server instances consuming the same queues share the work — AMQP distributes deliveries among a queue's consumers.
+
+## Wire behavior
+
+- **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
+- **Request-response** — a delivery carrying `reply_to` gets the framed response published to that queue with the same `correlation_id`. A `reply_to` addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
+- **Fire-and-forget** — no `reply_to`; the delivery is acked with nothing sent back.
+- **Metadata** — per-call metadata rides in the AMQP headers table. Inbound, string headers pass through verbatim and scalar numbers/booleans are stringified; structured values (arrays, nested tables) are skipped.
+
+Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+## Client transport
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_rabbitmq::RabbitMqClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(RabbitMqClientTransport::new("amqp://127.0.0.1:5672/%2f"))
+)
+```
+
+Connection is lazy on first use. Request-response uses RabbitMQ **direct reply-to**: a single no-ack consumer on the `amq.rabbitmq.reply-to` pseudo-queue receives every reply, and correlation ids route each one back to the waiting call — no real reply queue is declared. The client connection also enables lapin auto-recovery, so the reply consumer is re-established after a drop.
+
+### Custom timeout
+
+Default request-response timeout is 5 seconds:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    RabbitMqClientTransport::new("amqp://127.0.0.1:5672/%2f")
+        .with_timeout(Duration::from_secs(10))
+)
+```
+
+## Operational limits
+
+- Deliveries are acked after the handler completes regardless of outcome — a handler error does not requeue the message.
+- Queues are declared with default options — non-durable, no TTL, no dead-lettering. The adapter exposes no queue arguments; a broker rejects re-declaration of an existing queue whose arguments differ.
+- No drain timeout or in-flight cap — each delivery spawns an unbounded task; shutdown closes the connection without waiting for in-flight handlers.
+- No per-request tracing span; `BoundAdapters.rpc` is `None`.

@@ -8,8 +8,8 @@ description: Containerizing a Toni application with Docker and docker-compose.
 Multi-stage builds keep the final image small — the builder stage compiles everything, the runtime stage contains only the binary:
 
 ```dockerfile
-# Builder stage
-FROM rust:1.82-alpine AS builder
+# Builder stage — toni uses edition 2024, which needs Rust 1.85+
+FROM rust:1.85-alpine AS builder
 
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev
 
@@ -95,21 +95,29 @@ docker compose up -d
 docker compose logs -f api
 ```
 
+`docker stop` sends SIGTERM and kills the container after a timeout. Toni installs no signal handlers, so wire SIGTERM to the application's shutdown handle yourself — see [Graceful shutdown](/docs/deployment/production#graceful-shutdown). Without it, in-flight requests are dropped and shutdown hooks never run.
+
 ## Health check endpoint
 
 Add a health check route that returns 200 when the application is ready:
 
 ```rust
-#[controller("/", pub struct HealthController {})]
-impl HealthController {
-    pub fn new() -> Self { Self {} }
+use serde_json::json;
+use toni::*;
 
-    #[get("health")]
-    fn health(&self) -> HttpResponse {
-        HttpResponse::ok().json(serde_json::json!({ "status": "ok" })).build()
+#[controller("/health")]
+pub struct HealthController;
+
+#[routes]
+impl HealthController {
+    #[get("/")]
+    fn health(&self) -> Body {
+        Body::json(json!({ "status": "ok" }))
     }
 }
 ```
+
+For real dependency checks (database pings, memory thresholds) behind liveness/readiness probes, see [Health Checks](/docs/techniques/health).
 
 Configure it in the Dockerfile:
 

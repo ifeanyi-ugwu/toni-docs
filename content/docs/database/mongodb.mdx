@@ -57,14 +57,13 @@ pub struct User {
     pub email: String,
 }
 
-#[injectable(pub struct UsersService {
+#[injectable]
+pub struct UsersService {
+    #[inject]
     db: Database,
-})]
-impl UsersService {
-    pub fn new(db: Database) -> Self {
-        Self { db }
-    }
+}
 
+impl UsersService {
     fn collection(&self) -> Collection<User> {
         self.db.collection("users")
     }
@@ -102,6 +101,10 @@ pub struct AppModule;
 ## Shutdown
 
 `MongoModule` calls `client.shutdown().await` when `app.close()` is called, allowing in-flight operations to complete before the connection pool is drained.
+
+## Health checks
+
+Enable the `health` feature to have `for_root` also register a `MongoHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
 
 ## API reference
 

@@ -1,59 +1,72 @@
 ---
 title: Project Structure
-description: How to organize a Toni application as it grows.
+description: What the CLI generates and how to organize a Toni application as it grows.
 ---
 
-Toni doesn't enforce a specific file layout, but the module system naturally guides you toward a feature-based structure. Here's a recommended layout for a medium-to-large application:
+## What `toni new` generates
+
+```
+my_app/
+├── Cargo.toml                 # toni, toni-axum, tokio
+└── src/
+    ├── main.rs                # entry point — ToniFactory + adapter
+    └── app/
+        ├── mod.rs             # #[path] module declarations
+        ├── app.module.rs      # root module (AppModule)
+        ├── app.controller.rs  # AppController — CRUD routes at /app
+        └── app.service.rs     # AppService — business logic
+```
+
+The dotted file names (`app.module.rs`, NestJS-style) aren't valid Rust module names on their own, so `mod.rs` maps each file to a module with a `#[path]` attribute:
+
+```rust
+// src/app/mod.rs
+#[path = "app.module.rs"]
+pub mod app_module;
+
+#[path = "app.controller.rs"]
+pub mod app_controller;
+
+#[path = "app.service.rs"]
+pub mod app_service;
+```
+
+`main.rs` then imports the root module as `app::app_module::AppModule`.
+
+## Adding features with `generate resource`
+
+From the project root, `toni generate resource users` creates a feature directory and wires it in:
 
 ```
 src/
-├── main.rs                    # Entry point — ToniFactory::create
-├── app_module.rs              # Root module that imports feature modules
-│
-├── users/
-│   ├── mod.rs                 # re-exports
-│   ├── users_module.rs        # #[module] definition
-│   ├── users_controller.rs    # #[controller] with route handlers
-│   ├── users_service.rs       # #[injectable] business logic
-│   └── dto/
-│       ├── create_user.rs     # CreateUserDto
-│       └── update_user.rs     # UpdateUserDto
-│
-├── auth/
-│   ├── mod.rs
-│   ├── auth_module.rs
-│   ├── auth_controller.rs
-│   ├── auth_service.rs
-│   └── guards/
-│       └── jwt_guard.rs       # #[guard] / Guard impl
-│
-├── database/
-│   ├── mod.rs
-│   ├── database_module.rs     # Global module exporting DatabaseService
-│   └── database_service.rs
-│
-└── common/
-    ├── filters/
-    │   └── http_exception_filter.rs
-    ├── interceptors/
-    │   └── logging_interceptor.rs
-    └── pipes/
-        └── validation_pipe.rs
+├── main.rs
+└── app/
+    ├── mod.rs                 # gains: #[path = "users/mod.rs"] pub mod users;
+    ├── app.module.rs          # gains: UsersModule in imports
+    ├── app.controller.rs
+    ├── app.service.rs
+    └── users/
+        ├── mod.rs             # #[path] declarations for the three files below
+        ├── users.module.rs    # UsersModule
+        ├── users.controller.rs # UsersController — CRUD routes at /users
+        └── users.service.rs   # UsersService
 ```
+
+No manual wiring needed — the command edits `src/app/mod.rs` and adds the new module to the `imports:` list in `app.module.rs`. See [CLI Commands](/docs/cli/commands) for the generated file contents.
 
 ## One feature per module
 
 The key organizing principle: **each feature is a module**. A module owns its controllers and services. What it needs from other modules it declares as `imports`. What it offers to other modules it declares in `exports`.
 
 ```rust
-// database/database_module.rs
+// database module
 #[module(
     providers: [DatabaseService],
     exports: [DatabaseService],   // other modules can inject this
 )]
 pub struct DatabaseModule;
 
-// users/users_module.rs
+// users module
 #[module(
     imports: [DatabaseModule],    // now DatabaseService is available here
     controllers: [UsersController],
@@ -64,10 +77,9 @@ pub struct UsersModule;
 
 ## Root module
 
-The root module is the entry point for the module graph. It typically only imports feature modules — it doesn't own controllers or services itself.
+The root module is the entry point for the module graph. In a larger application it typically only imports feature modules — it doesn't own controllers or services itself.
 
 ```rust
-// app_module.rs
 #[module(
     imports: [
         DatabaseModule,
@@ -79,55 +91,45 @@ The root module is the entry point for the module graph. It typically only impor
 pub struct AppModule;
 ```
 
-## Growing the structure
-
-As the application grows, feature modules can themselves become module groups:
-
-```
-src/
-├── orders/
-│   ├── orders_module.rs        # imports: [InventoryModule, PaymentsModule]
-│   ├── orders_controller.rs
-│   ├── orders_service.rs
-│   ├── inventory/
-│   │   ├── inventory_module.rs
-│   │   └── inventory_service.rs
-│   └── payments/
-│       ├── payments_module.rs
-│       └── payments_service.rs
-```
-
 <Bridge>
-This maps directly to the NestJS convention of `feature/feature.module.ts`, `feature/feature.controller.ts`, `feature/feature.service.ts`. Toni has no mandated file naming convention, but matching Rust's snake_case module naming with the feature name keeps things predictable.
+This maps directly to the NestJS convention of `feature/feature.module.ts`, `feature/feature.controller.ts`, `feature/feature.service.ts` — the CLI reproduces it with `#[path]` attributes. Toni has no mandated file naming convention; hand-rolled layouts with plain snake_case file names (`users_module.rs`) work without the `#[path]` indirection.
 
-One difference: in NestJS, `forRoot()` dynamic modules handle global singleton configuration. In Toni, you declare a module global by including it in `imports` at the root level and marking its exports. The `toni-config` crate handles environment config separately.
+Dynamic module configuration also carries over: integration crates expose `for_root` constructors returning a `DynamicModule` (for example `RedisModule::for_root(url)` listed under `imports:`), the counterpart to NestJS `forRoot()`.
 </Bridge>
 
 ## Shared/common code
 
-Infrastructure that spans features — interceptors, guards, pipes, common types — belongs in a shared location (`common/` or `shared/`). These don't need their own modules; they're just Rust structs implementing the relevant trait, instantiated where needed or provided through a shared module.
+Infrastructure that spans features — guards, interceptors, pipes, common types — belongs in a shared location (`common/` or `shared/`). Enhancers are plain structs implementing the relevant trait; the traits are generic over the transport context (`HttpContext`, `RpcContext`, `WsContext`).
 
 ```rust
-// common/interceptors/logging_interceptor.rs
-use toni::{async_trait, Interceptor, Context};
+// common/logging_interceptor.rs
+use toni::async_trait;
+use toni::context::HttpContext;
+use toni::traits_helpers::{Interceptor, InterceptorNext};
 
 pub struct LoggingInterceptor;
 
 #[async_trait]
-impl Interceptor for LoggingInterceptor {
-    async fn intercept(&self, ctx: &mut Context, next: Box<dyn InterceptorNext>) {
-        println!("→ {} {}", ctx.method(), ctx.path());
+impl Interceptor<HttpContext> for LoggingInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+        let req = ctx.request();
+        println!("-> {} {}", req.method, req.uri);
         next.run(ctx).await;
-        println!("← {}", ctx.status());
     }
 }
 ```
 
-Register globally at startup:
+Register globally on the factory, before creating the application:
 
 ```rust
+use std::sync::Arc;
+
 let mut factory = ToniFactory::new();
-factory.use_global_interceptors(Arc::new(LoggingInterceptor));
+factory.use_global_http_interceptors(Arc::new(LoggingInterceptor));
+
 let mut app = factory.create_with(AppModule).await;
 app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.start().await.unwrap();
 ```
+
+Global registration is per-transport: `use_global_http_*`, `use_global_rpc_*`, and `use_global_ws_*` variants exist for guards, interceptors, and pipes, plus transport-agnostic `use_global_middleware`.

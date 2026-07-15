@@ -3,169 +3,192 @@ title: Interceptors
 description: Interceptors wrap route handlers — they run before and after, and can transform or short-circuit.
 ---
 
-An interceptor wraps a route handler. It runs before the handler (and can short-circuit, skipping the handler entirely), then runs again after the handler with access to the response. This makes interceptors ideal for logging, caching, response transformation, and timing.
+An interceptor wraps a route handler. Code before `next.run(context).await` runs before the handler; code after it runs once the handler (and any inner interceptors) has set the response. Skipping the `next.run` call short-circuits the chain entirely — useful for caching, circuit breakers, and canned responses.
+
+Like guards and pipes, interceptors are generic over the per-request context: `Interceptor<HttpContext>` runs on HTTP routes, `Interceptor<RpcContext>` on RPC patterns, `Interceptor<WsContext>` on WebSocket messages, `Interceptor<GrpcContext>` on gRPC methods.
 
 <Bridge>
-Toni interceptors work the same as NestJS's `NestInterceptor`. The `intercept` method receives a `context` and a `next` — calling `next.run(context)` proceeds to the handler. You can add logic before and after that call, inspect or modify the response, or skip the call entirely to return a cached result.
+Toni interceptors map to NestJS's `NestInterceptor`. `intercept` receives the context and a `next`; calling `next.run(context).await` proceeds to the handler. Instead of RxJS operators on an observable, code placed after the `next.run` call is the response side.
 </Bridge>
 
 ## The Interceptor trait
 
 ```rust
 use toni::async_trait;
+use toni::context::HandlerContext;
 
 #[async_trait]
-pub trait InterceptorNext: Send {
-    async fn run(self: Box<Self>, context: &mut Context);
+pub trait InterceptorNext<C: ?Sized + HandlerContext>: Send {
+    async fn run(self: Box<Self>, context: &mut C);
 }
 
 #[async_trait]
-pub trait Interceptor: Send + Sync {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>);
+pub trait Interceptor<C: ?Sized + HandlerContext>: Send + Sync {
+    async fn intercept(&self, context: &mut C, next: Box<dyn InterceptorNext<C>>);
 }
 ```
+
+Both live at `toni::traits_helpers::{Interceptor, InterceptorNext}`. `run` consumes `Box<Self>`, so the downstream chain can be invoked at most once — the type system rules out calling the handler twice.
 
 ## Timing interceptor
 
 ```rust
-use toni::{async_trait, Interceptor, InterceptorNext, Context};
 use std::time::Instant;
+use toni::async_trait;
+use toni::context::HttpContext;
+use toni::traits_helpers::{Interceptor, InterceptorNext};
 
 pub struct TimingInterceptor;
 
 #[async_trait]
-impl Interceptor for TimingInterceptor {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
+impl Interceptor<HttpContext> for TimingInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
         let start = Instant::now();
-        next.run(context).await;
-        println!("Request took {:?}", start.elapsed());
+        next.run(ctx).await;
+        println!("request took {:?}", start.elapsed());
     }
 }
 ```
 
-## Caching interceptor
+## Reading the request, inspecting the response
 
-Skip the handler entirely when a cached response exists:
+On `HttpContext`, the request is available before `next.run` via `ctx.request()` (`&RequestPart` — method, URI, headers). After `next.run`, the response set by the handler is available via `ctx.response()`:
 
 ```rust
-use std::collections::HashMap;
-use std::sync::Mutex;
+pub struct AuditInterceptor;
 
-pub struct CacheInterceptor {
-    cache: Mutex<HashMap<String, String>>,
-}
+#[async_trait]
+impl Interceptor<HttpContext> for AuditInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+        let method = ctx.request().method.clone();
+        let uri = ctx.request().uri.clone();
 
-impl CacheInterceptor {
-    pub fn new() -> Self {
-        Self { cache: Mutex::new(HashMap::new()) }
+        next.run(ctx).await;
+
+        let status = ctx.response().map(|r| r.status).unwrap_or(0);
+        println!("{method} {uri} -> {status}");
     }
+}
+```
+
+`HttpResponse` exposes `status` (a public `u16` field), `headers` (`Vec<(String, String)>`), and `body`.
+
+## Transforming the response
+
+`ctx.response_mut()` gives mutable access to the response after the handler ran; `ctx.set_response(...)` replaces it wholesale:
+
+```rust
+use toni::HttpResponse;
+
+pub struct CacheHeaderInterceptor;
+
+#[async_trait]
+impl Interceptor<HttpContext> for CacheHeaderInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+        next.run(ctx).await;
+
+        if let Some(response) = ctx.response_mut() {
+            if response.status == 200 {
+                response
+                    .headers
+                    .push(("Cache-Control".into(), "max-age=60".into()));
+            }
+        }
+    }
+}
+```
+
+## Short-circuiting
+
+Not calling `next.run` skips everything downstream — inner interceptors, pipes, and the handler. Set a response before returning so the client gets a reply:
+
+```rust
+use std::sync::atomic::{AtomicBool, Ordering};
+use serde_json::json;
+use toni::HttpResponse;
+
+pub struct MaintenanceInterceptor {
+    pub enabled: AtomicBool,
 }
 
 #[async_trait]
-impl Interceptor for CacheInterceptor {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
-        let key = format!("{} {}", context.method(), context.path());
-
-        // Check cache first
-        if let Some(cached) = self.cache.lock().unwrap().get(&key).cloned() {
-            context.set_response(
-                HttpResponse::ok()
-                    .header("X-Cache", "HIT")
-                    .body(cached)
-                    .build()
+impl Interceptor<HttpContext> for MaintenanceInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+        if self.enabled.load(Ordering::Relaxed) {
+            ctx.set_response(
+                HttpResponse::builder()
+                    .status(503)
+                    .json(json!({ "message": "Down for maintenance" }))
+                    .build(),
             );
-            return;  // handler is skipped
+            return; // handler is skipped
         }
-
-        // Cache miss — call the handler
-        next.run(context).await;
-
-        // Store result in cache
-        if let Some(response) = context.get_response() {
-            if response.status() == 200 {
-                let body = response.body_as_string().unwrap_or_default();
-                self.cache.lock().unwrap().insert(key, body);
-            }
-        }
+        next.run(ctx).await;
     }
 }
 ```
 
-## Response transformation
+## Passing data to the handler
 
-Transform the response before it's sent:
+The context's typed extensions bag carries values between enhancers and handlers without coupling their types:
 
 ```rust
-pub struct WrapResponseInterceptor;
+#[derive(Clone)]
+pub struct RequestId(pub String);
 
 #[async_trait]
-impl Interceptor for WrapResponseInterceptor {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
-        next.run(context).await;
-
-        // Wrap the response body in a standard envelope
-        if let Some(response) = context.get_response() {
-            if response.status() == 200 {
-                if let Ok(data) = response.body_as_json::<serde_json::Value>() {
-                    context.set_response(
-                        HttpResponse::ok()
-                            .json(serde_json::json!({ "data": data, "success": true }))
-                            .build()
-                    );
-                }
-            }
-        }
+impl Interceptor<HttpContext> for RequestIdInterceptor {
+    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+        ctx.extensions_mut().insert(RequestId(new_id()));
+        next.run(ctx).await;
     }
 }
 ```
+
+Downstream enhancers read it back with `ctx.extensions().get::<RequestId>()`.
 
 ## DI-aware interceptors
 
-```rust
-use toni::{injectable, Interceptor, InterceptorNext, Context};
+Declare the interceptor as an `#[injectable]` provider and implement the trait — no marker attribute. List it in the module's `providers` and apply it by bare type name:
 
-#[injectable(pub struct AuditInterceptor {
-    #[inject]
-    audit_service: AuditService,
-})]
-#[interceptor]
-impl AuditInterceptor {
-    pub fn new(audit_service: AuditService) -> Self { Self { audit_service } }
-}
+```rust
+use toni::injectable;
+
+#[injectable]
+pub struct WsLoggingInterceptor;
 
 #[async_trait]
-impl Interceptor for AuditInterceptor {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>) {
-        let path = context.path().to_string();
-        let method = context.method().to_string();
-
-        next.run(context).await;
-
-        let status = context.get_response()
-            .map(|r| r.status())
-            .unwrap_or(0);
-
-        self.audit_service.log(&method, &path, status).await;
+impl Interceptor<WsContext> for WsLoggingInterceptor {
+    async fn intercept(&self, ctx: &mut WsContext, next: Box<dyn InterceptorNext<WsContext>>) {
+        println!("client={} event={}", ctx.client().id, ctx.event());
+        next.run(ctx).await;
+        println!("message processed");
     }
 }
 ```
 
-## Applying interceptors
-
-### Global
-
 ```rust
-let mut factory = ToniFactory::new();
-factory.use_global_interceptors(Arc::new(TimingInterceptor));
-let mut app = factory.create_with(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+#[module(
+    providers: [ChatGateway, WsLoggingInterceptor],
+    imports: [BroadcastModule::new()],
+)]
+struct ChatModule;
 ```
+
+Dependencies work the same as any provider: `#[inject]` fields plus a `#[new]` constructor.
+
+## Applying interceptors
 
 ### Controller level
 
+`#[use_interceptors]` goes on the `#[routes]` impl block (or `#[patterns]` / `#[subscriptions]` / `#[grpc_methods]` for the other transports):
+
 ```rust
-#[controller("/users", pub struct UsersController { /* ... */ })]
-#[use_interceptors(TimingInterceptor {}, WrapResponseInterceptor {})]
+#[controller("/users")]
+pub struct UsersController {}
+
+#[routes]
+#[use_interceptors(TimingInterceptor {}, CacheHeaderInterceptor {})]
 impl UsersController {
     // all routes are wrapped by both interceptors
 }
@@ -174,21 +197,34 @@ impl UsersController {
 ### Method level
 
 ```rust
-#[controller("/items", pub struct ItemsController { /* ... */ })]
+#[routes]
 impl ItemsController {
+    #[use_interceptors(TimingInterceptor {})]  // only this route is timed
     #[get("/:id")]
-    #[use_interceptors(CacheInterceptor {})]  // only this route is cached
-    fn find_one(&self) -> HttpResponse { /* ... */ }
+    fn find_one(&self) -> Body { /* ... */ }
 }
 ```
 
+Bare type names resolve from DI (`#[use_interceptors(WsLoggingInterceptor)]`); expressions instantiate directly (`#[use_interceptors(TimingInterceptor {})]`).
+
+### Global (per transport)
+
+```rust
+use std::sync::Arc;
+
+let mut factory = ToniFactory::new();
+factory.use_global_http_interceptors(Arc::new(TimingInterceptor));
+```
+
+`use_global_rpc_interceptors` and `use_global_ws_interceptors` register for the other transports.
+
 ## Execution order
 
-When multiple interceptors are applied, they execute as nested wrappers:
+Interceptors nest as onion layers, global outermost, method innermost:
 
 ```
-Global interceptors → Controller interceptors → Method interceptors → Handler
-Handler response → Method interceptors → Controller interceptors → Global interceptors
+Global (before) → Controller (before) → Method (before) → Pipes → Handler
+Handler → Method (after) → Controller (after) → Global (after)
 ```
 
-The innermost interceptor (method-level) is closest to the handler.
+A panic inside an interceptor is caught by the framework and routed through the error pipeline instead of tearing down the request — see [Error Handling](/docs/request-lifecycle/error-handling).

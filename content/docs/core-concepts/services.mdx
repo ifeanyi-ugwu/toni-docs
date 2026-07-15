@@ -14,15 +14,14 @@ In NestJS, `@Injectable()` marks a class as a provider. In Toni, `#[injectable]`
 ```rust
 use toni::injectable;
 
-#[injectable(pub struct UsersService {
-    // fields that are NOT injected — just internal state
+#[injectable]
+pub struct UsersService {
+    // owned state — not injected
+    #[default(1000)]
     max_users: u32,
-})]
-impl UsersService {
-    pub fn new() -> Self {
-        Self { max_users: 1000 }
-    }
+}
 
+impl UsersService {
     pub fn find_all(&self) -> Vec<String> {
         vec!["Alice".into(), "Bob".into()]
     }
@@ -33,24 +32,22 @@ impl UsersService {
 }
 ```
 
-The struct definition goes inside the `#[injectable(...)` attribute. The `impl` block is where your methods live — standard Rust.
+`#[injectable]` goes directly on the struct; the `impl` block is standard Rust. `#[default(expr)]` initializes owned state; untagged fields fall back to `Default::default()`. The macro supplies the `Clone` impl the container needs, so the struct carries no derive ceremony.
 
 ## Injecting into other services
 
-Use `#[inject]` on fields to mark them for DI. The container resolves them automatically:
+Mark dependency fields with `#[inject]`. The container resolves them and fills the fields directly — no constructor required:
 
 ```rust
-#[injectable(pub struct OrdersService {
+#[injectable]
+pub struct OrdersService {
     #[inject]
     users_service: UsersService,
     #[inject]
     payments_service: PaymentsService,
-})]
-impl OrdersService {
-    pub fn new(users_service: UsersService, payments_service: PaymentsService) -> Self {
-        Self { users_service, payments_service }
-    }
+}
 
+impl OrdersService {
     pub fn create_order(&self, user_id: u32, amount: f64) -> String {
         let user = self.users_service.find_one(user_id)
             .expect("user not found");
@@ -61,6 +58,27 @@ impl OrdersService {
 ```
 
 For `OrdersService` to inject `UsersService` and `PaymentsService`, those services must be available in the same module scope — either directly in `providers` or from an imported module's `exports`.
+
+## Constructor injection with `#[new]`
+
+Field injection covers the common case. When construction needs logic — or a dependency is consumed without being stored — tag a constructor with `#[new]`:
+
+```rust
+#[injectable]
+pub struct Banner {
+    prefix: String,
+}
+
+impl Banner {
+    #[new]
+    fn new(config: Config) -> Self {
+        // config is injected, used, and NOT stored as a field
+        Self { prefix: format!("<{}>", config.env()) }
+    }
+}
+```
+
+Each `#[new]` parameter is resolved from the container by type (or by token with `#[inject("TOKEN")]` on the parameter). A bare `new()` without the attribute is not picked up as a DI constructor.
 
 ## Registering in a module
 
@@ -75,72 +93,80 @@ pub struct OrdersModule;
 
 ## Async initialization
 
-Use the `#[on_module_init]` lifecycle hook to run async setup after the service is constructed but before the application starts accepting requests:
+Use the `#[on_module_init]` lifecycle hook to run async setup after the service is constructed but before the application starts accepting requests. Startup hooks are `async fn` returning `toni::InitResult`; returning `Err` aborts startup:
 
 ```rust
-#[injectable(pub struct DatabaseService {
-    pool: Option<Pool>,
-})]
+#[injectable]
+pub struct DatabaseService {
+    #[default("PostgreSQL".to_string())]
+    name: String,
+}
+
 impl DatabaseService {
-    pub fn new() -> Self {
-        Self { pool: None }
-    }
-
     #[on_module_init]
-    async fn connect(&self) {
+    async fn connect(&self) -> toni::InitResult {
         // runs once, after all providers in this module are instantiated
-        println!("Database connection established");
+        println!("Connecting to {}", self.name);
+        Ok(())
     }
 
-    pub async fn query(&self, sql: &str) -> Vec<Row> {
-        self.pool.as_ref().unwrap().query(sql).await
-    }
+    pub async fn query(&self, sql: &str) { /* ... */ }
 }
 ```
+
+See [Lifecycle Hooks](/docs/lifecycle-hooks) for the full sequence and the shutdown-side hooks.
 
 ## Provider scope
 
-By default, providers are singletons — one instance per module scope. The `#[injectable]` macro supports a `scope` parameter for future scope options (transient, request-scoped). See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
+Providers are singletons by default — one instance per module scope. `#[injectable(scope = "...")]` accepts three values:
+
+```rust
+#[injectable]                          // singleton (default): one shared instance
+#[injectable(scope = "request")]       // one instance per HTTP request
+#[injectable(scope = "transient")]     // fresh instance per resolution
+```
+
+A singleton controller that depends on a request-scoped provider is elevated to request scope automatically. See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
 
 ## Implementing enhancer traits
 
-Services can implement the Guard, Interceptor, Pipe, Middleware, or ErrorHandler traits. When they do, they can be registered both as injectable services *and* used as enhancers with DI access:
+An enhancer is a provider that implements the role trait — the trait impl *is* the declaration. There are no marker attributes: declare `#[injectable]`, implement `Guard<HttpContext>` (or `Interceptor`, `Pipe`, `ErrorHandler`, `Middleware`), register in `providers`, and apply with `#[use_guards]`:
 
 ```rust
-use toni::{injectable, Guard, Context};
+use toni::{async_trait, injectable, context::HttpContext, traits_helpers::Guard};
 
-#[injectable(pub struct AuthGuard {
+#[injectable]
+pub struct AdminGuard {
     #[inject]
     auth_service: AuthService,
-})]
-#[guard]
-impl AuthGuard {
-    pub fn new(auth_service: AuthService) -> Self {
-        Self { auth_service }
-    }
 }
 
-impl Guard for AuthGuard {
-    fn can_activate(&self, ctx: &Context) -> bool {
-        let token = ctx.get_header("authorization")
-            .and_then(|h| h.strip_prefix("Bearer "));
-        token.map(|t| self.auth_service.verify(t)).unwrap_or(false)
+#[async_trait]
+impl Guard<HttpContext> for AdminGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        ctx.request().headers.get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(|t| self.auth_service.verify(t))
+            .unwrap_or(false)
     }
 }
 ```
 
-Register it in the module's `providers`, then apply it:
+Register it in the module's `providers`, then apply it by type name — the type-name form resolves the instance (with its injected dependencies) from the DI container:
 
 ```rust
 #[module(
     controllers: [ProtectedController],
-    providers: [AuthGuard, AuthService],
+    providers: [AdminGuard, AuthService],
 )]
 pub struct ProtectedModule;
 ```
 
 ```rust
-#[controller("/protected", pub struct ProtectedController { /* ... */ })]
-#[use_guards(AuthGuard {})]
+#[routes]
+#[use_guards(AdminGuard)]
 impl ProtectedController { /* ... */ }
 ```
+
+The context type in the trait names the transport: `Guard<HttpContext>` guards HTTP routes, `Guard<WsContext>` guards WebSocket messages, `Guard<RpcContext>` guards RPC patterns. See [Guards](/docs/request-lifecycle/guards).

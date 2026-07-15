@@ -3,11 +3,11 @@ title: TCP Adapter
 description: Newline-delimited JSON over raw TCP connections — server and client transport setup.
 ---
 
-The TCP adapter runs a raw TCP server that speaks a simple newline-delimited JSON protocol. It requires no message broker and has no external dependencies beyond Tokio.
+The TCP adapter runs a raw TCP server that speaks a newline-delimited JSON protocol. It requires no message broker and has no external dependencies beyond Tokio.
 
 ## Server setup
 
-Add the dependency:
+Add the dependencies:
 
 ```toml
 [dependencies]
@@ -22,57 +22,77 @@ use toni::ToniFactory;
 use toni_tcp::TcpAdapter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(AppModule).await;
-    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
-    app.start().await;
+    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
+    app.start().await?;
+    Ok(())
 }
 ```
 
-Running alongside an HTTP server:
+The socket is bound synchronously during startup, so a port conflict surfaces as an `Err` from `app.start()` (or `app.bind()`) rather than a panic in a background task. Binding port `0` picks a free port; the bound address is available from `app.bind()`'s `BoundAdapters`.
+
+### Adapter options
 
 ```rust
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
-app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
-app.start().await;
+use std::time::Duration;
+
+TcpAdapter::new("0.0.0.0", 4000)
+    .with_drain_timeout(Duration::from_secs(30))  // default 10 s; None = wait without bound
+    .with_max_inflight(512)                       // default unbounded
 ```
+
+- `with_drain_timeout` — how long `close()` waits for in-flight requests before aborting them. On shutdown the accept loop stops, connections stop reading new lines, and in-flight handler tasks are drained up to this timeout.
+- `with_max_inflight` — caps concurrently running handler tasks across all connections. A request over the cap is rejected immediately with an `overloaded` error frame; a fire-and-forget message over the cap is dropped with a log line.
 
 ## Wire protocol
 
-All frames are newline-terminated JSON objects (`\n` delimiter).
-
-### Request-response (inbound)
+All frames are newline-terminated JSON objects (`\n` delimiter). Inbound:
 
 ```json
-{"pattern": "order.create", "data": {"item": "book", "qty": 2}, "id": "42"}
+{"pattern": "order.create", "data": {"item": "book", "qty": 2}, "id": "42", "metadata": {"trace-id": "abc"}}
 ```
 
-The `id` field correlates the reply to the original request. The server sends one response frame per request:
+- `id` — optional correlation id. Present means the caller expects a reply; absent means fire-and-forget.
+- `metadata` — optional object of string values, surfaced as `ctx.metadata()`. Non-string values are skipped.
+
+One response frame per request:
 
 ```json
 {"id": "42", "response": {"orderId": 1001}}
 ```
 
-On handler error:
+A handler error arrives as a reply carrying the canonical error envelope:
 
 ```json
-{"id": "42", "err": {"message": "out of stock", "status": "Internal"}}
+{"id": "42", "response": {"status": "error", "kind": "Internal", "message": "out of stock"}}
 ```
 
-### Fire-and-forget (inbound)
-
-Omit the `id` field. The server processes the message and sends no reply:
+A dispatch failure arrives as an error frame:
 
 ```json
-{"pattern": "order.shipped", "data": {"orderId": 1001}}
+{"id": "42", "err": {"message": "Pattern not found: does.not.exist", "status": "not_found"}}
+```
+
+Statuses: `not_found`, `forbidden`, `error`, `overloaded` — see [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+Two edge cases:
+
+- A frame with an `id` that lands on an `#[event_pattern]` handler gets an explicit ack, `{"id": "42", "response": null}`, so the caller does not time out.
+- A handler panic that escapes the dispatcher yields `{"id": "42", "err": {"message": "internal server error", "status": "error"}}`; the connection stays open.
+
+Test with netcat:
+
+```bash
+echo '{"pattern":"order.create","data":{"item":"keyboard","qty":3},"id":"req-1"}' | nc 127.0.0.1 4000
 ```
 
 ## Client transport
 
-Use `TcpClientTransport` to connect to a remote TCP RPC server from within a service:
+`TcpClientTransport` maintains one persistent connection to the remote server. Request-response multiplexes over it via correlation ids; a background reader routes each reply to the waiting caller:
 
 ```rust
-use toni::RpcClient;
+use toni::{provider_value, RpcClient};
 use toni_tcp::TcpClientTransport;
 
 provider_value!(
@@ -81,11 +101,11 @@ provider_value!(
 )
 ```
 
-The connection is established lazily on the first `send` or `emit` call.
+The connection is established lazily on the first `send` or `emit`. After a fatal error (connection closed, write failure) the cached connection is dropped and the next call reconnects; requests pending at the moment of failure fail with `RpcClientError::Transport("connection closed")`.
 
 ### Custom timeout
 
-The default request-response timeout is 5 seconds. Override with `with_timeout`:
+The default request-response timeout is 5 seconds:
 
 ```rust
 use std::time::Duration;
@@ -96,45 +116,74 @@ RpcClient::new(
 )
 ```
 
-### Payload limitations
+## Payload limitations
 
-The TCP wire format is JSON. `RpcData::Binary` payloads are not supported — binary data must be encoded (e.g. base64) before placing it in `RpcData::Json` or `RpcData::Text`.
+The wire format is JSON. `RpcData::Binary` payloads are not supported — on the wire they become `null`. Encode binary data (e.g. base64) into `RpcData::Json` or `RpcData::Text` instead.
+
+## Tracing
+
+Every inbound message runs inside an `rpc.request` span with `transport="tcp"`, `pattern`, `id`, and `peer` fields. Events emitted from handlers inherit them, so log lines correlate back to the originating message without any handler-side plumbing.
 
 ## Example
 
 ```rust
-use toni::*;
-use toni_macros::{module, rpc_controller};
-use toni_tcp::{TcpAdapter, TcpClientTransport};
+use toni::{injectable, module, new, patterns, rpc_controller, serde_json, ToniFactory};
 
-#[rpc_controller(pub struct OrdersController {
+#[injectable]
+pub struct OrdersService {}
+impl OrdersService {
+    pub fn create_order(&self, item: &str, qty: u32) -> serde_json::Value {
+        serde_json::json!({ "id": 1001, "item": item, "qty": qty, "status": "created" })
+    }
+}
+
+#[rpc_controller]
+pub struct OrdersController {
     #[inject]
     service: OrdersService,
-})]
+}
+
+#[patterns]
 impl OrdersController {
-    pub fn new(service: OrdersService) -> Self { Self { service } }
+    #[new]
+    pub fn new(service: OrdersService) -> Self {
+        Self { service }
+    }
 
     #[message_pattern("order.create")]
-    async fn create(&self, data: RpcData, _ctx: RpcContext) -> Result<RpcData, RpcError> {
-        let dto: CreateOrderDto = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
-        let order = self.service.create(dto).await.map_err(|e| RpcError::Internal(e.to_string()))?;
-        RpcData::from_serialize(&order).map_err(|e| RpcError::Internal(e.to_string()))
+    async fn create(
+        &self,
+        data: toni::RpcData,
+        _ctx: &toni::RpcContext,
+    ) -> Result<toni::RpcData, toni::RpcError> {
+        let payload = data
+            .as_json()
+            .ok_or_else(|| toni::RpcError::Internal("expected JSON payload".into()))?;
+        let item = payload["item"].as_str().unwrap_or("unknown");
+        let qty = payload["qty"].as_u64().unwrap_or(1) as u32;
+        Ok(toni::RpcData::json(self.service.create_order(item, qty)))
     }
 
     #[event_pattern("order.shipped")]
-    async fn shipped(&self, data: RpcData, _ctx: RpcContext) -> Result<(), RpcError> {
-        let id: u64 = data.parse().map_err(|e| RpcError::Internal(e.to_string()))?;
-        self.service.mark_shipped(id).await.map_err(|e| RpcError::Internal(e.to_string()))
+    async fn shipped(
+        &self,
+        data: toni::RpcData,
+        _ctx: &toni::RpcContext,
+    ) -> Result<(), toni::RpcError> {
+        let order_id = data.as_json().and_then(|v| v["order_id"].as_u64()).unwrap_or(0);
+        println!("order {order_id} shipped");
+        Ok(())
     }
 }
 
 #[module(providers: [OrdersService, OrdersController])]
-pub struct AppModule;
+struct AppModule;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(AppModule).await;
-    app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
-    app.start().await;
+    app.use_rpc_adapter(toni_tcp::TcpAdapter::new("0.0.0.0", 4000))?;
+    app.start().await?;
+    Ok(())
 }
 ```

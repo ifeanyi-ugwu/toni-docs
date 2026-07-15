@@ -16,7 +16,11 @@ Pass to `app.use_http_adapter` after `ToniFactory::create`:
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
 app.use_http_adapter(ActixAdapter::new(), 8080, "0.0.0.0").unwrap();
-app.start().await;
+app.start().await.unwrap();
 ```
 
-The API surface is identical to `toni-axum`. Switching adapters requires only changing the import and the adapter constructor call.
+For HTTP routing, switching from `toni-axum` requires only changing the import and the adapter constructor call. Differences:
+
+- **No WebSocket support** — `ActixAdapter` implements `HttpAdapter` only. `bind_ws` returns an error, and the crate has no `WebSocketAdapter`; gateways need `toni-axum` or another WebSocket-capable adapter.
+- **Bodies are buffered** — request and response bodies are read fully into memory (no streaming).
+- **Graceful shutdown** — closing the app stops the Actix server and waits for in-flight requests to finish.

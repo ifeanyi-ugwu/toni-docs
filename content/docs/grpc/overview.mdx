@@ -1,0 +1,63 @@
+---
+title: Overview
+description: Contract-first gRPC with tonic — DI-registered services, enhancers, and lifecycle integration via toni-grpc.
+---
+
+`toni-grpc` drives a [tonic](https://docs.rs/tonic) server through Toni's bind / serve / drain lifecycle. Services declared with `#[grpc_service]` + `#[grpc_methods]` are discovered via DI and wrapped with the enhancer pipeline — guards, interceptors, error handlers, and panic recovery — before being handed to tonic. There is no manual `*Server::new(handler)` step in user code.
+
+<Bridge>
+
+| NestJS | Toni |
+|--------|------|
+| `Transport.GRPC` microservice | `GrpcAdapter` registered with `use_grpc_adapter` |
+| `@GrpcMethod()` handler | method on a `#[grpc_methods]` trait impl |
+| `@GrpcStreamMethod()` | streaming method on the same impl |
+| `.proto` loaded at runtime via `protoLoader` | `.proto` compiled at build time via `tonic-prost-build` |
+| Guards / interceptors / exception filters | `#[use_guards]` / `#[use_interceptors]` / `#[use_error_handlers]` |
+
+</Bridge>
+
+## Contract-first, not pattern-string
+
+The [RPC adapters](/docs/microservices/overview) (TCP, NATS, and friends) route by pattern strings with JSON payloads resolved at runtime. gRPC is different by design: services and methods are declared in `.proto` files, known at compile time via tonic-generated traits, dispatched with typed protobuf messages, and support four call shapes (unary plus three streaming modes). None of that fits the pattern-string + JSON contract, so gRPC has its own adapter interface (`use_grpc_adapter`) and its own macros instead of `#[rpc_controller]`.
+
+The `.proto` file is the source of truth. A `build.rs` compiles it to a Rust trait; your service implements that trait; the framework wraps the impl and registers it with tonic at bind time.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-grpc = "0.1"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tokio = { version = "1", features = ["full"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"   # optional — vendors protoc for the build
+```
+
+`tonic-prost-build` generates the trait and message types at build time; `tonic-prost` and `prost` are their runtime counterparts. `protoc-bin-vendored` removes the system `protoc` requirement — see the [quick start](/docs/grpc/quick-start) for the `build.rs` wiring.
+
+`toni-grpc` has no feature flags. Its only export is `GrpcAdapter`.
+
+## What the adapter provides
+
+- **DI-registered services** — `#[grpc_service]` makes the service a singleton provider; `#[inject]` fields resolve from the module's providers
+- **Enhancers per call** — guards, interceptors, and error handlers at service or method level ([enhancers](/docs/grpc/enhancers))
+- **Panic recovery** — a panicking handler surfaces as `Internal` on the wire; the server stays up ([error handling](/docs/grpc/error-handling))
+- **All four call modes** — unary, server-streaming, client-streaming, bidirectional ([streaming](/docs/grpc/streaming))
+- **Graceful shutdown** with a configurable drain timeout, backpressure caps, and a per-call tracing span ([operations](/docs/grpc/operations))
+
+## Lifecycle
+
+The gRPC adapter participates in the standard bind → run → shutdown sequence:
+
+- `app.use_grpc_adapter(GrpcAdapter::new(addr))` registers the adapter during configuration.
+- `app.bind()` resolves the DI-registered services, registers them with tonic, and binds the socket **synchronously** — a port conflict surfaces as `Err` from `bind()`, not a panic inside the serve loop. The returned `BoundAdapters.grpc: Option<SocketAddr>` carries the bound address (port-0 friendly).
+- `app.run()` drives the serve loop alongside every other adapter until shutdown is signalled via `ShutdownHandle`.
+- On shutdown, tonic drains in-flight calls under a drain timer (default 10 s); when the budget elapses, remaining streams are aborted and clients see `UNAVAILABLE`.
+
+`app.start()` is bind + run in one call. Either way, the application must run on a single thread — see the [LocalSet requirement](/docs/grpc/quick-start#the-localset-requirement) in the quick start.

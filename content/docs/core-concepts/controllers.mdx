@@ -3,77 +3,79 @@ title: Controllers
 description: Controllers define HTTP routes and map them to handler functions.
 ---
 
-A controller is a struct annotated with `#[controller]` that groups related HTTP route handlers under a base path. Each handler method is annotated with the HTTP verb it responds to.
+A controller is a struct annotated with `#[controller("/prefix")]` that groups related HTTP route handlers under a base path. The handlers live in a sibling `impl` block marked `#[routes]`, where each method carries the HTTP verb it responds to.
 
 <Bridge>
-Controllers in Toni serve the exact same purpose as controllers in NestJS. Instead of `@Controller('path')` you use `#[controller("path", ...)]`, and instead of `@Get()`, `@Post()` etc. you use `#[get]`, `#[post]`, etc.
+Controllers in Toni serve the exact same purpose as controllers in NestJS. Instead of `@Controller('path')` you use `#[controller("/path")]` on the struct, and instead of `@Get()`, `@Post()` etc. you use `#[get]`, `#[post]`, etc. on methods.
 </Bridge>
 
 ## Defining a controller
 
 ```rust
-use toni::{controller, HttpResponse};
+use toni::{controller, get, routes, Body};
 
-#[controller("/cats", pub struct CatsController {})]
+#[controller("/cats")]
+pub struct CatsController;
+
+#[routes]
 impl CatsController {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    #[get("")]
-    fn find_all(&self) -> HttpResponse {
-        HttpResponse::ok().json(serde_json::json!(["Garfield", "Tom"])).build()
+    #[get("/")]
+    fn find_all(&self) -> Body {
+        Body::json(serde_json::json!(["Garfield", "Tom"]))
     }
 }
 ```
 
-The `#[controller]` attribute takes:
-1. The base path string (e.g., `"/cats"`)
-2. The struct definition — fields declared here become the struct's fields
+The declaration has two halves:
 
-All route paths on methods are relative to this base. `#[get("")]` matches `GET /cats`, `#[get("/:id")]` matches `GET /cats/:id`.
+- `#[controller("/prefix")]` goes on the **struct**. It handles dependency injection (`#[inject]` fields), the route prefix, and scope. It is complete on its own — a controller with no `#[routes]` impl is valid and registers zero routes.
+- `#[routes]` goes on the **impl**. It scans the `#[get]`/`#[post]`/… methods and turns them into routes, joined with the struct's prefix.
+
+All method paths are relative to the prefix: `#[get("/")]` matches `GET /cats`, `#[get("/:id")]` matches `GET /cats/:id`.
 
 ## Route handlers
 
-Four HTTP verbs are supported with dedicated attributes:
-
 ```rust
-#[controller("/items", pub struct ItemsController {
+#[controller("/items")]
+pub struct ItemsController {
     #[inject]
     service: ItemsService,
-})]
+}
+
+#[routes]
 impl ItemsController {
-    pub fn new(service: ItemsService) -> Self { Self { service } }
+    #[get("/")]          // GET    /items
+    fn find_all(&self) -> Body { /* ... */ }
 
-    #[get("")]           // GET  /items
-    fn find_all(&self) -> HttpResponse { /* ... */ }
+    #[get("/:id")]       // GET    /items/:id
+    fn find_one(&self) -> Body { /* ... */ }
 
-    #[get("/:id")]       // GET  /items/:id
-    fn find_one(&self) -> HttpResponse { /* ... */ }
+    #[post("/")]         // POST   /items
+    fn create(&self) -> Body { /* ... */ }
 
-    #[post("")]          // POST /items
-    fn create(&self) -> HttpResponse { /* ... */ }
-
-    #[put("/:id")]       // PUT  /items/:id
-    fn update(&self) -> HttpResponse { /* ... */ }
+    #[put("/:id")]       // PUT    /items/:id
+    fn update(&self) -> Body { /* ... */ }
 
     #[delete("/:id")]    // DELETE /items/:id
-    fn remove(&self) -> HttpResponse { /* ... */ }
+    fn remove(&self) -> Body { /* ... */ }
 }
 ```
 
+Handlers can be sync or `async`. Beyond the four verbs, `#[sse("/path")]` declares a Server-Sent Events handler that returns a stream of events — see [Server-Sent Events](/docs/techniques/sse).
+
 ## Request data
 
-Use extractors to pull data out of requests. Extractors are zero-cost: they're parsed once and typed at compile time.
+Use extractors to pull data out of requests as handler parameters:
 
 ```rust
-use toni::extractors::{Path, Query, Json, Body, Bytes, Validated};
+use toni::HttpError;
+use toni::extractors::{Path, Query, Json};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-struct SearchQuery {
+struct SearchParams {
     q: String,
-    page: Option<u32>,
+    limit: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -82,133 +84,169 @@ struct CreateItemDto {
     price: f64,
 }
 
-#[controller("/items", pub struct ItemsController {
-    #[inject]
-    service: ItemsService,
-})]
+#[routes]
 impl ItemsController {
-    pub fn new(service: ItemsService) -> Self { Self { service } }
-
     #[get("/:id")]
-    fn find_one(&self, Path(id): Path<u32>) -> HttpResponse {
+    fn find_one(&self, Path(id): Path<u32>) -> Result<Body, HttpError> {
         // id is a u32, parsed from the URL
-        match self.service.find(id) {
-            Some(item) => HttpResponse::ok().json(item).build(),
-            None => HttpResponse::not_found().build(),
-        }
+        let item = self.service.find(id)
+            .ok_or(HttpError::custom(404, "item not found"))?;
+        Ok(Body::json(serde_json::to_value(item).unwrap()))
     }
 
-    #[get("")]
-    fn search(&self, Query(q): Query<SearchQuery>) -> HttpResponse {
-        let results = self.service.search(&q.q, q.page.unwrap_or(1));
-        HttpResponse::ok().json(results).build()
+    #[get("/")]
+    fn search(&self, Query(params): Query<SearchParams>) -> Body {
+        let results = self.service.search(&params.q, params.limit.unwrap_or(10));
+        Body::json(serde_json::to_value(results).unwrap())
     }
 
-    #[post("")]
-    fn create(&self, Json(dto): Json<CreateItemDto>) -> HttpResponse {
+    #[post("/")]
+    fn create(&self, Json(dto): Json<CreateItemDto>) -> Body {
         let item = self.service.create(dto.name, dto.price);
-        HttpResponse::created().json(item).build()
+        Body::json(serde_json::to_value(item).unwrap())
     }
 }
 ```
 
-See [Extractors](/docs/extractors/built-in) for the full list.
+Only one body-consuming extractor (`Json`, `Bytes`, `Body`, `BodyStream`, `Multipart`) may appear per handler. See [Extractors](/docs/extractors/built-in) for the full list.
 
 ## Dependency injection
 
-Fields marked with `#[inject]` are resolved from the DI container. Toni injects them automatically — you just name them and declare the type.
+Fields marked `#[inject]` are resolved from the DI container:
 
 ```rust
-#[controller("/orders", pub struct OrdersController {
+#[controller("/orders")]
+pub struct OrdersController {
     #[inject]
     orders_service: OrdersService,
     #[inject]
     payments_service: PaymentsService,
-    #[inject]
-    logger: LoggerService,
-})]
-impl OrdersController {
-    pub fn new(
-        orders_service: OrdersService,
-        payments_service: PaymentsService,
-        logger: LoggerService,
-    ) -> Self {
-        Self { orders_service, payments_service, logger }
-    }
-    // ...
 }
 ```
 
-Both `OrdersService` and `PaymentsService` must be available in the module's DI scope — either provided directly in `providers` or imported from another module.
+No constructor is needed — the container fills the fields directly. When construction requires logic, or a dependency is used but not stored, tag a constructor with `#[new]` inside the `#[routes]` impl:
+
+```rust
+#[controller("/orders")]
+pub struct OrdersController {
+    prefix: String,
+}
+
+#[routes]
+impl OrdersController {
+    #[new]
+    fn new(config: ConfigService) -> Self {
+        // config is injected, used, and not stored
+        Self { prefix: config.order_prefix() }
+    }
+}
+```
+
+Each `#[new]` parameter is resolved from the container by type. A bare `new()` without the attribute is not picked up. Both `OrdersService` and `PaymentsService` must be available in the module's DI scope — either listed in `providers` or exported by an imported module.
 
 ## Response types
 
-Handlers can return anything that implements `ToResponse`. The most common options:
+Handlers return anything that implements `IntoResponse`: `Body`, `String`, `&str`, `serde_json::Value`, `u16` (status only), `(u16, Body)`, or a full `HttpResponse`. Fallible handlers return `Result`:
 
 ```rust
-// HttpResponse — full control
-fn handler(&self) -> HttpResponse {
-    HttpResponse::ok()
-        .json(data)
-        .header("X-Custom", "value")
-        .build()
+// Full control via the builder
+#[post("/")]
+async fn create_user(&self, Json(body): Json<serde_json::Value>) -> Result<HttpResponse, UserError> {
+    let user = self.service.create_user(&body)?;
+    Ok(HttpResponse::created()
+        .header("Location", format!("/users/{}", user.id))
+        .json(serde_json::to_value(user).unwrap())
+        .build())
 }
 
-// Serde-serializable types via automatic JSON conversion
-fn handler(&self) -> MyStruct { /* auto-serialized to JSON 200 */ }
-
-// Result — error handled by the error handler chain
-fn handler(&self) -> Result<MyStruct, HttpError> { /* ... */ }
+// HttpError for trivial cases that don't warrant a dedicated error type
+#[get("/teapot")]
+fn teapot(&self) -> Result<Body, HttpError> {
+    Err(HttpError::custom(418, "I'm a teapot"))
+}
 ```
+
+Domain error types implementing `toni::Error` are lifted into the HTTP error envelope automatically when returned through `Result`.
 
 ## Guards on controllers
 
-Apply guards to an entire controller or to specific routes:
+Apply guards to the whole controller by placing `#[use_guards]` on the `#[routes]` impl, or to a single route by placing it on the method:
 
 ```rust
-#[controller("/admin", pub struct AdminController { /* ... */ })]
-#[use_guards(AuthGuard {}, RoleGuard::new("admin"))]
+#[routes]
+#[use_guards(AuthGuard)]                 // every route in this controller
 impl AdminController {
     #[get("/dashboard")]
-    fn dashboard(&self) -> HttpResponse { /* ... */ }
+    fn dashboard(&self) -> Body { /* ... */ }
 
     #[get("/logs")]
-    #[use_guards(SuperAdminGuard {})]   // additional guard on this route only
-    fn logs(&self) -> HttpResponse { /* ... */ }
+    #[use_guards(SuperAdminGuard)]       // additional guard on this route only
+    fn logs(&self) -> Body { /* ... */ }
 }
 ```
 
-Guards on the controller run for every route in that controller. Method-level guards run in addition, after controller-level guards.
-
-See [Guards](/docs/request-lifecycle/guards) for how to implement them.
-
-## Route metadata
-
-Attach metadata to routes that guards and interceptors can read:
+A guard is a provider implementing `Guard<HttpContext>`:
 
 ```rust
-#[controller("/posts", pub struct PostsController { /* ... */ })]
-impl PostsController {
-    #[get("")]
-    #[set_metadata(Roles(vec!["user", "admin"]))]
-    fn find_all(&self) -> HttpResponse { /* ... */ }
+use toni::{async_trait, context::HttpContext, traits_helpers::Guard};
 
-    #[delete("/:id")]
-    #[set_metadata(Roles(vec!["admin"]))]
-    fn remove(&self) -> HttpResponse { /* ... */ }
-}
-```
+pub struct AuthGuard;
 
-Inside a guard:
-
-```rust
-impl Guard for RoleGuard {
-    fn can_activate(&self, ctx: &Context) -> bool {
-        let required_roles = ctx.get_metadata::<Roles>();
-        // check current user has one of required_roles
+#[async_trait]
+impl Guard<HttpContext> for AuthGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        ctx.request().headers.contains_key("x-auth-token")
     }
 }
 ```
+
+Controller-level guards run for every route; method-level guards run in addition, after them. See [Guards](/docs/request-lifecycle/guards) for the full model. The same placement rules apply to `#[use_interceptors]`, `#[use_pipes]`, and `#[use_error_handlers]`.
+
+## Route metadata
+
+Attach metadata to routes with `#[set_metadata(...)]`; guards and interceptors read it back:
+
+```rust
+#[derive(Clone)]
+pub struct Roles(pub &'static [&'static str]);
+
+#[routes]
+#[use_guards(RolesGuard {})]
+impl PostsController {
+    #[get("/")]
+    #[set_metadata(Roles(&["user", "admin"]))]
+    fn find_all(&self) -> Body { /* ... */ }
+
+    #[delete("/:id")]
+    #[set_metadata(Roles(&["admin"]))]
+    fn remove(&self) -> Body { /* ... */ }
+}
+```
+
+Inside a guard, metadata comes from the context's `route_metadata()`:
+
+```rust
+use toni::{async_trait, context::{HandlerContext, HttpContext}, traits_helpers::Guard};
+
+#[async_trait]
+impl Guard<HttpContext> for RolesGuard {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        let Some(Roles(required)) = ctx.route_metadata().and_then(|m| m.get::<Roles>()) else {
+            return true; // no roles required
+        };
+        let role = ctx.request().headers.get("x-user-role")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("guest");
+        required.iter().any(|&r| r == role)
+    }
+}
+```
+
+Any `Clone + Send + Sync + 'static` type works as metadata, and multiple `#[set_metadata]` attributes can stack on one route.
+
+## Controller scope
+
+Controllers are singletons by default. `#[controller("/p", scope = "request")]` rebuilds the controller per request. A singleton controller that injects a request-scoped provider is elevated to request scope automatically — the framework logs a warning; declaring `scope = "request"` explicitly silences it.
 
 ## Registering controllers
 

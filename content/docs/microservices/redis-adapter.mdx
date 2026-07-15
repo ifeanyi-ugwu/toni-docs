@@ -1,0 +1,95 @@
+---
+title: Redis Adapter
+description: Redis Pub/Sub channels as patterns — request-response emulated over correlation-keyed reply channels.
+---
+
+`toni-redis-rpc` maps each RPC pattern to a Redis Pub/Sub channel. Redis Pub/Sub has no native request-reply, so the transport emulates it: each request carries a reply-channel name, and the server publishes the response there. A Redis instance must be reachable from both sides.
+
+This crate is distinct from `toni-redis` (the key-value client module) and `toni-redis-broadcast` (WebSocket broadcasting) — it can share the same Redis instance with both.
+
+## Server setup
+
+Add the dependencies:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-redis-rpc = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_redis_rpc::RedisAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(RedisAdapter::new("redis://127.0.0.1:6379"))?;
+    app.start().await?;
+    Ok(())
+}
+```
+
+The initial connection retries for about 10 seconds before panicking, so a slow-starting Redis container is tolerated. After startup, the publish side uses a self-reconnecting `ConnectionManager`; the subscription side reconnects and resubscribes itself with a 500 ms backoff when the Pub/Sub connection drops (Redis Pub/Sub has no auto-recovery of its own).
+
+## How patterns map to channels
+
+Each pattern subscribes one channel with the pattern string as its name. Matching is **exact** — Redis glob characters (`*`, `?`, `[...]`) in a pattern are not treated as globs and will not match anything.
+
+## Wire format
+
+Both halves are Toni, so calls travel in a JSON request envelope:
+
+```json
+{
+  "data": {"Json": {"item": "book", "qty": 2}},
+  "reply_to": "toni:rpc:reply:12345-1720000000:7",
+  "metadata": {"trace-id": "abc"}
+}
+```
+
+- `data` — the externally-tagged `RpcData` (`{"Json": ...}` / `{"Text": ...}` / `{"Binary": [...]}`), keeping all three payload variants lossless across the hop.
+- `reply_to` — present for request-response (`send`); absent for fire-and-forget (`emit`).
+- `metadata` — per-call metadata; Redis Pub/Sub frames have no headers, so it rides in the envelope.
+
+Responses published to the reply channel use the same framing as the other transports: `{"response": ...}` on success (handler errors ride inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, `{"response": null}` as the event-handler ack, and raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+### Foreign publishers
+
+A payload that does not parse as the envelope — e.g. `redis-cli PUBLISH order.shipped '{"order_id":1001}'` — is accepted as fire-and-forget: the raw payload becomes the handler's `RpcData` (JSON if it parses, `Binary` otherwise), with no reply and no metadata.
+
+## Client transport
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_redis_rpc::RedisClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(RedisClientTransport::new("redis://127.0.0.1:6379"))
+)
+```
+
+Connection is lazy on first use. Each transport instance derives a unique client id and pattern-subscribes once to `toni:rpc:reply:{client_id}:*`; a single background router then matches every reply to its waiting call by correlation id — no per-request subscription churn. The router's Pub/Sub connection reconnects with a 500 ms backoff if it drops; the publish side reconnects on its own.
+
+### Custom timeout
+
+Default request-response timeout is 5 seconds:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    RedisClientTransport::new("redis://127.0.0.1:6379")
+        .with_timeout(Duration::from_secs(10))
+)
+```
+
+## Operational limits
+
+- Redis Pub/Sub is at-most-once: a message published while the server's subscription is down (during a reconnect window) is lost, and `emit` cannot detect it.
+- No drain timeout or in-flight cap — each inbound message spawns an unbounded task; shutdown stops the subscriber loop without waiting for in-flight handlers.
+- No per-request tracing span.
+- `BoundAdapters.rpc` is `None` — the adapter owns no listening socket.

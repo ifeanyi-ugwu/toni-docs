@@ -1,0 +1,121 @@
+---
+title: Streaming
+description: Unary, server-streaming, client-streaming, and bidirectional handlers through #[grpc_methods].
+---
+
+All four gRPC call modes work through `#[grpc_methods]` without per-mode setup — the macro hands tonic an instance of the trait impl and tonic dispatches. The signatures below come from the framework's integration suite; the proto they implement:
+
+```protobuf
+service Orders {
+    rpc Create (CreateOrderRequest) returns (CreateOrderResponse);
+    rpc WatchProgress (WatchRequest) returns (stream ProgressEvent);
+    rpc BulkCreate (stream CreateOrderRequest) returns (BulkCreateResponse);
+    rpc Chat (stream ChatMessage) returns (stream ChatMessage);
+}
+```
+
+## Unary
+
+Request in, response out:
+
+```rust
+async fn create(
+    &self,
+    request: tonic::Request<orders_pb::CreateOrderRequest>,
+) -> Result<tonic::Response<orders_pb::CreateOrderResponse>, tonic::Status> {
+    let req = request.into_inner();
+    Ok(tonic::Response::new(orders_pb::CreateOrderResponse {
+        id: self.counter.next_id(),
+        status: format!("created:{}", req.item),
+    }))
+}
+```
+
+## Server streaming
+
+The tonic-generated trait expects an associated stream type. Declare it as a pinned boxed stream and return any stream of `Result<Item, Status>`:
+
+```rust
+use std::pin::Pin;
+use futures_util::Stream;
+
+type WatchProgressStream =
+    Pin<Box<dyn Stream<Item = Result<orders_pb::ProgressEvent, tonic::Status>> + Send>>;
+
+async fn watch_progress(
+    &self,
+    request: tonic::Request<orders_pb::WatchRequest>,
+) -> Result<tonic::Response<Self::WatchProgressStream>, tonic::Status> {
+    let id = request.into_inner().id;
+    let stream = futures_util::stream::iter(
+        ["queued", "picked", "shipped"].into_iter().map(move |status| {
+            Ok(orders_pb::ProgressEvent { id, status: status.to_string() })
+        }),
+    );
+    Ok(tonic::Response::new(Box::pin(stream)))
+}
+```
+
+## Client streaming
+
+The request wraps a `tonic::Streaming<T>`; consume it with `StreamExt::next` and return a single summary response:
+
+```rust
+use futures_util::StreamExt;
+
+async fn bulk_create(
+    &self,
+    request: tonic::Request<tonic::Streaming<orders_pb::CreateOrderRequest>>,
+) -> Result<tonic::Response<orders_pb::BulkCreateResponse>, tonic::Status> {
+    let mut stream = request.into_inner();
+    let mut created: u32 = 0;
+    let first_id = self.counter.next_id();
+    while let Some(item) = stream.next().await {
+        let _req = item?;
+        if created > 0 {
+            self.counter.next_id();
+        }
+        created += 1;
+    }
+    Ok(tonic::Response::new(orders_pb::BulkCreateResponse { created, first_id }))
+}
+```
+
+## Bidirectional streaming
+
+Combines both shapes: a `Streaming<T>` request and an associated stream response. The [`async-stream`](https://docs.rs/async-stream) crate keeps the echo loop readable:
+
+```rust
+type ChatStream =
+    Pin<Box<dyn Stream<Item = Result<orders_pb::ChatMessage, tonic::Status>> + Send>>;
+
+async fn chat(
+    &self,
+    request: tonic::Request<tonic::Streaming<orders_pb::ChatMessage>>,
+) -> Result<tonic::Response<Self::ChatStream>, tonic::Status> {
+    let mut inbound = request.into_inner();
+    let counter = self.counter.clone();
+    let outbound = async_stream::stream! {
+        while let Some(msg) = inbound.next().await {
+            match msg {
+                Ok(m) => yield Ok(orders_pb::ChatMessage {
+                    text: m.text,
+                    id: counter.next_id(),
+                }),
+                Err(e) => yield Err(e),
+            }
+        }
+    };
+    Ok(tonic::Response::new(Box::pin(outbound)))
+}
+```
+
+## Enhancers and streams
+
+Enhancers apply to streaming methods the same way they apply to unary ones, with one timing nuance:
+
+- **Guards** run before the response stream is opened — a rejection means the client never receives a stream.
+- **Interceptors** wrap the call up to the point the stream is returned, not the lifetime of the stream itself.
+- **Error handlers** fire when the handler returns `Err` or panics *before* producing the stream. Errors yielded *inside* the stream are produced by your code and pass through to the client unchanged.
+
+On shutdown, streams still open when the drain timeout elapses are aborted and clients see `UNAVAILABLE` — see [operations](/docs/grpc/operations#graceful-shutdown-and-drain).

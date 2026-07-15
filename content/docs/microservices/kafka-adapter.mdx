@@ -1,0 +1,91 @@
+---
+title: Kafka Adapter
+description: Kafka topics as patterns — request-response emulated with reply-topic and correlation-id headers.
+---
+
+`toni-kafka` maps each RPC pattern to a Kafka topic. Kafka is an event log, not a request-response bus, but it carries message headers — so request-response is emulated: a request names a reply topic and a correlation id in the reserved headers `toni-reply-to` and `toni-correlation-id`, the server produces the reply there, and the client routes it back by correlation id. The message body is raw `RpcData` bytes.
+
+Built on `rdkafka`, which compiles and links librdkafka natively — a C toolchain is required at build time.
+
+## Server setup
+
+Add the dependencies:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-kafka = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_kafka::KafkaAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(KafkaAdapter::new("127.0.0.1:9092"))?;
+    app.start().await?;
+    Ok(())
+}
+```
+
+`new` takes the `bootstrap.servers` string (comma-separated for multiple brokers). A broker that is down at startup does not panic the process — consume errors are logged and retried with a 500 ms backoff.
+
+### Consumer group
+
+```rust
+KafkaAdapter::new("127.0.0.1:9092").with_group_id("orders-service")
+```
+
+The server consumes in a consumer group (default `toni-rpc-server`). Instances sharing a group id load-balance the pattern topics' partitions — the horizontal-scaling story for this transport. The consumer uses `auto.offset.reset=latest`, so a freshly started group processes new requests rather than replaying topic history.
+
+## How patterns map to topics
+
+Each pattern is one topic; routing matches the received record's topic against the registered patterns. At startup the adapter pre-creates the pattern topics (1 partition, replication factor 1) so partition assignment happens at group join instead of after a metadata refresh. Pre-creation is best-effort: existing topics are fine, and on failure the broker's auto-create (`auto.create.topics.enable`) is the fallback. Create topics out of band when specific partition counts or replication are needed.
+
+## Wire behavior
+
+- **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
+- **Request-response** — a record carrying a `toni-reply-to` header gets the framed response produced to that topic, with `toni-correlation-id` echoed back. A reply-to addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
+- **Fire-and-forget** — no `toni-reply-to` header; nothing is produced back.
+- **Metadata** — every header other than the two reserved keys becomes `ctx.metadata()`; per-call metadata from the client travels the same way.
+
+Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
+
+## Client transport
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_kafka::KafkaClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(KafkaClientTransport::new("127.0.0.1:9092"))
+)
+```
+
+Connection is lazy on first use. Each transport instance creates a private reply topic, `toni.rpc.reply.{pid}-{nanos}`, and consumes it in its own unique group with `auto.offset.reset=earliest` — so a reply produced before partition assignment completes is still delivered. A background router matches replies to waiting calls by correlation id. Produce calls (both `send` and `emit`) have a 5-second delivery timeout.
+
+### Custom timeout
+
+Default request-response timeout is 5 seconds:
+
+```rust
+use std::time::Duration;
+
+RpcClient::new(
+    KafkaClientTransport::new("127.0.0.1:9092")
+        .with_timeout(Duration::from_secs(10))
+)
+```
+
+## Operational limits
+
+- Request-response over a log trades latency for Kafka's durability and scaling — expect broker round-trips well above the socket transports; the 5-second default timeout is sized accordingly.
+- Reply topics accumulate: each client transport instance creates one (`toni.rpc.reply.{pid}-{nanos}`, 1 partition / RF 1) and nothing cleans them up on exit — configure broker-side retention or delete them out of band.
+- Offsets are committed automatically (`enable.auto.commit=true`); consumption is not tied to handler success — a handler error does not requeue the message.
+- No drain timeout or in-flight cap — each record spawns an unbounded task; shutdown stops the consumer without waiting for in-flight handlers.
+- No per-request tracing span; `BoundAdapters.rpc` is `None`.

@@ -1,9 +1,9 @@
 ---
 title: CLI Installation
-description: Install the Toni CLI to scaffold new projects and generate boilerplate.
+description: Install the Toni CLI to scaffold new projects and generate resources.
 ---
 
-The Toni CLI (`toni-cli`) scaffolds new projects and generates common boilerplate (modules, controllers, services) from the terminal.
+The Toni CLI (`toni-cli`) scaffolds new projects and generates CRUD resources (module + controller + service, wired in automatically) from the terminal.
 
 ## Install
 
@@ -11,7 +11,7 @@ The Toni CLI (`toni-cli`) scaffolds new projects and generates common boilerplat
 cargo install toni-cli
 ```
 
-Verify installation:
+Verify installation — the version printed matches the installed crate version:
 
 ```bash
 toni --version
@@ -26,5 +26,5 @@ cargo install toni-cli --force
 
 ## Requirements
 
-- Rust 1.75 or later (needed to compile the generated projects)
+- Rust 1.85 or later (the CLI and generated projects use the 2024 edition)
 - Cargo on your PATH

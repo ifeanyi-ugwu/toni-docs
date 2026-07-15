@@ -1,4 +1,14 @@
 {
   "title": "Microservices",
-  "pages": ["overview", "rpc-controllers", "tcp-adapter", "nats-adapter"]
+  "pages": [
+    "overview",
+    "rpc-controllers",
+    "tcp-adapter",
+    "udp-adapter",
+    "nats-adapter",
+    "redis-adapter",
+    "rabbitmq-adapter",
+    "mqtt-adapter",
+    "kafka-adapter"
+  ]
 }

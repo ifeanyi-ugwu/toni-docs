@@ -1,0 +1,52 @@
+---
+title: Rocket Adapter
+description: Using the toni-rocket adapter — setup, same-port WebSocket via rocket_ws, buffered request bodies, and graceful shutdown.
+---
+
+The `toni-rocket` crate wraps [Rocket](https://crates.io/crates/rocket) 0.5 to handle HTTP for Toni applications, with same-port WebSocket upgrades via [`rocket_ws`](https://crates.io/crates/rocket_ws) 0.1. Request bodies are buffered (32 MiB cap); response bodies stream.
+
+## Installation
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-rocket = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+## Basic setup
+
+```rust
+use toni::*;
+use toni_rocket::RocketAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::new().create_with(AppModule).await;
+    app.use_http_adapter(RocketAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.start().await?;
+    Ok(())
+}
+```
+
+Toni's `:param` and `*tail` path syntaxes are rewritten to Rocket's `<param>` / `<tail..>` form at bind time. Every standard method maps directly to a Rocket `Method` variant, so dispatch is exact-match. A low-rank `<__toni_fallback..>` catch-all returns Toni's standard 404 envelope through the global middleware chain.
+
+## WebSocket support
+
+Same-port gateways (`#[websocket_gateway("/path")]`) upgrade through `rocket_ws` on the HTTP listener; the routes are mounted as `GET`, matching RFC 6455. Sub-protocol negotiation is handled by `rocket_ws`.
+
+The adapter does **not** implement `WebSocketAdapter`, so separate-port gateways (`#[websocket_gateway("/path", port = N)]`) fail registration. Pair `toni-rocket` with a dedicated separate-port adapter ([`toni-tungstenite`](/docs/websocket/separate-port)) when you need one.
+
+## Body behavior
+
+- **Requests are buffered**, capped at 32 MiB. Rocket's `Data<'r>` is lifetime-bound to the request and cannot outlive the handler, so the adapter reads the full body into memory before handing it to Toni. The `BodyStream` extractor still works — it sees the payload as a single chunk.
+- **Responses stream.** `Body::stream(...)` is bridged into Rocket's `streamed_body`, so chunks reach the client incrementally — [SSE](/docs/techniques/sse) works. Buffered bodies are sent with an accurate `Content-Length` instead of chunked transfer.
+
+## Graceful shutdown
+
+The adapter forwards Toni's shutdown signal to Rocket's `Shutdown::notify()`; the launch future resolves once Rocket has drained in-flight connections. Rocket's own Ctrl-C handling is disabled (`shutdown.ctrlc = false`), so signal wiring goes through the application's [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) like every other adapter.
+
+## Quirks
+
+- **Hostname must be an IP literal.** The hostname is parsed as an `IpAddr` for Rocket's config; a DNS name like `"localhost"` falls back to `127.0.0.1`. Pass `"127.0.0.1"` or `"0.0.0.0"` explicitly.
+- **Port 0 works via a liftoff fairing.** Rocket fuses bind and serve into `launch()` with no public pre-serve hook, so the adapter captures the OS-assigned address in an `on_liftoff` fairing. `app.bind()` still returns the real address in `BoundAdapters` — dynamic ports behave like every other adapter.

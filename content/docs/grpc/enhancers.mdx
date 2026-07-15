@@ -1,0 +1,122 @@
+---
+title: Enhancers
+description: Guards and interceptors on gRPC services — GrpcContext, service- and method-level stacking, and the no-pipes rule.
+---
+
+Guards, interceptors, and error handlers are ordinary DI providers applied to a `#[grpc_methods]` impl via `#[use_*]` attributes — at the impl level (every method) or per method:
+
+```rust
+#[grpc_methods]
+#[tonic::async_trait]
+#[use_guards(AuthGuard)]                       // every method
+#[use_error_handlers(QtyErrorHandler)]         // every method
+impl Orders for OrdersGrpcService {
+    #[use_guards(AdminGuard)]                  // this method only
+    #[use_interceptors(LoggingInterceptor)]
+    async fn create(&self, /* ... */) { /* ... */ }
+}
+```
+
+Each provider registers by implementing the corresponding trait against `GrpcContext` — there is no marker attribute. Declare `#[injectable]`, implement the trait, list the provider in the module, apply with `#[use_*]`.
+
+The pipeline per call: guards → interceptors → handler → error handlers (on `Err` or panic). Error handlers are covered in [error handling](/docs/grpc/error-handling).
+
+## GrpcContext
+
+gRPC payloads are method-typed protobuf messages and can't sit in a non-generic struct, so `GrpcContext` deliberately holds only what every enhancer can name without a type parameter — there is no request body on it:
+
+| Accessor | Returns |
+|---|---|
+| `method()` | `&str` — proto trait + Rust method name, e.g. `"Orders/create"` |
+| `metadata()` / `metadata_mut()` | the inbound metadata map (`HashMap<String, String>`) |
+| `get_metadata(key)` | `Option<&str>` |
+| `peer()` | `Option<SocketAddr>` |
+| `set_response(Result<(), GrpcStatus>)` | short-circuit slot — the handler runs only if it stays unset |
+| `response()` / `take_response()` | read / take the slot |
+
+Only ASCII metadata is captured; binary (`-bin`) entries are skipped. `GrpcContext` also implements `HandlerContext`, so `route_metadata()`, `extensions()`, and `cancellation()` work as on the other transports.
+
+Note the naming split: `#[use_*]` attributes key on the bare Rust method name (`create`), `ctx.method()` returns `"Orders/create"`, and the tracing span's `pattern` field carries the full wire path (`"toni_examples.orders.Orders/Create"`).
+
+## Guards
+
+A guard implements `Guard<GrpcContext>`. The resolved chain runs before the handler; a `false` return short-circuits the call with `PermissionDenied`:
+
+```rust
+use toni::GrpcContext;
+use toni::traits_helpers::Guard;
+
+#[injectable]
+pub struct AuthGuard {}
+impl AuthGuard {}
+
+#[toni::async_trait]
+impl Guard<GrpcContext> for AuthGuard {
+    async fn can_activate(&self, ctx: &GrpcContext) -> bool {
+        matches!(ctx.get_metadata("authorization"), Some("Bearer secret-token"))
+    }
+}
+```
+
+Method-level guards **stack on** service-level guards, service level first. With `#[use_guards(AuthGuard)]` on the impl and `#[use_guards(AdminGuard)]` on `create`, a call to `create` must pass both; other methods only need `AuthGuard`.
+
+## Interceptors
+
+An interceptor implements `Interceptor<GrpcContext>` and wraps the user delegation — `next.run(ctx).await` proceeds; skipping it short-circuits:
+
+```rust
+use toni::GrpcContext;
+use toni::traits_helpers::{Interceptor, InterceptorNext};
+
+#[injectable]
+pub struct LoggingInterceptor {}
+impl LoggingInterceptor {}
+
+#[toni::async_trait]
+impl Interceptor<GrpcContext> for LoggingInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &mut GrpcContext,
+        next: Box<dyn InterceptorNext<GrpcContext>>,
+    ) {
+        tracing::info!(method = %ctx.method(), "before");
+        next.run(ctx).await;
+        tracing::info!(method = %ctx.method(), "after");
+    }
+}
+```
+
+Method-level interceptors **nest inside** service-level ones:
+
+```
+service:before → method:before → handler → method:after → service:after
+```
+
+To short-circuit with a typed status, set the response slot and skip `next.run`:
+
+```rust
+#[toni::async_trait]
+impl Interceptor<GrpcContext> for DenyInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &mut GrpcContext,
+        _next: Box<dyn InterceptorNext<GrpcContext>>,
+    ) {
+        ctx.set_response(Err(toni::GrpcStatus::permission_denied(
+            "blocked by interceptor",
+        )));
+        // Skipping `_next.run(ctx).await` short-circuits the call.
+    }
+}
+```
+
+Skipping `next.run` *without* setting a response yields `Internal` ("interceptor short-circuited the call without producing a response") — always set the slot when short-circuiting.
+
+## No pipes
+
+`#[use_pipes]` is not supported on `#[grpc_methods]`. The proto payload is method-typed and can't sit in the non-generic `GrpcContext`, and a metadata-only pipe adds no expressive power over interceptors. To mutate metadata before the handler runs, use an interceptor over `ctx.metadata_mut()`.
+
+## Scope and globals
+
+- **Request-scoped enhancers are rejected at startup.** gRPC has no HTTP request context, so a guard or interceptor with request-scoped dependencies fails app initialization rather than the first call.
+- **There is no global registration for gRPC enhancers** — no gRPC counterpart to `use_global_http_guards` and friends. Enhancers attach at the impl or method level. `use_global_error_observer` does apply: observers see gRPC guard rejections, errors, and recovered panics like on every other transport.

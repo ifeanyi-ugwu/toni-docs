@@ -44,12 +44,19 @@ use toni_terminus::{
     HealthCheckService, HttpHealthIndicator, MemoryHealthIndicator, DiskHealthIndicator,
 };
 
-#[controller("/health", pub struct HealthController {
-    #[inject] health: HealthCheckService,
-    #[inject] http:   HttpHealthIndicator,
-    #[inject] memory: MemoryHealthIndicator,
-    #[inject] disk:   DiskHealthIndicator,
-})]
+#[controller("/health")]
+pub struct HealthController {
+    #[inject]
+    health: HealthCheckService,
+    #[inject]
+    http: HttpHealthIndicator,
+    #[inject]
+    memory: MemoryHealthIndicator,
+    #[inject]
+    disk: DiskHealthIndicator,
+}
+
+#[routes]
 impl HealthController {
     /// Liveness probe — is the process alive? No network calls.
     #[get("/live")]
@@ -76,14 +83,39 @@ impl HealthController {
 }
 ```
 
-All checks run concurrently. The response is HTTP 200 when every check passes, HTTP 503 if any fail. The body is a JSON object keyed by the `key` string passed to each check:
+All checks run concurrently. The response is HTTP 200 when every check passes, HTTP 503 if any fail. The body always has four keys — `status`, `info` (passing checks), `error` (failing checks), and `details` (the union of both) — each check keyed by the `key` string it was given:
 
 ```json
 // 200 — all healthy
-{"status":"ok","info":{"api":{"status":"up","responseTime":42},"memory":{"status":"up"}}}
+{
+  "status": "ok",
+  "info": {
+    "api":    { "status": "up", "url": "https://api.example.com/health", "responseTime": 42 },
+    "memory": { "status": "up", "rss": 181239808, "threshold": 536870912 }
+  },
+  "error": {},
+  "details": {
+    "api":    { "status": "up", "url": "https://api.example.com/health", "responseTime": 42 },
+    "memory": { "status": "up", "rss": 181239808, "threshold": 536870912 }
+  }
+}
+```
 
+```json
 // 503 — something down
-{"status":"error","error":{"api":{"status":"down","message":"connection refused"}}}
+{
+  "status": "error",
+  "info": {
+    "memory": { "status": "up", "rss": 181239808, "threshold": 536870912 }
+  },
+  "error": {
+    "api": { "status": "down", "url": "https://api.example.com/health", "message": "connection refused" }
+  },
+  "details": {
+    "memory": { "status": "up", "rss": 181239808, "threshold": 536870912 },
+    "api":    { "status": "down", "url": "https://api.example.com/health", "message": "connection refused" }
+  }
+}
 ```
 
 ## Built-in indicators
@@ -164,11 +196,17 @@ When `health` is enabled, `for_root()` automatically registers the indicator alo
 use toni_redis::RedisHealthIndicator;
 use toni_seaorm::SeaOrmHealthIndicator;
 
-#[controller("/health", pub struct HealthController {
-    #[inject] health: HealthCheckService,
-    #[inject] redis:  RedisHealthIndicator,
-    #[inject] db:     SeaOrmHealthIndicator,
-})]
+#[controller("/health")]
+pub struct HealthController {
+    #[inject]
+    health: HealthCheckService,
+    #[inject]
+    redis: RedisHealthIndicator,
+    #[inject]
+    db: SeaOrmHealthIndicator,
+}
+
+#[routes]
 impl HealthController {
     #[get("/ready")]
     async fn readiness(&self) -> impl IntoResponse {
@@ -226,7 +264,8 @@ self.health.check(vec![
 ## HealthEntry helpers
 
 ```rust
-HealthEntry::up(key)                          // pass, no details
-HealthEntry::up_with(key, serde_json::Value)  // pass with detail object
+HealthEntry::up(key)                           // pass, no details
+HealthEntry::up_with(key, serde_json::Value)   // pass with detail object
+HealthEntry::down(key)                         // fail, no details
 HealthEntry::down_with(key, serde_json::Value) // fail with detail object
 ```

@@ -1,0 +1,157 @@
+---
+title: Quick Start
+description: From a .proto file to a running gRPC server with DI — proto compilation, #[grpc_service], #[grpc_methods], and module wiring.
+---
+
+This walkthrough builds a single-method gRPC service backed by an injected provider. Dependencies are listed in the [overview](/docs/grpc/overview#installation).
+
+## 1. Define the contract
+
+`proto/orders.proto`:
+
+```protobuf
+syntax = "proto3";
+package toni_examples.orders;
+
+service Orders {
+    rpc Create (CreateOrderRequest) returns (CreateOrderResponse);
+}
+
+message CreateOrderRequest { string item = 1; uint32 qty = 2; }
+message CreateOrderResponse { uint64 id = 1; string status = 2; }
+```
+
+## 2. Compile it in build.rs
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tonic_prost_build::compile_protos("proto/orders.proto")?;
+    Ok(())
+}
+```
+
+This requires `protoc` on the build machine. To vendor it instead (via the `protoc-bin-vendored` build-dependency):
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    // SAFETY: build.rs is single-threaded; setting an env var here is fine.
+    unsafe {
+        std::env::set_var("PROTOC", protoc);
+    }
+    tonic_prost_build::compile_protos("proto/orders.proto")?;
+    Ok(())
+}
+```
+
+## 3. Implement the service
+
+`tonic::include_proto!` pulls the generated code into a module. The generated trait (`Orders`) is what your service implements; the generated server wrapper (`OrdersServer`) must be in scope because the macro-generated registration code names it — user code never calls it.
+
+```rust
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use toni::ToniFactory;
+use toni_macros::{grpc_methods, grpc_service, injectable, module, new};
+
+mod orders_pb {
+    tonic::include_proto!("toni_examples.orders");
+}
+use orders_pb::orders_server::{Orders, OrdersServer};
+
+// An ordinary provider — nothing gRPC-specific about it.
+#[injectable]
+pub struct OrdersCounter {
+    seq: Arc<AtomicU64>,
+}
+impl OrdersCounter {
+    #[new]
+    pub fn new() -> Self {
+        Self { seq: Arc::new(AtomicU64::new(1000)) }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::SeqCst)
+    }
+}
+
+// The struct definition lives inside the attribute; #[inject] fields
+// resolve from the module's providers. The impl block carries the
+// constructor.
+#[grpc_service(pub struct OrdersGrpcService {
+    #[inject] counter: OrdersCounter,
+})]
+impl OrdersGrpcService {
+    pub fn new(counter: OrdersCounter) -> Self {
+        Self { counter }
+    }
+}
+
+// #[grpc_methods] goes on the proto-trait impl (it errors on inherent
+// impls). It wraps every method with the enhancer pipeline and registers
+// the service with the adapter at bind time.
+#[grpc_methods]
+#[tonic::async_trait]
+impl Orders for OrdersGrpcService {
+    async fn create(
+        &self,
+        request: tonic::Request<orders_pb::CreateOrderRequest>,
+    ) -> Result<tonic::Response<orders_pb::CreateOrderResponse>, tonic::Status> {
+        let req = request.into_inner();
+        if req.qty == 0 {
+            return Err(tonic::Status::invalid_argument("qty must be positive"));
+        }
+        let id = self.counter.next_id();
+        Ok(tonic::Response::new(orders_pb::CreateOrderResponse {
+            id,
+            status: format!("created:{}", req.item),
+        }))
+    }
+}
+```
+
+`#[grpc_service]` registers the struct as a singleton provider. `#[grpc_methods]` emits the tonic registration — there is no `OrdersServer::new(...)` and no `adapter.add_service(...)` in user code; listing the service in a module's `providers` is the entire wiring story.
+
+By convention the server wrapper is inferred from the trait name: a trailing `Service` is stripped and `Server` appended (`Orders` → `OrdersServer`, `OrdersService` → `OrdersServer`), resolved in the trait's parent path. When the tonic-generated wrapper lives elsewhere or has a non-standard name, point at it explicitly: `#[grpc_methods(server = path::to::OrdersServer)]`.
+
+## 4. Wire the module and start
+
+```rust
+#[module(providers: [OrdersCounter, OrdersGrpcService])]
+struct AppModule;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(async move {
+        let addr: SocketAddr = "127.0.0.1:50051".parse().unwrap();
+        let mut app = ToniFactory::create(AppModule).await;
+        app.use_grpc_adapter(toni_grpc::GrpcAdapter::new(addr)).unwrap();
+        app.start().await.unwrap();
+    }).await;
+}
+```
+
+### The LocalSet requirement
+
+`ToniFactory` and the application it builds are `!Send` — the DI container is `Rc`-based. Every gRPC example and integration test in the repository runs under `#[tokio::main(flavor = "current_thread")]` with a `tokio::task::LocalSet`, as above. Use this pattern for gRPC `main` functions; the remaining pages in this section assume it and show only the code inside `run_until`.
+
+## 5. Smoke-test with grpcurl
+
+```bash
+grpcurl -plaintext \
+    -d '{"item":"keyboard","qty":3}' \
+    -proto proto/orders.proto -import-path proto \
+    127.0.0.1:50051 toni_examples.orders.Orders/Create
+```
+
+```json
+{
+  "id": "1000",
+  "status": "created:keyboard"
+}
+```
+
+A complete runnable version — including a guard, an interceptor, and an error handler — lives at `examples/grpc_service.rs` in the repository (`cargo run --example grpc_service`).

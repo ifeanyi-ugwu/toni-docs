@@ -3,280 +3,738 @@ title: toni (core)
 description: API reference for the toni core crate — types, traits, and the application factory.
 ---
 
+Reference for the public surface of the `toni` crate. Items are shown with their crate-root import path where one exists; types not re-exported at the root list their module path.
+
 ## ToniFactory
 
-The entry point for creating Toni applications.
+`toni::ToniFactory` — builds the DI container and produces a `ToniApplication` or a standalone `ToniApplicationContext`.
 
 ```rust
-use toni::ToniFactory;
+ToniFactory::new() -> ToniFactory
+
+// Shorthand — no factory config needed
+ToniFactory::create(module: impl Into<ModuleDefinition>) -> ToniApplication          // async
+ToniFactory::create_application_context(module) -> ToniApplicationContext            // async
+
+// Instance methods (use after registering globals)
+factory.create_with(module) -> ToniApplication                                       // async
+factory.create_application_context_with(module) -> ToniApplicationContext            // async
 ```
 
-### Associated functions
+Modules pass directly: `ToniFactory::create(AppModule).await`. On module-initialization failure, `create_with` / `create_application_context_with` log the error and call `std::process::exit(1)`.
+
+### Global registration
+
+All registration methods take `&mut self` and return `&mut Self`. Enhancer globals are per-transport — there is no transport-agnostic `use_global_guards`.
 
 ```rust
-// Create an application (shorthand — no factory config needed)
-ToniFactory::create(module) -> ToniApplication
+factory.use_global_middleware(Arc<dyn Middleware>)
+factory.use_global_error_observer(Arc<dyn ErrorObserver>)
 
-// Create a standalone DI context (no HTTP server)
-ToniFactory::create_application_context(module) -> ToniApplicationContext
+// HTTP
+factory.use_global_http_guards(Arc<dyn Guard<HttpContext>>)
+factory.use_global_http_interceptors(Arc<dyn Interceptor<HttpContext>>)
+factory.use_global_http_pipes(Arc<dyn Pipe<HttpContext>>)
+factory.use_global_http_error_handler(Arc<dyn ErrorHandler<HttpContext, HttpResponse>>)
+
+// RPC
+factory.use_global_rpc_guards(Arc<dyn Guard<RpcContext>>)
+factory.use_global_rpc_interceptors(Arc<dyn Interceptor<RpcContext>>)
+factory.use_global_rpc_pipes(Arc<dyn Pipe<RpcContext>>)
+factory.use_global_rpc_error_handler(Arc<dyn ErrorHandler<RpcContext, RpcData>>)
+
+// WebSocket
+factory.use_global_ws_guards(Arc<dyn Guard<WsContext>>)
+factory.use_global_ws_interceptors(Arc<dyn Interceptor<WsContext>>)
+factory.use_global_ws_pipes(Arc<dyn Pipe<WsContext>>)
+factory.use_global_ws_error_handler(Arc<dyn ErrorHandler<WsContext, WsMessage>>)
 ```
 
-### Methods (on instance)
-
-Create a factory with global enhancers, then create the app:
+Global error handlers stack with controller- and method-level handlers; the most specific is consulted first. Error observers are fire-and-forget — they see framework-generated errors (guard rejections, panics, missing routes) but do not shape responses.
 
 ```rust
 let mut factory = ToniFactory::new();
-factory
-    .use_global_middleware(Arc::new(impl_middleware))
-    .use_global_guards(Arc::new(impl_guard))
-    .use_global_interceptors(Arc::new(impl_interceptor))
-    .use_global_pipes(Arc::new(impl_pipe))
-    .use_global_error_handler(Arc::new(impl_error_handler));
-
-let mut app = factory.create_with(AppModule).await;
-let mut ctx = factory.create_application_context_with(AppModule).await;
+factory.use_global_http_guards(Arc::new(AuthGuard::default()));
+let app = factory.create_with(AppModule).await;
 ```
-
----
 
 ## ToniApplication
 
-The running application instance returned by `ToniFactory::create`.
+Returned by `ToniFactory::create` / `create_with`. Two-phase lifecycle: configure adapters, then `bind()` + `run()` (or `start()` for both in one step).
+
+### Adapter registration
+
+Callable only before `bind()`; each returns `Result<&mut Self>`.
 
 ```rust
-// Register the HTTP adapter and route tree
-app.use_http_adapter(adapter, port: u16, hostname: &str) -> Result<&mut Self>
-
-// Register an RPC transport (TCP, NATS, etc.)
-app.use_rpc_adapter(adapter) -> Result<&mut Self>
-
-// Register a separate-port WebSocket adapter (optional — same-port WS uses the HTTP adapter)
-app.use_websocket_adapter(ws_adapter) -> Result<&mut Self>
-
-// Start all registered servers (HTTP, WS, RPC)
-app.start() -> !
-
-// Get a provider by type
-app.get::<T>() -> Result<T>
-app.get_from::<T>(module_token: &str) -> Result<T>
-app.get_by_token::<T>(token: impl IntoToken) -> Result<T>
-app.get_from_by_token::<T>(module_token: &str, token: impl IntoToken) -> Result<T>
-
-// Trigger shutdown lifecycle
-app.close() -> Result<()>
+app.use_http_adapter<A: HttpAdapter + 'static>(adapter: A, port: u16, hostname: &str)
+app.use_websocket_adapter<A: WebSocketAdapter>(adapter: A)
+app.use_rpc_adapter<A: RpcAdapter>(adapter: A)
+app.use_grpc_adapter<A: GrpcAdapter>(adapter: A)
 ```
 
----
+gRPC is registered separately from RPC because it is contract-first (`.proto` services, streaming) rather than pattern-string + JSON.
 
-## Traits
-
-### Middleware
+### Lifecycle
 
 ```rust
-#[async_trait]
-pub trait Middleware: Send + Sync {
-    async fn handle(&self, req: HttpRequest, next: Box<dyn Next>) -> MiddlewareResult;
+app.bind() -> Result<BoundAdapters, BindError>   // async — sockets live on return
+app.run()                                        // async — consumes self; drives serve loops until shutdown
+app.start() -> Result<()>                        // async — consumes self; bind() + run()
+app.close(&mut self)                             // async — returns (); immediate hooks + adapter close
+app.shutdown_handle() -> ShutdownHandle
+```
+
+- `bind()` runs bootstrap hooks, discovers gateways/RPC controllers/gRPC services, and binds every adapter. Sockets are listening when it returns — pass port `0` and read the assigned address from `BoundAdapters`.
+- `run()` panics if called before `bind()`. On a shutdown signal it closes adapters first (draining in-flight requests), then runs lifecycle hooks.
+- `close()` returns `()`, not `Result` — no `?` or `.unwrap()`.
+- The framework installs no SIGTERM/SIGINT handlers. Wire signals to `shutdown_handle()` yourself.
+
+```rust
+let mut app = ToniFactory::create(AppModule).await;
+app.use_http_adapter(AxumAdapter::new(), 0, "127.0.0.1")?;
+let bound = app.bind().await?;
+println!("listening on {}", bound.http.unwrap());
+app.run().await;
+```
+
+### DI access
+
+Same surface as `ToniApplicationContext` (delegates to it); all async, all return `anyhow::Result<T>`.
+
+```rust
+app.get::<T>() -> Result<T>                                     // search all modules by type
+app.get_from::<T>(module_token: &str) -> Result<T>              // one module's scope
+app.get_by_token::<T>(token: impl IntoToken) -> Result<T>       // custom token
+app.get_from_by_token::<T>(module_token, token) -> Result<T>
+app.resolve::<T>(parts: &RequestPart) -> Result<T>              // request-scoped/transient, synthetic ctx
+app.resolve_by_token::<T>(token, parts: &RequestPart) -> Result<T>
+```
+
+`get*` refuses request-scoped providers; use `resolve*` with a synthetic `RequestPart` for those.
+
+### BoundAdapters
+
+Returned by `bind()`.
+
+```rust
+pub struct BoundAdapters {
+    pub http: Option<SocketAddr>,       // None if no HTTP adapter registered
+    pub websocket: Vec<SocketAddr>,     // one per unique separate-port WS listener
+    pub rpc: Option<SocketAddr>,        // None for subject-based transports (NATS, Kafka)
+    pub grpc: Option<SocketAddr>,
 }
-
-pub type MiddlewareResult = Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>>;
 ```
+
+### ShutdownHandle
+
+Cloneable; valid immediately after creation and usable from any task.
+
+```rust
+handle.shutdown()                    // signal shutdown; idempotent
+handle.is_shutdown() -> bool
+handle.wait_for_shutdown()           // async — resolves once shutdown() was called
+handle.completed()                   // async — resolves once run() has returned
+```
+
+```rust
+let shutdown = app.shutdown_handle();
+tokio::spawn(async move {
+    tokio::signal::ctrl_c().await.ok();
+    shutdown.shutdown();
+});
+app.run().await;
+```
+
+### InitResult and BindError
+
+```rust
+// Return type for startup hooks (#[on_module_init], #[on_application_bootstrap])
+pub type InitResult = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+pub enum BindError {
+    HookFailed { module: String, hook: &'static str, source: Box<dyn Error + Send + Sync> },
+    Setup(Box<dyn Error + Send + Sync>),   // no adapter, wrong call order, bind failures
+}
+```
+
+`BindError::HookFailed` names the failing module and hook so callers can identify the source without parsing the message.
+
+## ToniApplicationContext
+
+`toni::ToniApplicationContext` — the full DI container without a server, for CLI tools, cron jobs, and background workers. Created by `ToniFactory::create_application_context`.
+
+```rust
+ctx.get::<T>() -> Result<T>
+ctx.get_from::<T>(module_token: &str) -> Result<T>
+ctx.get_by_token::<T>(token: impl IntoToken) -> Result<T>
+ctx.get_from_by_token::<T>(module_token, token) -> Result<T>
+ctx.resolve::<T>(parts: &RequestPart) -> Result<T>
+ctx.resolve_by_token::<T>(token, parts: &RequestPart) -> Result<T>
+ctx.close(&mut self)        // async — returns (); runs destroy/shutdown hooks
+```
+
+## Contexts
+
+`toni::context` — per-request execution contexts, one concrete type per transport. All four implement `HandlerContext`, so an enhancer can be written for one transport (`Guard<HttpContext>`) or all of them (`impl<C: HandlerContext + ?Sized> Guard<C>`).
+
+Re-exported at the root: `HandlerContext`, `HttpContext`, `RpcContext`, `WsContext`, `GrpcContext`, `CancellationToken`.
+
+### HandlerContext
+
+```rust
+pub trait HandlerContext: Send + Sync {
+    fn route_metadata(&self) -> Option<&RouteMetadata>;  // #[set_metadata] values; None for global handlers
+    fn extensions(&self) -> &Extensions;                 // per-request typed key-value bag
+    fn extensions_mut(&mut self) -> &mut Extensions;
+    fn cancellation(&self) -> &CancellationToken;
+    fn deadline(&self) -> Option<Instant> { None }       // transports without deadlines return None
+    fn abort(&mut self);                                 // short-circuit the chain
+    fn should_abort(&self) -> bool;
+}
+```
+
+`dyn HandlerContext` additionally has `time_remaining() -> Option<Duration>`.
+
+### HttpContext
+
+```rust
+HttpContext::new(req: HttpRequest, route_metadata: Arc<RouteMetadata>) -> Self
+HttpContext::from_request(req: impl Into<HttpRequest>) -> Self       // testing convenience
+HttpContext::from_parts(parts: RequestPart) -> Self                  // empty body
+
+ctx.request() -> &RequestPart
+ctx.take_request() -> HttpRequest            // reconstructs parts + body; body is consumed once
+ctx.response() -> Option<&HttpResponse>
+ctx.response_mut() -> Option<&mut HttpResponse>
+ctx.set_response(HttpResponse)
+ctx.take_response() -> Option<HttpResponse>
+```
+
+### RpcContext
+
+```rust
+ctx.pattern() -> &str
+ctx.metadata() -> &HashMap<String, String>
+ctx.metadata_mut() -> &mut HashMap<String, String>
+ctx.get_metadata(key: &str) -> Option<&str>
+ctx.data() -> &RpcData
+ctx.transport_extensions() -> &Extensions    // adapter-specific (e.g. raw NATS message)
+ctx.response() / set_response(Result<Option<RpcData>, RpcError>) / take_response()
+```
+
+Fields are private — RPC handlers receive `&RpcContext` and read through these methods.
+
+### WsContext
+
+```rust
+ctx.client() -> &WsClient
+ctx.message() -> &WsMessage
+ctx.event() -> &str
+ctx.response() / set_response(Result<Option<WsMessage>, WsError>) / take_response()
+```
+
+### GrpcContext
+
+```rust
+ctx.method() -> &str                          // e.g. "orders.OrdersService/CreateOrder"
+ctx.metadata() -> &HashMap<String, String>    // ASCII metadata
+ctx.get_metadata(key: &str) -> Option<&str>
+ctx.peer() -> Option<SocketAddr>
+ctx.response() / set_response(Result<(), GrpcStatus>) / take_response()
+```
+
+The response slot is error-only: gRPC payloads are method-typed, so guards/interceptors can short-circuit with a `GrpcStatus` but cannot substitute a success value. Pipes are not supported on gRPC for the same reason.
+
+### CancellationToken
+
+Runtime-agnostic, cheaply cloneable (clones share state).
+
+```rust
+CancellationToken::new() -> Self
+token.cancel()                    // idempotent
+token.is_cancelled() -> bool
+token.cancelled()                 // async — resolves once cancel() was called
+```
+
+## Enhancer traits
+
+Import from `toni::traits_helpers::*` (guards, interceptors, pipes, error handlers, observers) and `toni::middleware::*` (middleware). All are generic over the context type `C: HandlerContext`; there are no role-marker macros — the framework detects the role from the trait impl on an `#[injectable]` type.
 
 ### Guard
 
 ```rust
-pub trait Guard: Send + Sync {
-    fn can_activate(&self, context: &Context) -> bool;
+#[async_trait]
+pub trait Guard<C: ?Sized + HandlerContext>: Send + Sync {
+    async fn can_activate(&self, context: &C) -> bool;
 }
 ```
+
+Returning `false` produces a `GuardRejection` (403 on HTTP). Guards cannot return errors; reshape rejections with a `#[catch(GuardRejection)]` handler.
 
 ### Interceptor
 
 ```rust
 #[async_trait]
-pub trait Interceptor: Send + Sync {
-    async fn intercept(&self, context: &mut Context, next: Box<dyn InterceptorNext>);
+pub trait InterceptorNext<C: ?Sized + HandlerContext>: Send {
+    async fn run(self: Box<Self>, context: &mut C);
+}
+
+#[async_trait]
+pub trait Interceptor<C: ?Sized + HandlerContext>: Send + Sync {
+    async fn intercept(&self, context: &mut C, next: Box<dyn InterceptorNext<C>>);
 }
 ```
+
+`next.run(context)` consumes the box — an interceptor cannot invoke the downstream handler twice. Skipping the call skips the handler entirely (caching, circuit breakers).
 
 ### Pipe
 
 ```rust
-pub trait Pipe: Send + Sync {
-    fn process(&self, data: &mut Context);
+pub trait Pipe<C: ?Sized + HandlerContext>: Send + Sync {
+    fn process(&self, data: &mut C);        // sync
 }
 ```
 
 ### ErrorHandler
 
 ```rust
+pub type ChainError<'a> = &'a (dyn std::error::Error + Send + Sync + 'static);
+
 #[async_trait]
-pub trait ErrorHandler: Send + Sync {
-    async fn handle_error(
-        &self,
-        error: Box<dyn std::error::Error + Send>,
-        request: &HttpRequest,
-    ) -> Option<HttpResponse>;
+pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
+    async fn handle_error(&self, error: ChainError<'_>, ctx: &C) -> Option<R>;
 }
 ```
 
-### FromRequest
+`R` is the transport's response type: `HttpResponse`, `RpcData`, or `WsMessage`. Handlers run method → controller → global until one returns `Some`; `None` falls through, and if all decline the framework default renders. Downcast with `error.downcast_ref::<T>()`, or use the `#[catch(T)]` macro which generates the downcast.
+
+### Middleware
+
+HTTP-only; runs after routing, before guards.
 
 ```rust
-pub trait FromRequest: Sized {
-    type Error: std::fmt::Display;
-    fn from_request(req: &HttpRequest) -> Result<Self, Self::Error>;
+use toni::middleware::{Middleware, NextHandle, MiddlewareResult};
+
+pub type MiddlewareResult = Result<HttpResponse, Box<dyn std::error::Error + Send + Sync>>;
+
+#[async_trait]
+pub trait Middleware: Send + Sync {
+    async fn handle(&self, next: NextHandle) -> MiddlewareResult;
 }
 ```
 
-### GatewayTrait
+`NextHandle` carries the in-flight request:
+
+```rust
+next.request() -> &HttpRequest
+next.request_mut() -> &mut HttpRequest
+next.run() -> MiddlewareResult              // async — pass request downstream unchanged
+next.run_with(req: HttpRequest) -> MiddlewareResult  // async — replace the request
+```
+
+The body arrives as `RequestBody::Streaming` and is single-use. To inspect it, collect the bytes and pass a rebuilt request with `RequestBody::Buffered` to `run_with`.
+
+### ErrorObserver
 
 ```rust
 #[async_trait]
-pub trait GatewayTrait: Send + Sync {
-    fn path(&self) -> &str;
-    async fn on_connect(&self, client: &WsClient);
-    async fn on_disconnect(&self, client: &WsClient, reason: DisconnectReason);
-    async fn on_message(&self, client: &WsClient, message: WsMessage);
-    // Optional:
-    async fn on_handshake(&self, handshake: &WsHandshake) -> bool { true }
+pub trait ErrorObserver: Send + Sync {
+    async fn observe<'a>(
+        &'a self,
+        error: &'a (dyn std::error::Error + Send + Sync + 'static),
+        ctx: &'a (dyn HandlerContext + 'a),
+    );
 }
 ```
 
----
+Fire-and-forget tap on framework-generated errors (guard rejections, panics, missing routes) across all transports. User-handler errors render directly through the transport and do not reach observers; log those in a `#[catch(MyError)]` handler.
 
-## HttpResponse
+## Error system
 
-```rust
-// Builder pattern
-HttpResponse::ok()                    // 200 OK
-HttpResponse::created()               // 201 Created
-HttpResponse::no_content()            // 204 No Content
-HttpResponse::bad_request()           // 400 Bad Request
-HttpResponse::unauthorized()          // 401 Unauthorized
-HttpResponse::forbidden()             // 403 Forbidden
-HttpResponse::not_found()             // 404 Not Found
-HttpResponse::too_many_requests()     // 429 Too Many Requests
-HttpResponse::builder().status(n)     // custom status
+### toni::Error and ErrorKind
 
-// Chained builder methods
-.json(value)                          // serialize as JSON, sets Content-Type
-.body(string)                         // raw string body
-.header(name, value)                  // add response header
-.build()                              // produce HttpResponse
-```
-
----
-
-## HttpError
+The framework's error contract. A handler returns `Result<T, E>` where `E: toni::Error`; a `From<E: Error>` blanket lifts it into the active transport's error type (`HttpError` / `RpcError` / `WsError`) via `?`, and the transport renders the canonical envelope from `kind` / `message` / `details`.
 
 ```rust
-use toni::errors::HttpError;
-
-HttpError::bad_request(message)
-HttpError::unauthorized(message)
-HttpError::forbidden(message)
-HttpError::not_found(message)
-HttpError::conflict(message)
-HttpError::unprocessable_entity(message)
-HttpError::internal_server_error(message)
-HttpError::with_status(status: u16, message)
-
-http_error.status_code() -> u16
+pub trait Error: std::error::Error + Send + Sync + 'static {
+    fn kind(&self) -> ErrorKind;
+    fn message(&self) -> Cow<'_, str> { /* Display */ }
+    fn details(&self) -> Option<serde_json::Value> { None }
+}
 ```
 
----
+`ErrorKind` (non-exhaustive) with the HTTP status each maps to:
+
+| Variant | HTTP | Variant | HTTP |
+|---|---|---|---|
+| `BadRequest` | 400 | `TooManyRequests` | 429 |
+| `Unauthorized` | 401 | `Timeout` | 504 |
+| `Forbidden` | 403 | `Unavailable` | 503 |
+| `NotFound` | 404 | `Unimplemented` | 501 |
+| `Conflict` | 409 | `Internal` | 500 |
+| `UnprocessableEntity` | 422 | | |
+
+`ErrorKind::name()` returns the variant name (`"NotFound"`) — the stable `kind` string in RPC/WS wire envelopes. Derive the trait with `#[derive(toni::Error)]` + `#[error_kind(KIND)]` (see the macros reference), or implement `kind()` by hand.
+
+### HttpError
+
+`toni::HttpError` — the HTTP transport's handler error type.
+
+```rust
+HttpError::bad_request(msg) / unauthorized(msg) / forbidden(msg) / not_found(msg)
+HttpError::conflict(msg) / unprocessable_entity(msg) / internal_server_error(msg)
+HttpError::custom(status: u16, msg)
+
+err.status_code() -> u16
+err.message() -> Cow<'_, str>
+err.error_type() -> &'static str
+err.to_response() -> HttpResponse
+```
+
+The `AppError(Arc<dyn Error>)` variant carries a user-domain `toni::Error`; the `From<E: Error>` blanket constructs it — handlers never build it by hand. Canonical envelope:
+
+```json
+{ "statusCode": 404, "message": "...", "error": "Not Found", "details": { } }
+```
+
+`details` appears only when the wrapped error provides it. `HttpError` implements `IntoResponse` and exposes the wrapped error through `std::error::Error::source()` so `#[catch]` handlers can downcast to the original type.
+
+### RpcError
+
+`toni::RpcError` (also `toni::rpc::RpcError`).
+
+```rust
+pub enum RpcError {
+    PatternNotFound(String),   // framework: no handler matched
+    Forbidden(String),         // framework: guard rejected
+    Internal(String),          // framework: server-side failure
+    AppError(Arc<dyn Error + Send + Sync>),  // user-domain, via From<E: Error>
+}
+
+err.to_data() -> RpcData   // {"status":"error","kind":"...","message":...}
+```
+
+Framework variants reach the adapter as wire-`err` frames; `AppError` reaches it as a wire-`Ok` frame carrying the canonical envelope.
+
+### WsError
+
+`toni::WsError` (also `toni::websocket::WsError`).
+
+```rust
+pub enum WsError {
+    ConnectionClosed(String),
+    InvalidMessage(String),
+    AuthFailed(String),
+    EventNotFound(String),
+    Internal(String),
+    BroadcastError(String),
+    AppError(Arc<dyn Error + Send + Sync>),
+}
+
+err.to_message() -> WsMessage  // text frame: {"status":"error","kind":"...","message":...}
+```
+
+### Framework events
+
+`toni::{GuardRejection, MiddlewareFailure, PanicRecovered, PipelineSegment, Cancelled}` — typed events emitted when the framework itself is the error source. Each implements `toni::Error` and flows through the observer + error-handler chain, so `#[catch(GuardRejection)]` can reshape the default 403.
+
+| Event | `kind()` | Emitted when |
+|---|---|---|
+| `GuardRejection { guard_index, reason }` | `Forbidden` | a guard returned `false` |
+| `MiddlewareFailure { message }` | `Internal` | middleware returned `Err` |
+| `PanicRecovered { during, message }` | `Internal` | `catch_unwind` caught a panic |
+| `Cancelled { reason }` | `Unavailable` | client disconnect / deadline; observer-only |
+
+`PanicRecovered.during` is a `PipelineSegment` (`HandlerBody`, `ResponseRendering`, `Middleware`, `Pipe`, `Guard`, `ErrorHandler`, `Other`) identifying where the panic was caught.
+
+## HTTP helpers
+
+`toni::http_helpers`, with the main types re-exported at the root.
+
+### HttpRequest and RequestPart
+
+```rust
+pub type RequestPart = http::request::Parts;      // Clone; headers via parts.headers
+pub struct HttpRequest(pub http::Request<RequestBody>);
+
+HttpRequest::builder() -> http::request::Builder
+req.into_parts() -> (RequestPart, RequestBody)
+HttpRequest::from_parts(parts, body) -> HttpRequest
+req.into_inner() -> http::Request<RequestBody>
+```
+
+`HttpRequest` derefs to `http::Request<RequestBody>` (`req.method()`, `req.uri()`, `req.headers()`). Not `Clone`: the body may be a single-use stream. `RequestBody` is `Streaming(RequestBoxBody)` or `Buffered(Bytes)`; collect and rebuild as `Buffered` to read it twice.
+
+### HttpResponse and HttpResponseBuilder
+
+```rust
+pub struct HttpResponse {
+    pub body: Option<Body>,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+// Status shortcuts, each returning HttpResponseBuilder
+HttpResponse::ok()          // 200        HttpResponse::bad_request()            // 400
+HttpResponse::created()     // 201        HttpResponse::unauthorized()           // 401
+HttpResponse::no_content()  // 204        HttpResponse::forbidden()              // 403
+HttpResponse::builder()     // 200        HttpResponse::not_found()              // 404
+                                          HttpResponse::internal_server_error()  // 500
+
+// Builder methods
+.status(u16) .header(name, value) .headers(Vec<(String, String)>)
+.body(Body) .json(serde_json::Value) .text(impl Into<String>) .binary(Vec<u8>)
+.build() -> HttpResponse
+```
+
+```rust
+HttpResponse::ok().json(serde_json::json!({ "id": 1 })).build()
+```
+
+`.json` takes a `serde_json::Value` — serialize typed values with `serde_json::to_value` first (or return the type from the handler and let `IntoResponse` handle it).
+
+### Body
+
+```rust
+Body::text(impl Into<String>)     // text/plain
+Body::json(serde_json::Value)     // application/json
+Body::binary(impl Into<Vec<u8>>)  // application/octet-stream
+Body::empty()
+Body::stream(stream)              // streaming response body
+body.with_content_type(ct) / content_type() / try_bytes() / is_streaming()
+```
+
+### IntoResponse
+
+```rust
+pub trait IntoResponse {
+    fn into_response(self) -> HttpResponse;
+}
+```
+
+Implemented for `HttpResponse`, `Body`, `String`, `&'static str`, `serde_json::Value`, `u16` (status only), `(u16, Body)`, `Vec<(String, String)>` (headers only), `HttpError`, and `Sse<S>`. Handlers can return any of these, or `Result<T: IntoResponse, E>` where `E` converts into `HttpError`.
+
+### RouteMetadata
+
+Static per-route storage populated by `#[set_metadata(...)]` at registration time and shared across requests.
+
+```rust
+metadata.insert<T: Clone + Send + Sync + 'static>(val: T) -> Option<T>
+metadata.get<T: Send + Sync + 'static>() -> Option<&T>
+```
+
+Read in enhancers via `ctx.route_metadata().and_then(|m| m.get::<T>())`.
+
+### Server-Sent Events
+
+```rust
+use toni::{sse, Sse, SseEvent};
+
+SseEvent::data(impl Into<String>) -> SseEvent
+    .id(impl Into<String>)        // sent back as Last-Event-ID on reconnect
+    .event(impl Into<String>)     // client's addEventListener name
+    .retry_ms(u64)
+
+sse(stream) -> Sse<...>           // infallible: S: Stream<Item = SseEvent>
+Sse::new(stream)                  // fallible: S: Stream<Item = Result<SseEvent, E>>
+```
+
+`Sse<S>` implements `IntoResponse`, setting `Content-Type: text/event-stream`, `Cache-Control: no-cache`, and `X-Accel-Buffering: no`. The `#[sse]` attribute macro wraps a stream-returning handler in this automatically.
 
 ## Extractors
 
-```rust
-use toni::extractors::{Path, Query, Json, Body, Bytes, Validated};
+`toni::extractors` (also `toni::{BodyStream, FromRequest, FromRequestParts}` at the root). Handler parameters are extracted by type.
 
-// All implement FromRequest
-Path<T: DeserializeOwned>
-Query<T: DeserializeOwned>
-Json<T: DeserializeOwned>
-Body<T: DeserializeOwned>       // auto-detects JSON / form-encoded
-Bytes                            // raw Vec<u8>
-Validated<E: FromRequest + ValidatableExtractor>
+### Traits
+
+```rust
+pub trait FromRequestParts: Sized {
+    type Error: std::fmt::Display;
+    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error>;   // sync
+}
+
+pub trait FromRequest: Sized {
+    type Error: std::fmt::Display + Send + Sync + 'static;
+    async fn from_request(req: HttpRequest) -> Result<Self, Self::Error>;      // consumes the request
+}
 ```
 
----
+Every `FromRequestParts` type gets `FromRequest` via a blanket impl that discards the body. Only one body-consuming extractor may appear per handler — the body is single-use. Extraction failure returns an inline 400 (not 422, not via the error-handler chain).
 
-## RpcData
+### Built-in extractors
+
+| Extractor | Trait | Extracts |
+|---|---|---|
+| `Path<T>` | `FromRequestParts` | typed path params; scalars via `FromStr`, structs via urlencoded round-trip |
+| `Query<T>` | `FromRequestParts` | query string via `serde_urlencoded` |
+| `Json<T>` | `FromRequest` | JSON body (`Content-Type` not checked) |
+| `Body<T>` | `FromRequest` | body by content type: JSON or `x-www-form-urlencoded` |
+| `Bytes` | `FromRequest` | raw body as `Vec<u8>` |
+| `BodyStream` | `FromRequest` | unbuffered stream; `.into_stream()` / `.collect()` |
+| `Multipart` | `FromRequest` | `multipart/form-data`; `.next_field()` yields `multer::Field` |
+| `Validated<E>` | `FromRequest` | wraps another extractor, runs `validator::Validate` |
+
+All wrappers expose the value as field `0`, `into_inner()`, and `Deref`.
 
 ```rust
-use toni::RpcData;
-
-// Constructors
-RpcData::json(serde_json::Value)
-RpcData::text(impl Into<String>)
-RpcData::binary(Vec<u8>)
-
-// Accessors
-data.as_json()    -> Option<&serde_json::Value>
-data.as_text()    -> Option<&str>
-data.as_binary()  -> Option<&[u8]>
-
-// Typed deserialization (JSON across all variants)
-data.parse::<T>() -> Result<T, serde_json::Error>
-
-// Build from a serializable type
-RpcData::from_serialize(&value) -> Result<RpcData, serde_json::Error>
+#[post("/users")]
+async fn create(&self, Path(id): Path<i32>, Json(dto): Json<CreateUserDto>) -> impl IntoResponse { ... }
 ```
 
----
-
-## RpcError
+### Validated
 
 ```rust
-use toni::RpcError;
-
-RpcError::PatternNotFound(String)   // unregistered pattern
-RpcError::Forbidden(String)         // guard rejected
-RpcError::Internal(String)          // handler error
+Validated<Json<T>>   // extract, then T::validate()
 ```
 
----
-
-## RpcContext
+Requires `T: validator::Validate`. Works over any extractor implementing `ValidatableExtractor` (provided for `Json`, `Path`, `Query`, `Body`):
 
 ```rust
-use toni::RpcContext;
-
-ctx.pattern                          // matched pattern string
-ctx.metadata                         // HashMap<String, String>
-ctx.get_metadata(key: &str)          // Option<&str>
+pub trait ValidatableExtractor {
+    type Inner: Validate;
+    fn get_inner(&self) -> &Self::Inner;
+}
 ```
 
----
+Failure type is `ValidationError` (`ExtractionError(String)` | `ValidationFailed(validator::ValidationErrors)`); both `ValidatableExtractor` and `ValidationError` are exported from `toni::extractors`.
 
-## RpcClient
+## RPC client
+
+`toni::rpc` (main types re-exported at the root). `RpcClient` wraps any `RpcClientTransport` (TCP, NATS, etc. — provided by adapter crates) and is `Clone`.
 
 ```rust
-use toni::RpcClient;
-
 RpcClient::new(transport: impl RpcClientTransport) -> RpcClient
 
-// Request-response
-client.send(pattern, data: RpcData) -> Result<RpcData, RpcClientError>
-client.send_json::<T, R>(pattern, data: &T) -> Result<R, RpcClientError>
-
-// Fire-and-forget
-client.emit(pattern, data: RpcData) -> Result<(), RpcClientError>
+client.send(pattern, data: RpcData) -> Result<RpcData, RpcClientError>       // request-response
+client.emit(pattern, data: RpcData) -> Result<(), RpcClientError>            // fire-and-forget
+client.send_json::<T, R>(pattern, data: &T) -> Result<R, RpcClientError>     // typed round-trip
 client.emit_json::<T>(pattern, data: &T) -> Result<(), RpcClientError>
+client.connect() -> Result<(), RpcClientError>   // eager connect; transports are lazy by default
+client.close() -> Result<(), RpcClientError>     // flush + close
 
-// Lifecycle
-client.connect() -> Result<(), RpcClientError>   // eager connect (optional)
-client.close()   -> Result<(), RpcClientError>   // flush and close
+// Per-call metadata builder
+client.request(pattern) -> RpcRequest
+    .metadata(key, value)                        // chainable; repeated key overwrites
+    .send(data) / .emit(data) / .send_json(&t) / .emit_json(&t)
 ```
 
-`RpcClient` is `Clone` — the inner transport is behind an `Arc`.
-
-### RpcClientError
+All calls are async. `RpcClient` implements `Provider`, connecting on `on_application_bootstrap` and closing on shutdown when registered in DI.
 
 ```rust
-RpcClientError::Transport(String)
-RpcClientError::Timeout
-RpcClientError::Remote { message: String, status: String }
+pub enum RpcClientError {
+    Transport(String),
+    Timeout,
+    Remote { message: String, status: String },   // remote returned an error envelope
+}
 ```
+
+### RpcData
+
+The RPC payload enum shared by client and server.
+
+```rust
+pub enum RpcData { Json(serde_json::Value), Binary(Vec<u8>), Text(String) }
+
+RpcData::json(value) / binary(vec) / text(s)
+data.as_json() / as_binary() / as_text()
+data.parse::<T: DeserializeOwned>() -> Result<T, serde_json::Error>   // all variants tried as JSON
+RpcData::from_serialize(&T) -> Result<RpcData, serde_json::Error>
+```
+
+### RpcCallInfo
+
+Wire-level call info adapters pass into the dispatcher: `pattern: String`, `metadata: HashMap<String, String>`, `extensions: Extensions`. Relevant when implementing a custom RPC adapter; handlers use `RpcContext` instead.
+
+## gRPC types
+
+`toni::grpc_status` (re-exported at the root). Transport-neutral mirrors of `tonic::Status` / `tonic::Code`, so guards and error handlers can produce gRPC errors without a tonic dependency; the `toni-grpc` adapter converts at the wire boundary. See the gRPC docs section for the adapter, `#[grpc_service]`, and streaming.
+
+```rust
+pub struct GrpcStatus { pub code: GrpcCode, pub message: String }
+
+GrpcStatus::new(code: GrpcCode, message)
+GrpcStatus::permission_denied(msg) / invalid_argument(msg) / internal(msg)
+GrpcStatus::not_found(msg) / unauthenticated(msg)
+```
+
+`GrpcCode` is `#[repr(i32)]` with the 17 canonical codes (`Ok` = 0 … `Unauthenticated` = 16), numerically matching `tonic::Code`; `GrpcCode::from_i32(i32)` converts back (unknown values map to `Unknown`).
+
+## WebSocket types
+
+`toni::websocket` (re-exported at the root). The gateway programming model is documented in the WebSocket section; the types below appear in handler signatures.
+
+```rust
+pub enum WsMessage { Text(String), Binary(Vec<u8>), Ping(Vec<u8>), Pong(Vec<u8>), Close }
+WsMessage::text(s) / binary(vec) / close(); msg.as_text() / as_binary()
+
+pub enum WsHandlerOutput {
+    Empty,                                  // no response
+    Single(WsMessage),                      // one response
+    Stream(BoxStream<'static, WsMessage>),  // pushed until exhausted or disconnect
+}
+pub type WsHandlerResult = Result<WsHandlerOutput, WsError>;
+```
+
+`From<WsMessage>` and `From<Option<WsMessage>>` are implemented for `WsHandlerOutput`, so `Ok(msg.into())` works in handlers. Also exported: `WsClient` (id + `handshake` with headers), `WsHandshake`, `WsSink`, `ClientId`, `RoomId`, `DisconnectReason`, `BroadcastService`, `BroadcastModule`, `BroadcastTarget`, `BroadcastError`, `SendError`, `TrySendError`, `GatewayTrait`, `GatewayWrapper`.
+
+## DI utilities
+
+```rust
+// toni::ProviderScope — provider lifecycle
+pub enum ProviderScope { Singleton, Request, Transient }
+
+// toni::ModuleRef — injectable handle for runtime resolution from the current module
+module_ref.get::<T>() -> ModuleRefQuery<'_, T>
+module_ref.get_by_token::<T>(token) -> ModuleRefQuery<'_, T>
+module_ref.current_module() -> &str
+// query: .global() widens to exported/global providers; .execute().await -> Result<T>
+
+// toni::IntoToken — accepted by all *_by_token methods; implemented for &str and String
+pub trait IntoToken { fn into_token(self) -> String; }
+
+// toni::DynamicModule — module built at runtime (integration crates return these)
+DynamicModule::builder(id) -> DynamicModuleBuilder
+    .provider(factory).export::<T>().export_token(token).global().build()
+```
+
+Provider tokens default to the fully qualified `std::any::type_name::<T>()`.
+
+## Adapter SPI
+
+Re-exported at the root for adapter crate authors: `HttpAdapter`, `WebSocketAdapter`, `RpcAdapter`, `GrpcAdapter`, `RpcClientTransport`, `RequestHandler`, `AdapterContext`, `HttpLifecycleHandle`, `WsLifecycleHandle`, `RpcLifecycleHandle`, `GrpcLifecycleHandle`, `WsConnectionCallbacks`, `RpcMessageCallbacks`, `MessageCallbackResult`. See the custom-adapter guide for the contract; applications only pass adapter instances to `use_*_adapter`.
+
+## Dependency re-exports
+
+For macro-generated code and handler ergonomics, `toni` re-exports:
+
+```rust
+pub use serde_json;                     // Body::json and error envelopes traffic in its Value
+pub use async_trait::async_trait;      // required on Guard/Interceptor/ErrorHandler impls
+pub use rustc_hash::FxHashMap;
+pub use toni_macros::*;                 // all macros, so `use toni::*` suffices
+```
+
+## Feature flags
+
+### tower-compat
+
+Enables `toni::tower_compat` and the root re-export `toni::TowerLayer`.
+
+```toml
+toni = { version = "0.2", features = ["tower-compat"] }
+```
+
+```rust
+TowerLayer::new(layer: L) -> TowerLayer<L>   // implements Middleware
+```
+
+Wraps a `tower::Layer` as toni middleware:
+
+```rust
+factory.use_global_middleware(Arc::new(TowerLayer::new(
+    tower_http::cors::CorsLayer::permissive(),
+)));
+```
+
+Single-use per request by design — layers that call the inner service more than once (`tower::retry`, `tower::hedge`) panic.

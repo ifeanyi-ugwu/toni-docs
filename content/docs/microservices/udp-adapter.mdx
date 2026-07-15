@@ -1,0 +1,111 @@
+---
+title: UDP Adapter
+description: One JSON message per datagram — connectionless RPC with optional client-side retries.
+---
+
+The UDP adapter serves the same JSON envelope as the [TCP adapter](/docs/microservices/tcp-adapter), one message per datagram. No broker, no connection state — and none of TCP's delivery guarantees: datagrams can be lost, duplicated, or reordered.
+
+## Server setup
+
+Add the dependencies:
+
+```toml
+[dependencies]
+toni = "0.2"
+toni-udp = "0.1"
+```
+
+Register the adapter:
+
+```rust
+use toni::ToniFactory;
+use toni_udp::UdpAdapter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut app = ToniFactory::create(AppModule).await;
+    app.use_rpc_adapter(UdpAdapter::new("0.0.0.0", 4000))?;
+    app.start().await?;
+    Ok(())
+}
+```
+
+The socket is bound synchronously during startup — a port conflict surfaces as an `Err` from `app.start()` (or `app.bind()`).
+
+### Adapter options
+
+```rust
+use std::time::Duration;
+
+UdpAdapter::new("0.0.0.0", 4000)
+    .with_drain_timeout(Duration::from_secs(30))  // default 10 s; None = wait without bound
+    .with_max_inflight(512)                       // default unbounded
+```
+
+Same semantics as the TCP adapter: on shutdown the receive loop stops and in-flight datagram tasks drain up to the timeout; over the in-flight cap, a request gets an `overloaded` error frame and a fire-and-forget datagram is dropped with a log line.
+
+## Wire protocol
+
+One JSON object per datagram, same shape as TCP:
+
+```json
+{"pattern": "order.create", "data": {"item": "book", "qty": 2}, "id": "42", "metadata": {"trace-id": "abc"}}
+```
+
+Replies go back to the datagram's source address: `{"id": "42", "response": ...}` on success (handler errors ride inside `response` as the canonical envelope), `{"id": "42", "err": {"message": ..., "status": ...}}` for dispatch failures, `{"id": "42", "response": null}` as the ack when an `id` addresses an `#[event_pattern]` handler. Omit `id` for fire-and-forget. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire) for the envelope and status values.
+
+Test with netcat:
+
+```bash
+echo '{"pattern":"order.create","data":{"item":"keyboard","qty":3},"id":"req-1"}' \
+  | nc -u -w1 127.0.0.1 4000
+```
+
+### Datagram size limit
+
+Payloads are capped at 65,507 bytes (the UDP maximum):
+
+- **Inbound over the cap** — truncated by the kernel; the truncated frame fails JSON parsing and is dropped with a warning.
+- **Outbound reply over the cap** — dropped with an error log; the caller times out.
+- **Client send over the cap** — rejected with `RpcClientError::Transport` before anything is sent.
+
+## Client transport
+
+`UdpClientTransport` binds one ephemeral socket connected to the remote address. Request-response uses correlation ids; a background reader routes each reply datagram to the waiting caller:
+
+```rust
+use toni::{provider_value, RpcClient};
+use toni_udp::UdpClientTransport;
+
+provider_value!(
+    "ORDERS_CLIENT",
+    RpcClient::new(UdpClientTransport::new("127.0.0.1", 4000))
+)
+```
+
+The socket is created lazily on the first `send` or `emit` and rebuilt on the next call after a fatal socket error; requests pending at the moment of failure fail with `RpcClientError::Transport("socket closed")`.
+
+### Timeout and retries
+
+```rust
+use std::time::Duration;
+
+UdpClientTransport::new("127.0.0.1", 4000)
+    .with_timeout(Duration::from_secs(2))            // per-attempt; default 5 s
+    .with_retries(2)                                 // extra attempts on timeout; default 0
+    .with_retry_backoff(Duration::from_millis(250))  // delay between attempts; default 100 ms
+```
+
+A lost datagram surfaces as `RpcClientError::Timeout`. With retries enabled, each attempt sends a fresh correlation id, so a late reply to an earlier attempt is dropped rather than satisfying a later one. Total wall time is bounded by `(retries + 1) × timeout + retries × backoff`. Retries apply to `send` only — `emit` returns as soon as the datagram is written.
+
+## Payload limitations
+
+Same as TCP: the wire format is JSON, so `RpcData::Binary` becomes `null` on the wire. Encode binary data (e.g. base64) into `RpcData::Json` or `RpcData::Text`.
+
+## Tracing
+
+Every inbound datagram runs inside an `rpc.request` span with `transport="udp"`, `pattern`, `id`, and `peer` fields, inherited by all handler-emitted events.
+
+## When to use UDP
+
+Delivery is best-effort: nothing is retransmitted server-side, and duplicate datagrams invoke the handler twice. Suited to high-volume telemetry, metrics, or cache-invalidation events where losing a message is acceptable — not to operations that must execute exactly once. For reliable delivery on the same wire format, use the [TCP adapter](/docs/microservices/tcp-adapter).

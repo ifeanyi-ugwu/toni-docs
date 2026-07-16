@@ -133,12 +133,53 @@ pub struct OrdersService {
 
 Tagging a constructor with `#[new]` switches to constructor injection: the container resolves each parameter and calls the function, so dependencies can be consumed without being stored. See [Services & Providers](/docs/core-concepts/services) for when to prefer each.
 
-## Circular dependency detection
+## Circular dependencies
 
-Circular dependencies are caught during the topological sort at startup. If `ServiceA` injects `ServiceB` and `ServiceB` injects `ServiceA`, initialization fails with:
+Providers resolve by topological sort, one module at a time. A cycle within a single module — `ServiceA` injects `ServiceB`, `ServiceB` injects `ServiceA`, both declared in the same module — is caught during the sort and aborts startup with status 1:
 
 ```
 Circular dependency detected for provider: my_app::services::ServiceA
 ```
 
-and the process exits with status 1. The standard solution is to break the cycle by introducing an intermediate abstraction or moving the shared logic into a third service that both depend on.
+A cycle that spans two modules is invisible to the per-module sort and surfaces later, when the container cannot build either side:
+
+```
+Cannot resolve dependencies for modules: ["ModuleA", "ModuleB"]. Possible circular dependency or missing global provider.
+```
+
+Either message points to a genuine construction cycle. The fix is to break it.
+
+<Bridge>
+NestJS breaks a cycle with `forwardRef`. Toni has no equivalent and needs none: `forwardRef` defers a class reference that is `undefined` at module-evaluation time, but Toni identifies providers by string token and resolves them at runtime, so a reference is never undefined and there is nothing to defer. A reported cycle is always a real construction cycle, not a language artifact.
+</Bridge>
+
+### Breaking a cycle
+
+**Extract the shared logic.** Move what both services need into a third provider that each depends on. Neither service then depends on the other, and the cycle disappears. A mutual dependency is usually a sign the two services share a responsibility that wants its own home, so this is the right fix for most cycles.
+
+**Resolve one side lazily with `ModuleRef`.** When the dependency is genuinely bidirectional, inject [`ModuleRef`](/docs/api-reference/core#di-utilities) into one side instead of the provider itself, and fetch the counterpart at call time:
+
+```rust
+#[injectable]
+pub struct ServiceA {
+    #[inject]
+    b: ServiceB,
+}
+
+#[injectable]
+pub struct ServiceB {
+    // instead of `#[inject] a: ServiceA`, which would close the cycle
+    #[inject]
+    module_ref: ModuleRef,
+}
+
+impl ServiceB {
+    pub async fn notify_a(&self) {
+        if let Ok(a) = self.module_ref.get::<ServiceA>().await {
+            a.on_event();
+        }
+    }
+}
+```
+
+`ServiceB` no longer depends on `ServiceA` at construction, so the container builds `ServiceB` first and the cycle never forms. Both instances exist by the time `notify_a` runs, and `get` returns `ServiceA` from the current module; chain `.global()` before `.await` to widen the search to exported and global providers.

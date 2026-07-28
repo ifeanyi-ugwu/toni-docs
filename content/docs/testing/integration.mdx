@@ -52,13 +52,12 @@ Two framework facts shape the harness:
 ```rust
 use std::net::SocketAddr;
 
-use toni::module_helpers::module_enum::ModuleDefinition;
-use toni::{ShutdownHandle, ToniFactory};
+use toni::{ModuleMetadata, ShutdownHandle, ToniFactory};
 use toni_axum::AxumAdapter;
 
 /// Spawns the app on the current LocalSet; returns its base URL and a
 /// handle for graceful teardown. Call from inside a LocalSet.
-async fn start_server(module: impl Into<ModuleDefinition> + 'static) -> (String, ShutdownHandle) {
+async fn start_server(module: impl ModuleMetadata + 'static) -> (String, ShutdownHandle) {
     let (addr_tx, addr_rx) = tokio::sync::oneshot::channel::<SocketAddr>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<ShutdownHandle>();
 

@@ -13,7 +13,7 @@ Reference for the public surface of the `toni` crate. Items are shown with their
 ToniFactory::new() -> ToniFactory
 
 // Shorthand — no factory config needed
-ToniFactory::create(module: impl Into<ModuleDefinition>) -> ToniApplication          // async
+ToniFactory::create(module: impl ModuleMetadata + 'static) -> ToniApplication        // async
 ToniFactory::create_application_context(module) -> ToniApplicationContext            // async
 
 // Instance methods (use after registering globals)
@@ -21,7 +21,7 @@ factory.create_with(module) -> ToniApplication                                  
 factory.create_application_context_with(module) -> ToniApplicationContext            // async
 ```
 
-Modules pass directly: `ToniFactory::create(AppModule).await`. On module-initialization failure, `create_with` / `create_application_context_with` log the error and call `std::process::exit(1)`.
+Modules pass directly: `ToniFactory::create(AppModule).await`. Any `ModuleMetadata` works as the root — including a `DynamicModule` such as `SeaOrmModule::for_root(url)`. On module-initialization failure, `create_with` / `create_application_context_with` log the error and call `std::process::exit(1)`.
 
 ### Global registration
 
@@ -183,7 +183,7 @@ Re-exported at the root: `HandlerContext`, `HttpContext`, `RpcContext`, `WsConte
 ### HandlerContext
 
 ```rust
-pub trait HandlerContext: Send + Sync {
+pub trait HandlerContext: Send {
     fn route_metadata(&self) -> Option<&RouteMetadata>;  // #[set_metadata] values; None for global handlers
     fn extensions(&self) -> &Extensions;                 // per-request typed key-value bag
     fn extensions_mut(&mut self) -> &mut Extensions;
@@ -266,11 +266,11 @@ Import from `toni::traits_helpers::*` (guards, interceptors, pipes, error handle
 ```rust
 #[async_trait]
 pub trait Guard<C: ?Sized + HandlerContext>: Send + Sync {
-    async fn can_activate(&self, context: &C) -> bool;
+    async fn can_activate(&self, context: &mut C) -> bool;
 }
 ```
 
-Returning `false` produces a `GuardRejection` (403 on HTTP). Guards cannot return errors; reshape rejections with a `#[catch(GuardRejection)]` handler.
+Returning `false` produces a `GuardRejection` (403 on HTTP). Guards cannot return errors; reshape rejections with a `#[catch(GuardRejection)]` handler. The `&mut` context lets a guard attach values for downstream enhancers and the handler via `context.extensions_mut()`.
 
 ### Interceptor
 
@@ -303,7 +303,7 @@ pub type ChainError<'a> = &'a (dyn std::error::Error + Send + Sync + 'static);
 
 #[async_trait]
 pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
-    async fn handle_error(&self, error: ChainError<'_>, ctx: &C) -> Option<R>;
+    async fn handle_error(&self, error: ChainError<'_>, ctx: &mut C) -> Option<R>;
 }
 ```
 
@@ -311,7 +311,7 @@ pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
 
 ### Middleware
 
-HTTP-only; runs after routing, before guards.
+HTTP-only. Global middleware runs before the adapter resolves the route — it observes every request, including 404s, 405s, and WebSocket upgrades, and a request rewritten via `run_with` changes which route matches. Module-scoped middleware runs after routing, on the matched route, before guards.
 
 ```rust
 use toni::middleware::{Middleware, NextHandle, MiddlewareResult};
@@ -335,6 +335,28 @@ next.run_with(req: HttpRequest) -> MiddlewareResult  // async — replace the re
 
 The body arrives as `RequestBody::Streaming` and is single-use. To inspect it, collect the bytes and pass a rebuilt request with `RequestBody::Buffered` to `run_with`.
 
+### CorsMiddleware
+
+Built-in CORS for the global chain:
+
+```rust
+use toni::middleware::{CorsMiddleware, CorsOptions, AllowedOrigins};
+
+CorsMiddleware::new(options: CorsOptions) -> CorsMiddleware   // implements Middleware
+CorsMiddleware::permissive() -> CorsMiddleware                // CorsOptions::default()
+
+pub struct CorsOptions {
+    pub origins: AllowedOrigins,              // Any (default) | List(Vec<String>)
+    pub methods: Vec<String>,                 // default: GET, HEAD, PUT, PATCH, POST, DELETE
+    pub allowed_headers: Option<Vec<String>>, // None (default) reflects the request's headers
+    pub exposed_headers: Vec<String>,
+    pub credentials: bool,                    // true forces origin echo, never `*`
+    pub max_age: Option<u64>,                 // seconds
+}
+```
+
+Preflight requests are answered directly with 204 before routing. See [CORS](/docs/security/cors).
+
 ### ErrorObserver
 
 ```rust
@@ -343,7 +365,7 @@ pub trait ErrorObserver: Send + Sync {
     async fn observe<'a>(
         &'a self,
         error: &'a (dyn std::error::Error + Send + Sync + 'static),
-        ctx: &'a (dyn HandlerContext + 'a),
+        ctx: &'a mut (dyn HandlerContext + 'a),
     );
 }
 ```
@@ -501,7 +523,7 @@ Body::text(impl Into<String>)     // text/plain
 Body::json(serde_json::Value)     // application/json
 Body::binary(impl Into<Vec<u8>>)  // application/octet-stream
 Body::empty()
-Body::stream(stream)              // streaming response body
+Body::stream(stream)              // S: Stream<Item = Result<Bytes, E>> + Send + 'static
 body.with_content_type(ct) / content_type() / try_bytes() / is_streaming()
 ```
 
@@ -700,6 +722,8 @@ DynamicModule::builder(id) -> DynamicModuleBuilder
 
 Provider tokens default to the fully qualified `std::any::type_name::<T>()`.
 
+A `DynamicModule` also works as the root module (`ToniFactory::create(SeaOrmModule::for_root(url))`). Its identity is the builder id plus its providers' `ProviderFactory::identity_hint()` values: identical imports dedup, and two same-token modules with different hints are refused at startup. Multi-instance modules implement `identity_hint` and offer named registration — see [Modules — identity and deduplication](/docs/core-concepts/modules#identity-and-deduplication).
+
 ## Adapter SPI
 
 Re-exported at the root for adapter crate authors: `HttpAdapter`, `WebSocketAdapter`, `RpcAdapter`, `GrpcAdapter`, `RpcClientTransport`, `RequestHandler`, `AdapterContext`, `HttpLifecycleHandle`, `WsLifecycleHandle`, `RpcLifecycleHandle`, `GrpcLifecycleHandle`, `WsConnectionCallbacks`, `RpcMessageCallbacks`, `MessageCallbackResult`. See the custom-adapter guide for the contract; applications only pass adapter instances to `use_*_adapter`.
@@ -717,6 +741,10 @@ pub use toni_macros::*;                 // all macros, so `use toni::*` suffices
 
 ## Feature flags
 
+### logger (default)
+
+Gates the `tracing-subscriber` dependency behind the default tracing setup: `create*` installs a stderr fmt subscriber filtered by `RUST_LOG` (fallback `info`) via `try_init()`, so a subscriber the application installs first wins. Compile it out with `default-features = false`. See [Logging](/docs/techniques/logging).
+
 ### tower-compat
 
 Enables `toni::tower_compat` and the root re-export `toni::TowerLayer`.
@@ -733,8 +761,10 @@ Wraps a `tower::Layer` as toni middleware:
 
 ```rust
 factory.use_global_middleware(Arc::new(TowerLayer::new(
-    tower_http::cors::CorsLayer::permissive(),
+    tower_http::compression::CompressionLayer::new(),
 )));
 ```
+
+For CORS specifically, prefer the built-in [`CorsMiddleware`](#corsmiddleware) — no extra dependencies.
 
 Single-use per request by design — layers that call the inner service more than once (`tower::retry`, `tower::hedge`) panic.

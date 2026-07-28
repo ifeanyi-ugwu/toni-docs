@@ -7,26 +7,18 @@ CORS for HTTP and WebSockets work differently at the protocol level — Toni han
 
 ## HTTP CORS
 
-Register a `CorsLayer` as global middleware:
-
-```toml
-[dependencies]
-toni = { version = "0.2", features = ["tower-compat"] }
-tower-http = { version = "0.6", features = ["cors"] }
-http = "1"
-```
+The built-in `CorsMiddleware` registers on the global chain — no extra dependencies:
 
 ```rust
 use std::sync::Arc;
 use toni::ToniFactory;
-use toni::tower_compat::TowerLayer;
+use toni::middleware::CorsMiddleware;
 use toni_axum::AxumAdapter;
-use tower_http::cors::CorsLayer;
 
 #[tokio::main]
 async fn main() {
     let mut factory = ToniFactory::new();
-    factory.use_global_middleware(Arc::new(TowerLayer::new(CorsLayer::permissive())));
+    factory.use_global_middleware(Arc::new(CorsMiddleware::permissive()));
 
     let mut app = factory.create_with(AppModule).await;
     app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
@@ -34,37 +26,40 @@ async fn main() {
 }
 ```
 
+Global middleware runs before routing, so preflight `OPTIONS` requests are answered directly with `204 No Content` — including for routes that define no `OPTIONS` handler. The middleware behaves identically on all five HTTP adapters.
+
 ### Fine-grained configuration
 
-`CorsLayer::permissive()` is useful in development. For production, restrict origins, methods, and headers:
+`CorsMiddleware::permissive()` is useful in development. For production, restrict origins, methods, and headers with `CorsOptions`:
 
 ```rust
-use http::header::{AUTHORIZATION, CONTENT_TYPE};
-use http::Method;
-use tower_http::cors::CorsLayer;
+use toni::middleware::{AllowedOrigins, CorsMiddleware, CorsOptions};
 
-let cors = CorsLayer::new()
-    .allow_origin("https://myapp.com".parse::<http::HeaderValue>().unwrap())
-    .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-    .allow_headers([AUTHORIZATION, CONTENT_TYPE])
-    .allow_credentials(true);
+let cors = CorsMiddleware::new(CorsOptions {
+    origins: AllowedOrigins::List(vec![
+        "https://myapp.com".into(),
+        "https://staging.myapp.com".into(),
+    ]),
+    methods: vec!["GET".into(), "POST".into(), "PUT".into(), "DELETE".into()],
+    allowed_headers: Some(vec!["authorization".into(), "content-type".into()]),
+    credentials: true,
+    ..CorsOptions::default()
+});
 
-factory.use_global_middleware(Arc::new(TowerLayer::new(cors)));
+factory.use_global_middleware(Arc::new(cors));
 ```
 
-For multiple allowed origins:
+Behavior worth knowing:
 
-```rust
-use http::HeaderValue;
+- Origins in `AllowedOrigins::List` match exactly, scheme and port included.
+- `allowed_headers: None` (the default) reflects the request's `Access-Control-Request-Headers`.
+- `credentials: true` echoes the specific origin instead of `*` — the spec forbids combining the two.
+- A request without an `Origin` header passes through untouched. A disallowed origin is not rejected server-side; the response carries no CORS headers and the browser enforces the block.
+- Remaining fields: `exposed_headers: Vec<String>` and `max_age: Option<u64>` (seconds). Defaults: any origin, `GET`/`HEAD`/`PUT`/`PATCH`/`POST`/`DELETE`, no credentials.
 
-let cors = CorsLayer::new()
-    .allow_origin([
-        "https://myapp.com".parse::<HeaderValue>().unwrap(),
-        "https://staging.myapp.com".parse::<HeaderValue>().unwrap(),
-    ]);
-```
+### tower-http alternative
 
-See the [`CorsLayer` docs](https://docs.rs/tower-http/latest/tower_http/cors/struct.CorsLayer.html) for the full builder API including `allow_private_network`, `max_age`, and `expose_headers`.
+`tower_http::cors::CorsLayer` still works through the `tower-compat` feature (`TowerLayer::new(CorsLayer::permissive())`) when you need behavior the built-in doesn't cover, such as `allow_private_network`. See [Middleware](/docs/request-lifecycle/middleware#tower-layers).
 
 ---
 
@@ -87,7 +82,7 @@ pub struct OriginGuard;
 
 #[async_trait]
 impl Guard<WsContext> for OriginGuard {
-    async fn can_activate(&self, ctx: &WsContext) -> bool {
+    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
         ctx.client()
             .handshake
             .headers
@@ -141,7 +136,7 @@ pub struct OriginGuard {
 
 #[async_trait]
 impl Guard<WsContext> for OriginGuard {
-    async fn can_activate(&self, ctx: &WsContext) -> bool {
+    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
         let allowed = &self.config.get_ref().allowed_origins;
         ctx.client()
             .handshake
@@ -166,4 +161,4 @@ Browsers always send `Origin` for cross-origin WebSocket connections. Direct con
 | Protocol mechanism | `Access-Control-*` headers | `Origin` header in HTTP upgrade |
 | Browser enforcement | Strong — blocks request before it's sent | Minimal — browser sends but doesn't block |
 | Preflight | Yes (`OPTIONS`) | No |
-| Where to handle | Global middleware (`TowerLayer`) | `Guard<WsContext>` on the gateway |
+| Where to handle | Global middleware (`CorsMiddleware`) | `Guard<WsContext>` on the gateway |

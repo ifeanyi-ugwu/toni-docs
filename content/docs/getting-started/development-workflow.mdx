@@ -1,0 +1,70 @@
+---
+title: Development Workflow
+description: Rebuild and restart the server on save with watchexec or bacon.
+---
+
+Toni applications work with the standard Rust watch tools — save a file, the project rebuilds, the server restarts. No framework configuration is involved.
+
+<Bridge>
+`nest start --watch` is the same loop: recompile and restart the process on save. It feels instantaneous because TypeScript compiles in milliseconds; a Rust incremental rebuild takes seconds, which is why the build-speed adjustments below matter more here than they do in Node.
+</Bridge>
+
+## watchexec
+
+[watchexec](https://github.com/watchexec/watchexec) restarts an arbitrary command when watched files change:
+
+```bash
+cargo install watchexec-cli
+```
+
+From the project root:
+
+```bash
+watchexec -r -e rs,toml -- cargo run
+```
+
+`-r` kills and restarts the process on each change; `-e rs,toml` limits watching to Rust sources and Cargo manifests. Paths in `.gitignore` (including `target/`) are excluded automatically.
+
+Older guides reference `cargo watch -x run` — that project is no longer maintained, and its README points to watchexec as the successor.
+
+## bacon
+
+[bacon](https://dystroy.org/bacon/) is a terminal UI built around compile feedback:
+
+```bash
+cargo install --locked bacon
+bacon run
+```
+
+`bacon run` rebuilds and restarts the application on save. Plain `bacon` runs `cargo check` on save instead — the fastest way to see errors while editing, when you don't need the server up.
+
+## Faster rebuilds
+
+The save-to-running gap is compile plus link time. Two adjustments give most of the improvement:
+
+**Reduce debuginfo.** Full debuginfo is the default in dev profiles and is a large share of compile and link cost. If you aren't stepping through a debugger, keep only line tables — panic backtraces stay resolvable:
+
+```toml
+# Cargo.toml
+[profile.dev]
+debug = "line-tables-only"
+```
+
+**Use a faster linker.** On Linux, [mold](https://github.com/rui314/mold) cuts link time substantially:
+
+```toml
+# .cargo/config.toml
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+```
+
+Adjust the target triple to your host. Recent macOS toolchains ship a fast linker by default.
+
+## The restart gap
+
+While a rebuild runs, the server is down — connections are refused, not queued. Scripts that poll the API during development should retry:
+
+```bash
+curl --retry 5 --retry-connrefused http://localhost:3000/users
+```

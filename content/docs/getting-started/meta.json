@@ -1,4 +1,10 @@
 {
   "title": "Getting Started",
-  "pages": ["index", "installation", "quick-start", "project-structure"]
+  "pages": [
+    "index",
+    "installation",
+    "quick-start",
+    "project-structure",
+    "development-workflow"
+  ]
 }

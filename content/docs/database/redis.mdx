@@ -39,7 +39,7 @@ The connection is established at startup and panics on failure. An invalid URL o
 
 ## Injecting the connection
 
-`ConnectionManager` is injected by type:
+The default connection's `ConnectionManager` is injected by type:
 
 ```rust
 use redis::aio::ConnectionManager;
@@ -71,6 +71,32 @@ impl CacheService {
 
 `ConnectionManager` is `Clone` — all clones share the same underlying multiplexed connection. Clone it before calling async commands (the `AsyncCommands` trait requires `&mut self` on the connection handle).
 
+## Multiple connections
+
+`for_root_named` registers an additional connection under a string name, injected via its name token:
+
+```rust
+#[module(
+    imports: [
+        RedisModule::for_root("redis://127.0.0.1:6379"),
+        RedisModule::for_root_named("cache", "redis://10.0.0.5:6379"),
+    ],
+)]
+pub struct AppModule;
+```
+
+```rust
+#[injectable]
+pub struct CacheService {
+    #[inject]
+    redis: ConnectionManager,        // default connection
+    #[inject("cache")]
+    cache: ConnectionManager,        // named connection
+}
+```
+
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different URLs are refused at startup (one would silently shadow the other), so every connection past the first needs a name. A named connection registers the connection only; the `health` feature's indicator stays on the default `for_root` connection.
+
 ## Using env vars
 
 ```rust
@@ -94,10 +120,11 @@ Enable the `health` feature to have `for_root` also register a `RedisHealthIndic
 use toni_redis::RedisModule;
 
 RedisModule::for_root(url: impl Into<String>) -> DynamicModule
+RedisModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
 ```
 
 The returned `DynamicModule`:
 - is named `"RedisModule"`
-- provides `redis::aio::ConnectionManager`
+- provides `redis::aio::ConnectionManager` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `ConnectionManager`
 - is **global** (no need to import into feature modules)

@@ -91,6 +91,32 @@ impl UsersService {
 
 `PgPool` is `Clone` — all clones share the same pool.
 
+## Multiple pools
+
+Each constructor has a `_named` variant that registers an additional pool under a string name:
+
+```rust
+#[module(
+    imports: [
+        SqlxModule::postgres("postgresql://localhost/app"),
+        SqlxModule::postgres_named("analytics", "postgresql://localhost/analytics"),
+    ],
+)]
+pub struct AppModule;
+```
+
+```rust
+#[injectable]
+pub struct ReportsService {
+    #[inject]
+    pool: PgPool,             // default pool
+    #[inject("analytics")]
+    analytics: PgPool,        // named pool
+}
+```
+
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed constructor calls with different URLs are refused at startup (one would silently shadow the other), so every pool past the first needs a name. A named pool registers the pool only; the `health` feature's indicator stays on the default constructor's pool.
+
 ## Using env vars
 
 ```rust
@@ -120,10 +146,16 @@ use toni_sqlx::SqlxModule;
 SqlxModule::postgres(url: impl Into<String>) -> DynamicModule
 SqlxModule::mysql(url: impl Into<String>)    -> DynamicModule
 SqlxModule::sqlite(url: impl Into<String>)   -> DynamicModule
+
+SqlxModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
+SqlxModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> DynamicModule
+SqlxModule::sqlite_named(name: impl Into<String>, url: impl Into<String>)   -> DynamicModule
 ```
 
+Each constructor is gated behind its database feature (`postgres`, `mysql`, `sqlite`).
+
 Each returned `DynamicModule`:
-- provides the database-specific `Pool<DB>` type
+- provides the database-specific `Pool<DB>` type — by type for the default constructors, under the `name` token for the `_named` variants
 - exports the pool
 - is **global** (no need to import into feature modules)
 

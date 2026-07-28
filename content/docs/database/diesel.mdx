@@ -88,6 +88,32 @@ impl UsersService {
 
 Obtain a connection from the pool with `.get().await` for each operation. The pool manages the connection lifecycle.
 
+## Multiple pools
+
+Each constructor has a `_named` variant that registers an additional pool under a string name:
+
+```rust
+#[module(
+    imports: [
+        DieselModule::postgres("postgresql://localhost/app"),
+        DieselModule::postgres_named("analytics", "postgresql://localhost/analytics"),
+    ],
+)]
+pub struct AppModule;
+```
+
+```rust
+#[injectable]
+pub struct ReportsService {
+    #[inject]
+    pool: PgPool,             // default pool
+    #[inject("analytics")]
+    analytics: PgPool,        // named pool
+}
+```
+
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed constructor calls with different URLs are refused at startup (one would silently shadow the other), so every pool past the first needs a name. A named pool registers the pool only; the `health` feature's indicator stays on the default constructor's pool.
+
 ## Using env vars
 
 ```rust
@@ -116,10 +142,15 @@ use toni_diesel::DieselModule;
 
 DieselModule::postgres(url: impl Into<String>) -> DynamicModule
 DieselModule::mysql(url: impl Into<String>)    -> DynamicModule
+
+DieselModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
+DieselModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> DynamicModule
 ```
 
+Each constructor is gated behind its database feature (`postgres`, `mysql`).
+
 Each returned `DynamicModule`:
-- provides the database-specific `deadpool::Pool<Connection>` type
+- provides the database-specific `deadpool::Pool<Connection>` type — by type for the default constructors, under the `name` token for the `_named` variants
 - exports the pool
 - is **global** (no need to import into feature modules)
 

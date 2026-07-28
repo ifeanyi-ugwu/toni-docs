@@ -43,7 +43,7 @@ The connection is established at startup and panics on failure, so a bad URL or 
 
 ## Injecting the connection
 
-`DatabaseConnection` is injected by type — no token string needed:
+The default connection is injected by type — no token string needed:
 
 ```rust
 use sea_orm::DatabaseConnection;
@@ -66,6 +66,34 @@ impl UsersService {
 ```
 
 `DatabaseConnection` is `Clone` — it wraps a connection pool internally. Each inject gets a clone that shares the same pool.
+
+## Multiple connections
+
+`for_root_named` registers an additional connection under a string name:
+
+```rust
+#[module(
+    imports: [
+        SeaOrmModule::for_root("postgres://localhost/app"),
+        SeaOrmModule::for_root_named("analytics", "postgres://localhost/analytics"),
+    ],
+)]
+pub struct AppModule;
+```
+
+A named connection is injected by its name token:
+
+```rust
+#[injectable]
+pub struct ReportsService {
+    #[inject]
+    db: DatabaseConnection,          // default connection
+    #[inject("analytics")]
+    analytics: DatabaseConnection,   // named connection
+}
+```
+
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different URLs are refused at startup (one would silently shadow the other), so every connection past the first needs a name. A named connection registers the connection only; the `health` feature's indicator stays on the default `for_root` connection.
 
 ## Using env vars
 
@@ -117,10 +145,11 @@ Enable the `health` feature to have `for_root` also register a `SeaOrmHealthIndi
 use toni_seaorm::SeaOrmModule;
 
 SeaOrmModule::for_root(url: impl Into<String>) -> DynamicModule
+SeaOrmModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
 ```
 
 The returned `DynamicModule`:
 - is named `"SeaOrmModule"`
-- provides `sea_orm::DatabaseConnection`
+- provides `sea_orm::DatabaseConnection` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `DatabaseConnection`
 - is **global** (no need to import into feature modules)

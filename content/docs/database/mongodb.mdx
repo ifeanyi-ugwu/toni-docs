@@ -43,7 +43,7 @@ The connection is established at startup and panics on failure, so an invalid UR
 
 ## Injecting the database
 
-`Database` is injected by type — no token string needed:
+The default connection's `Database` is injected by type — no token string needed:
 
 ```rust
 use mongodb::{Database, Collection, bson::doc};
@@ -84,6 +84,32 @@ impl UsersService {
 
 `Database` is `Clone` — all clones share the same connection pool managed by the underlying `Client`.
 
+## Multiple connections
+
+`for_root_named` registers an additional connection under a string name. The name is the **first** argument, ahead of the URI and database name:
+
+```rust
+#[module(
+    imports: [
+        MongoModule::for_root("mongodb://localhost:27017", "app"),
+        MongoModule::for_root_named("analytics", "mongodb://localhost:27017", "analytics"),
+    ],
+)]
+pub struct AppModule;
+```
+
+```rust
+#[injectable]
+pub struct ReportsService {
+    #[inject]
+    db: Database,             // default connection
+    #[inject("analytics")]
+    analytics: Database,      // named connection
+}
+```
+
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different config are refused at startup (one would silently shadow the other), so every connection past the first needs a name. A named connection registers the database handle only; the `health` feature's indicator stays on the default `for_root` connection.
+
 ## Using env vars
 
 ```rust
@@ -115,11 +141,17 @@ MongoModule::for_root(
     uri: impl Into<String>,
     db_name: impl Into<String>,
 ) -> DynamicModule
+
+MongoModule::for_root_named(
+    name: impl Into<String>,
+    uri: impl Into<String>,
+    db_name: impl Into<String>,
+) -> DynamicModule
 ```
 
 The returned `DynamicModule`:
 - is named `"MongoModule"`
-- provides `mongodb::Database`
+- provides `mongodb::Database` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `Database`
 - is **global** (no need to import into feature modules)
 

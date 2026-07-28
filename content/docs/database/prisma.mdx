@@ -48,7 +48,7 @@ pub struct AppModule;
 
 ## Injecting the client
 
-The client is injected by its concrete Rust type — no token string needed:
+The default client is injected by its concrete Rust type — no token string needed:
 
 ```rust
 use db::PrismaClient;
@@ -109,6 +109,32 @@ PrismaModule::for_root(|| async {
 })
 ```
 
+## Multiple clients
+
+`for_root_named` registers an additional client under a string name:
+
+```rust
+#[module(
+    imports: [
+        PrismaModule::for_root(|| async { /* build client */ }),
+        PrismaModule::for_root_named("analytics", || async { /* build client */ }),
+    ],
+)]
+pub struct AppModule;
+```
+
+```rust
+#[injectable]
+pub struct ReportsService {
+    #[inject]
+    db: PrismaClient,           // default client
+    #[inject("analytics")]
+    analytics: PrismaClient,    // named client
+}
+```
+
+Unlike the other database integrations, Prisma's connect closure is opaque to the framework, so two unnamed `for_root` calls registering the same client type cannot be told apart — a name is **required** to register more than one client of the same type. Names are global identifiers; two connections cannot share one, even across different integration crates.
+
 ## Shutdown
 
 `PrismaModule` has no explicit shutdown hook — cleanup happens through the client's `Drop` implementation when the application exits.
@@ -119,6 +145,7 @@ PrismaModule::for_root(|| async {
 use toni_prisma::PrismaModule;
 
 PrismaModule::for_root<C, F, Fut>(connect: F) -> DynamicModule
+PrismaModule::for_root_named<C, F, Fut>(name: impl Into<String>, connect: F) -> DynamicModule
 where
     C: Send + Sync + Clone + 'static,
     F: Fn() -> Fut + Send + Sync + 'static,

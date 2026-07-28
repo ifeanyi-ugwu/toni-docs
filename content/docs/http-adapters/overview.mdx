@@ -36,7 +36,7 @@ Any HTTP server can back a Toni application by implementing `HttpAdapter`:
 pub trait HttpAdapter: Send + Sync + 'static {
     /// Register one HTTP route. Called at bootstrap for every route
     /// the framework discovers.
-    fn bind(
+    fn register_route(
         &mut self,
         method: HttpMethod,
         path: &str,
@@ -46,7 +46,7 @@ pub trait HttpAdapter: Send + Sync + 'static {
     /// Register a WebSocket upgrade path on the same port as HTTP.
     /// The default implementation returns an error — only adapters
     /// with same-port WebSocket support implement it.
-    fn bind_ws(&mut self, path: &str, callbacks: Arc<WsConnectionCallbacks>) -> Result<()>;
+    fn register_ws_route(&mut self, path: &str, callbacks: Arc<WsConnectionCallbacks>) -> Result<()>;
 
     /// Consume the adapter, bind the listening socket, and return a
     /// self-contained lifecycle handle the framework drives.
@@ -61,11 +61,11 @@ pub trait HttpAdapter: Send + Sync + 'static {
 
 The lifecycle:
 
-1. `app.use_http_adapter(adapter, port, host)` boxes the adapter (`ToniApplication` holds it as `Box<dyn HttpAdapter>`) and calls `bind` for every resolved route.
+1. `app.use_http_adapter(adapter, port, host)` boxes the adapter (`ToniApplication` holds it as `Box<dyn HttpAdapter>`) and calls `register_route` for every resolved route.
 2. `app.bind()` calls `into_lifecycle`, which binds the socket synchronously — port conflicts surface here as a `BindError`, not inside a background task. The returned [`BoundAdapters`](/docs/api-reference/core) carries the bound addresses, so passing port `0` and reading the OS-assigned port works.
 3. `app.run()` drives the serve loop until [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) is triggered. `app.start()` is `bind()` + `run()` in one step.
 
-The `AdapterContext` passed to `into_lifecycle` carries the global middleware chain; every adapter runs it *before* its own routing, so global middleware observes every request — including ones that end in a 404.
+The `AdapterContext` passed to `into_lifecycle` carries the global middleware chain; every adapter runs it *before* its own routing, so global middleware observes every request — including 404s, 405s, and same-port WebSocket upgrades — and a request rewritten in the chain changes which route matches.
 
 ## Bounded in-flight requests
 

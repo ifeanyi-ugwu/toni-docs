@@ -26,7 +26,7 @@ app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
 app.start().await.unwrap();
 ```
 
-The listener binds synchronously during route binding, so a port conflict surfaces as `Err` from `app.bind()` / `app.start()` rather than a panic in the accept loop.
+The listener binds synchronously during pattern registration, so a port conflict surfaces as `Err` from `app.bind()` / `app.start()` rather than a panic in the accept loop.
 
 ---
 

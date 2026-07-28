@@ -21,6 +21,6 @@ app.start().await.unwrap();
 
 For HTTP routing, switching from `toni-axum` requires only changing the import and the adapter constructor call. Differences:
 
-- **No WebSocket support** — `ActixAdapter` implements `HttpAdapter` only. `bind_ws` returns an error, and the crate has no `WebSocketAdapter`; gateways need `toni-axum` or another WebSocket-capable adapter.
+- **No WebSocket support** — `ActixAdapter` implements `HttpAdapter` only. `register_ws_route` returns an error, and the crate has no `WebSocketAdapter`; gateways need `toni-axum` or another WebSocket-capable adapter.
 - **Bodies are buffered** — request and response bodies are read fully into memory (no streaming).
 - **Graceful shutdown** — closing the app stops the Actix server and waits for in-flight requests to finish.

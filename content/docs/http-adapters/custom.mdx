@@ -3,14 +3,14 @@ title: Custom Adapters
 description: Implement the HttpAdapter trait to integrate Toni with any HTTP server.
 ---
 
-If none of the five official adapters fits your constraints, implement `HttpAdapter` to back Toni with any HTTP server. The contract has three parts: store routes during `bind`, optionally accept WebSocket paths in `bind_ws`, and consume yourself into a self-contained lifecycle handle in `into_lifecycle`.
+If none of the five official adapters fits your constraints, implement `HttpAdapter` to back Toni with any HTTP server. The contract has three parts: store routes during `register_route`, optionally accept WebSocket paths in `register_ws_route`, and consume yourself into a self-contained lifecycle handle in `into_lifecycle`.
 
 ## The contract
 
 ```rust
 #[toni::async_trait]
 pub trait HttpAdapter: Send + Sync + 'static {
-    fn bind(
+    fn register_route(
         &mut self,
         method: HttpMethod,
         path: &str,
@@ -18,7 +18,7 @@ pub trait HttpAdapter: Send + Sync + 'static {
     ) -> Result<()>;
 
     // Optional — default returns an error. Implement for same-port WebSocket.
-    fn bind_ws(&mut self, path: &str, callbacks: Arc<WsConnectionCallbacks>) -> Result<()>;
+    fn register_ws_route(&mut self, path: &str, callbacks: Arc<WsConnectionCallbacks>) -> Result<()>;
 
     async fn into_lifecycle(
         self: Box<Self>,
@@ -31,7 +31,7 @@ pub trait HttpAdapter: Send + Sync + 'static {
 
 Everything you need is exported from the `toni` crate root: `HttpAdapter`, `HttpMethod`, `RequestHandler`, `AdapterContext`, `HttpLifecycleHandle`, `HttpRequest`, `HttpResponse`, `WsConnectionCallbacks`, plus `http_helpers::{PathParams, RequestBody}`.
 
-**`bind`** is called at bootstrap for every route the framework discovers. Store the `(method, path, handler)` triple; build the native router later. Each `Arc<dyn RequestHandler>` wraps one route's full pipeline — route-scoped middleware, guards, interceptors, pipes, and the controller — behind a single call:
+**`register_route`** is called at bootstrap for every route the framework discovers. Store the `(method, path, handler)` triple; build the native router later. Each `Arc<dyn RequestHandler>` wraps one route's full pipeline — route-scoped middleware, guards, interceptors, pipes, and the controller — behind a single call:
 
 ```rust
 pub trait RequestHandler: Send + Sync + 'static {
@@ -41,7 +41,7 @@ pub trait RequestHandler: Send + Sync + 'static {
 
 **`into_lifecycle`** consumes the adapter and does three things:
 
-1. **Builds the native router** from the stored routes, wrapping each handler so the request runs through the global middleware chain (see below).
+1. **Builds the native router** from the stored routes and anchors the global middleware chain around it (see below).
 2. **Binds the listener synchronously**, before returning — port conflicts then surface as a `BindError` from `app.bind()` instead of failing inside a spawned task.
 3. **Returns a handle** built from the bound address, the long-running serve future, and a closure that triggers graceful shutdown:
 
@@ -62,18 +62,20 @@ The handle owns everything; the framework never calls back into the adapter afte
 
 ## Running the global chain
 
-`AdapterContext` carries the global middleware chain. Wrap every native handler — and your 404 fallback — so the request passes through `ctx.execute` before your routing logic:
+`AdapterContext` carries the global middleware chain. Anchor `ctx.execute` at the adapter's outermost point, wrapping the entire native router — routing runs inside the closure, not before it:
 
 ```rust
 let http_res = ctx
     .execute(http_req, move |req| {
-        let handler = handler.clone();
-        Box::pin(async move { handler.handle(req).await })
+        let router = router.clone();
+        Box::pin(async move { router.dispatch(req).await })  // match + handle + 404 fallback
     })
     .await;
 ```
 
-Global middleware runs pre-routing on every request, including unmatched paths. Register a catch-all in your native router that calls `ctx.execute` and produces Toni's standard 404 envelope (`{"statusCode": 404, "message": "Cannot GET /x", "error": "Not Found"}`) — the official adapters all do.
+Anchored this way, the chain observes every request — matched routes, unknown paths (404), method mismatches (405), and same-port WebSocket upgrades — and a middleware can short-circuit by returning a response without invoking the closure, which is how CORS preflight is answered. The closure receives the request the chain forwards: a middleware that rewrites the URI changes which route matches. Wrapping individual matched-route handlers instead breaks all of this — 405s and preflight would be answered by the native router before the chain ever runs.
+
+The router's catch-all for unmatched paths produces Toni's standard 404 envelope (`{"statusCode": 404, "message": "Cannot GET /x", "error": "Not Found"}`) — the official adapters all do.
 
 ## Converting requests and responses
 
@@ -123,7 +125,7 @@ impl MyAdapter {
 
 #[toni::async_trait]
 impl HttpAdapter for MyAdapter {
-    fn bind(
+    fn register_route(
         &mut self,
         method: HttpMethod,
         path: &str,
@@ -142,12 +144,16 @@ impl HttpAdapter for MyAdapter {
         let routes = std::mem::take(&mut self.routes);
         let ctx = Arc::new(ctx);
 
-        // 1. Build the native router. For each route, the native handler:
+        // 1. Build the native router. Each matched route's native handler:
         //    - converts the native request into parts + body,
         //    - inserts PathParams into parts.extensions,
         //    - builds HttpRequest::from_parts(parts, RequestBody::Streaming(body)),
-        //    - runs it through ctx.execute(http_req, |req| … handler.handle(req) …),
+        //    - calls handler.handle(req) directly (no ctx.execute here),
         //    - converts the HttpResponse back to the native type.
+        //    Include a catch-all that renders the 404 envelope. Then wrap the
+        //    whole router in an outer service that converts the inbound request
+        //    and runs ctx.execute(http_req, |req| route(req)) — the global chain
+        //    anchors around routing, not inside handlers.
         // …
 
         // 2. Bind synchronously — port conflicts surface at app.bind().
@@ -180,13 +186,13 @@ app.start().await?;
 
 ## WebSocket support
 
-For same-port upgrades, implement `bind_ws` and perform the upgrade in your router. The framework hands you `WsConnectionCallbacks` per gateway path; the adapter drives the connection lifecycle:
+For same-port upgrades, implement `register_ws_route` and perform the upgrade in your router. The framework hands you `WsConnectionCallbacks` per gateway path; the adapter drives the connection lifecycle:
 
 - `callbacks.connect(parts, sender).await` when a client connects — pass the upgrade request parts and an adapter-owned `Arc<dyn WsSink>`; returns the assigned client id, or an error when a guard rejects the connection.
 - `callbacks.message(client_id, msg).await` for each decoded frame — returns a `MessageCallbackResult` (`Continue`, `Stop`, or `Stream(stream)` to spawn a forwarding task).
 - `callbacks.disconnect(client_id).await` when the read loop ends.
 
-For separate-port gateways (`#[websocket_gateway(port = N)]`), implement the `WebSocketAdapter` trait on the same type — `bind(port, path, callbacks)` plus `into_lifecycle_handles(ports)` returning one `WsLifecycleHandle` per port.
+For separate-port gateways (`#[websocket_gateway(port = N)]`), implement the `WebSocketAdapter` trait on the same type — `register_gateway(port, path, callbacks)` plus `into_lifecycle_handles(ports)` returning one `WsLifecycleHandle` per port.
 
 ## Reference implementations
 

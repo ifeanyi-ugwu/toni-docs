@@ -1,9 +1,9 @@
 ---
 title: CLI Commands
-description: All toni-cli commands — project creation and resource generation.
+description: All toni-cli commands — project creation, resource generation, and the dev loop.
 ---
 
-The CLI has two commands: `toni new` and `toni generate resource`.
+The CLI has three commands: `toni new`, `toni generate resource`, and `toni dev`.
 
 ## toni new
 
@@ -188,3 +188,35 @@ impl UsersModule {}
 ```
 
 The stub methods return placeholder strings — replace them with real logic and typed responses (see [Quick Start](/docs/getting-started/quick-start)).
+
+## toni dev
+
+Run the application and restart it whenever a source file changes.
+
+```bash
+toni dev
+```
+
+Run it from the project root. On start it runs `cargo run`; on every save of a `.rs` or `.toml` file it rebuilds and restarts the process. Paths in `.gitignore` (and `target/`) are excluded from watching. Ctrl-C stops the watcher and the application.
+
+```
+[toni dev] watching /path/to/my_api — running `cargo run` (Ctrl-C to stop)
+   Compiling my_api v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.31s
+     Running `target/debug/my_api`
+...
+[toni dev] change detected, restarting
+```
+
+If a rebuild fails, the compile errors are printed and the previous process stays down; the next save triggers another attempt.
+
+**Options:**
+
+- `--release` — build and run in release mode
+- `-- <args>` — everything after `--` is passed to the application binary
+
+```bash
+toni dev --release -- --config config/local.toml
+```
+
+While the rebuild runs the server is down — connections are refused, not queued. The watcher is restart-based, same as `nest start --watch`; see [Development Workflow](/docs/getting-started/development-workflow) for build-speed tuning that shortens the gap.

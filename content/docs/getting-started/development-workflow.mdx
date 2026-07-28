@@ -3,11 +3,21 @@ title: Development Workflow
 description: Rebuild and restart the server on save with watchexec or bacon.
 ---
 
-Toni applications work with the standard Rust watch tools — save a file, the project rebuilds, the server restarts. No framework configuration is involved.
+Save a file, the project rebuilds, the server restarts. The CLI ships this loop as `toni dev`; the generic Rust watch tools work just as well.
 
 <Bridge>
 `nest start --watch` is the same loop: recompile and restart the process on save. It feels instantaneous because TypeScript compiles in milliseconds; a Rust incremental rebuild takes seconds, which is why the build-speed adjustments below matter more here than they do in Node.
 </Bridge>
+
+## toni dev
+
+From the project root:
+
+```bash
+toni dev
+```
+
+Runs `cargo run` and restarts it on every save of a `.rs` or `.toml` file, with `.gitignore` paths and `target/` excluded. `--release` and pass-through binary arguments are supported — see [CLI Commands](/docs/cli/commands#toni-dev).
 
 ## watchexec
 

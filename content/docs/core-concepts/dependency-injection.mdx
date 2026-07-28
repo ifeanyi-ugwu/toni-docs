@@ -141,13 +141,23 @@ Providers resolve by topological sort, one module at a time. A cycle within a si
 Circular dependency detected for provider: my_app::services::ServiceA
 ```
 
-A cycle that spans two modules is invisible to the per-module sort and surfaces later, when the container cannot build either side:
+A cycle that spans two modules is invisible to the per-module sort. The loader detects it when instantiation stalls, and names the exact provider chain and the module each side lives in:
 
 ```
-Cannot resolve dependencies for modules: ["ModuleA", "ModuleB"]. Possible circular dependency or missing global provider.
+Circular dependency detected between providers:
+    my_app::services::ServiceA (in module ModuleA)
+    -> my_app::services::ServiceB (in module ModuleB)
+A provider cannot be built before a provider it depends on. Break the cycle: extract the shared logic into a third provider both depend on, or inject `ModuleRef` into one side and resolve the other lazily at call time.
 ```
 
-Either message points to a genuine construction cycle. The fix is to break it.
+When instantiation stalls without a cycle, the message says so — that diagnosis points at a missing or unexported provider, not a cycle:
+
+```
+Cannot resolve dependencies for modules: ["ModuleA"]. No provider cycle was found, so a required provider is missing or not exported by an imported module:
+    - ModuleA: DEFERRED: Global provider 'my_app::services::MailService' not yet instantiated for module 'ModuleA'
+```
+
+A cycle message always points to a genuine construction cycle. The fix is to break it.
 
 <Bridge>
 NestJS breaks a cycle with `forwardRef`. Toni has no equivalent and needs none: `forwardRef` defers a class reference that is `undefined` at module-evaluation time, but Toni identifies providers by string token and resolves them at runtime, so a reference is never undefined and there is nothing to defer. A reported cycle is always a real construction cycle, not a language artifact.

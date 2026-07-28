@@ -86,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
 
 The root module itself typically has no controllers or providers — it composes feature modules.
 
+`create` accepts any module — a `#[module]` struct or a `DynamicModule` — so a worker that only needs one integration can pass `SeaOrmModule::for_root(url)` directly as the root.
+
 ## Global modules
 
 Marking a module `global: true` makes its exports available to every module in the tree without importing it:
@@ -185,3 +187,9 @@ impl FeatureFlagsModule {
 ```
 
 The builder's `export::<T>()` exports by type, `export_token("NAME")` exports a string-token provider, and `global()` marks the module global.
+
+### Identity and deduplication
+
+A dynamic module's identity is its builder name plus the configuration of its providers. Importing the same module twice — say two feature modules each list `SeaOrmModule::for_root("postgres://localhost/app")` — registers it once; the second import dedups.
+
+Two calls with **different** configuration are different modules. If both export the same token (two unnamed `for_root` calls of one integration), startup is refused with an error naming both modules — one would silently shadow the other. Integrations expose named constructors (`for_root_named`) for this; a custom multi-instance module opts into the same identity machinery by implementing `identity_hint()` on its `ProviderFactory`, returning a string that distinguishes one configuration from another.

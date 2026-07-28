@@ -88,7 +88,7 @@ pub struct WsAuthGuard;
 
 #[async_trait]
 impl Guard<WsContext> for WsAuthGuard {
-    async fn can_activate(&self, ctx: &WsContext) -> bool {
+    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
         // Handshake header keys are stored lowercase
         ctx.client().handshake.headers.get("x-auth-token").is_some()
     }

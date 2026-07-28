@@ -100,7 +100,7 @@ impl EventsService {
 
     /// Each call returns an independent stream that receives every message
     /// emitted after the subscription point.
-    pub fn subscribe(&self) -> Pin<Box<dyn Stream<Item = SseEvent> + Send + Sync + 'static>> {
+    pub fn subscribe(&self) -> Pin<Box<dyn Stream<Item = SseEvent> + Send + 'static>> {
         let rx = self.tx.subscribe();
         Box::pin(stream::unfold(rx, |mut rx| async move {
             loop {

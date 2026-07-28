@@ -52,7 +52,7 @@ impl AuthGuard {}
 
 #[toni::async_trait]
 impl Guard<GrpcContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &GrpcContext) -> bool {
+    async fn can_activate(&self, ctx: &mut GrpcContext) -> bool {
         matches!(ctx.get_metadata("authorization"), Some("Bearer secret-token"))
     }
 }

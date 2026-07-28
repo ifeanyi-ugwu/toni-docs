@@ -194,7 +194,7 @@ impl AdminController {
 
 ```rust
 #[catch(GuardRejection)]
-async fn shape_rejection(err: &GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+async fn shape_rejection(err: &GuardRejection, _ctx: &mut HttpContext) -> HttpResponse {
     HttpResponse::forbidden()
         .json(serde_json::json!({ "denied_by_guard": err.guard_index }))
         .build()

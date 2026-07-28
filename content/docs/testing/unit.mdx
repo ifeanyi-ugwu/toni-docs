@@ -92,7 +92,7 @@ pub struct AuthGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         ctx.request()
             .headers
             .get("authorization")
@@ -119,8 +119,8 @@ mod tests {
     #[tokio::test]
     async fn allows_valid_token() {
         let guard = AuthGuard;
-        let ctx = context_with_token("valid-token-123");
-        assert!(guard.can_activate(&ctx).await);
+        let mut ctx = context_with_token("valid-token-123");
+        assert!(guard.can_activate(&mut ctx).await);
     }
 
     #[tokio::test]
@@ -130,8 +130,8 @@ mod tests {
             .uri("/protected")
             .body(RequestBody::empty())
             .unwrap();
-        let ctx = HttpContext::from_request(req);
-        assert!(!guard.can_activate(&ctx).await);
+        let mut ctx = HttpContext::from_request(req);
+        assert!(!guard.can_activate(&mut ctx).await);
     }
 }
 ```

@@ -255,7 +255,7 @@ impl ApiKeyGuard {}
 
 #[async_trait]
 impl Guard<RpcContext> for ApiKeyGuard {
-    async fn can_activate(&self, ctx: &RpcContext) -> bool {
+    async fn can_activate(&self, ctx: &mut RpcContext) -> bool {
         ctx.get_metadata("api-key") == Some("secret")
     }
 }

@@ -19,11 +19,11 @@ use toni::context::HandlerContext;
 
 #[async_trait]
 pub trait Guard<C: ?Sized + HandlerContext>: Send + Sync {
-    async fn can_activate(&self, context: &C) -> bool;
+    async fn can_activate(&self, context: &mut C) -> bool;
 }
 ```
 
-Import it from `toni::traits_helpers::Guard`. The context is a shared reference — guards read the request, route metadata, and extensions, but cannot modify the response.
+Import it from `toni::traits_helpers::Guard`. The context is an exclusive reference (`&mut`) — guards read the request, route metadata, and extensions, and can attach values for downstream enhancers and the handler.
 
 ## A simple authentication guard
 
@@ -36,7 +36,7 @@ pub struct AuthGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         ctx.request()
             .headers
             .get("authorization")
@@ -70,7 +70,7 @@ pub struct RolesGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for RolesGuard {
-    async fn can_activate(&self, context: &HttpContext) -> bool {
+    async fn can_activate(&self, context: &mut HttpContext) -> bool {
         let Some(metadata) = context.route_metadata() else {
             return true;
         };
@@ -143,7 +143,7 @@ impl JwtGuard {
 
 #[async_trait]
 impl Guard<HttpContext> for JwtGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         let token = ctx
             .request()
             .headers
@@ -242,7 +242,7 @@ impl UniversalAuthGuard {}
 
 #[async_trait]
 impl Guard<HttpContext> for UniversalAuthGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         ctx.request()
             .headers
             .get("authorization")
@@ -254,7 +254,7 @@ impl Guard<HttpContext> for UniversalAuthGuard {
 
 #[async_trait]
 impl Guard<RpcContext> for UniversalAuthGuard {
-    async fn can_activate(&self, ctx: &RpcContext) -> bool {
+    async fn can_activate(&self, ctx: &mut RpcContext) -> bool {
         ctx.data()
             .as_json()
             .and_then(|v| v.get("auth").and_then(|a| a.as_str()))
@@ -264,7 +264,7 @@ impl Guard<RpcContext> for UniversalAuthGuard {
 
 #[async_trait]
 impl Guard<WsContext> for UniversalAuthGuard {
-    async fn can_activate(&self, ctx: &WsContext) -> bool {
+    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
         ctx.client()
             .handshake
             .query
@@ -275,6 +275,45 @@ impl Guard<WsContext> for UniversalAuthGuard {
 ```
 
 Each `impl` is the registration for that transport. Attaching a guard to a transport whose context it doesn't implement is a type error.
+
+## Passing data from a guard to the handler
+
+Because the context is `&mut`, a guard can attach values to the extension bag for anything that runs after it:
+
+```rust
+#[derive(Clone)]
+pub struct Principal {
+    pub user: String,
+    pub roles: Vec<String>,
+}
+
+#[async_trait]
+impl Guard<HttpContext> for AuthGuard {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
+        ctx.extensions_mut().insert(Principal {
+            user: "alice".into(),
+            roles: vec!["admin".into()],
+        });
+        true
+    }
+}
+```
+
+Downstream enhancers retrieve the value by type:
+
+```rust
+#[async_trait]
+impl Guard<HttpContext> for RequireAdminGuard {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
+        match ctx.extensions().get::<Principal>() {
+            Some(principal) => principal.roles.iter().any(|r| r == "admin"),
+            None => false,
+        }
+    }
+}
+```
+
+Extensions are the enhancer-to-handler bus: attach once, read anywhere later in the same request.
 
 ## What happens when a guard blocks
 
@@ -295,7 +334,7 @@ use toni::context::HttpContext;
 use toni::HttpResponse;
 
 #[catch(toni::errors::GuardRejection)]
-async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &mut HttpContext) -> HttpResponse {
     HttpResponse::builder()
         .status(toni::errors::http_status(err.kind()))
         .json(json!({

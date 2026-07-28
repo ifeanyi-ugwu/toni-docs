@@ -177,7 +177,7 @@ impl Error for PaymentDeclined {
 }
 
 #[catch(PaymentDeclined)]
-async fn render_payment_declined(err: &PaymentDeclined, _ctx: &HttpContext) -> HttpResponse {
+async fn render_payment_declined(err: &PaymentDeclined, _ctx: &mut HttpContext) -> HttpResponse {
     HttpResponse::builder()
         .status(toni::errors::http_status(err.kind()))
         .header("Retry-After", err.retry_after_secs.to_string())
@@ -190,7 +190,7 @@ async fn render_payment_declined(err: &PaymentDeclined, _ctx: &HttpContext) -> H
 }
 ```
 
-`#[catch(T)]` lowers a free `async fn (err: &T, ctx: &CtxType) -> ResponseType` into an `ErrorHandler` that downcasts the inbound error to `T` — non-matching errors fall through to the next handler. The function name becomes a unit struct, registered like any handler:
+`#[catch(T)]` lowers a free `async fn (err: &T, ctx: &mut CtxType) -> ResponseType` into an `ErrorHandler` that downcasts the inbound error to `T` — non-matching errors fall through to the next handler. The function name becomes a unit struct, registered like any handler:
 
 ```rust
 #[controller("/billing")]
@@ -206,7 +206,7 @@ impl BillingController {
 }
 ```
 
-The context parameter picks the transport: `&HttpContext` returning `HttpResponse` for HTTP, `&RpcContext` returning `RpcData` for RPC, `&WsContext` returning `WsMessage` for WebSocket.
+The context parameter picks the transport: `&mut HttpContext` returning `HttpResponse` for HTTP, `&mut RpcContext` returning `RpcData` for RPC, `&mut WsContext` returning `WsMessage` for WebSocket.
 
 ## The ErrorHandler chain
 
@@ -217,7 +217,7 @@ use toni::traits_helpers::{ChainError, ErrorHandler};
 
 #[async_trait]
 pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
-    async fn handle_error(&self, error: ChainError<'_>, ctx: &C) -> Option<R>;
+    async fn handle_error(&self, error: ChainError<'_>, ctx: &mut C) -> Option<R>;
 }
 ```
 
@@ -234,7 +234,7 @@ pub struct StatusPageErrorHandler;
 
 #[async_trait]
 impl ErrorHandler<HttpContext, HttpResponse> for StatusPageErrorHandler {
-    async fn handle_error(&self, error: ChainError<'_>, _ctx: &HttpContext) -> Option<HttpResponse> {
+    async fn handle_error(&self, error: ChainError<'_>, _ctx: &mut HttpContext) -> Option<HttpResponse> {
         let http_error = error.downcast_ref::<HttpError>()?;
         if http_error.status_code() != 404 {
             return None; // pass to the next handler
@@ -279,7 +279,7 @@ All are exported from `toni::errors` (and the crate root). Reshaping a guard rej
 
 ```rust
 #[catch(toni::errors::GuardRejection)]
-async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &HttpContext) -> HttpResponse {
+async fn auth_failure(err: &toni::errors::GuardRejection, _ctx: &mut HttpContext) -> HttpResponse {
     HttpResponse::builder()
         .status(toni::errors::http_status(err.kind()))
         .json(json!({
@@ -308,7 +308,7 @@ impl ErrorObserver for SentryObserver {
     async fn observe<'a>(
         &'a self,
         error: &'a (dyn Error + Send + Sync + 'static),
-        _ctx: &'a (dyn HandlerContext + 'a),
+        _ctx: &'a mut (dyn HandlerContext + 'a),
     ) {
         tracing::error!(error = %error, "request error");
     }

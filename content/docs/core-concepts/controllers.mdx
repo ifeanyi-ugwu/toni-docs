@@ -194,7 +194,7 @@ pub struct AuthGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         ctx.request().headers.contains_key("x-auth-token")
     }
 }
@@ -230,7 +230,7 @@ use toni::{async_trait, context::{HandlerContext, HttpContext}, traits_helpers::
 
 #[async_trait]
 impl Guard<HttpContext> for RolesGuard {
-    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
         let Some(Roles(required)) = ctx.route_metadata().and_then(|m| m.get::<Roles>()) else {
             return true; // no roles required
         };

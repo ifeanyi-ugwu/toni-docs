@@ -37,7 +37,7 @@ impl ErrorHandler<GrpcContext, GrpcStatus> for QtyErrorHandler {
     async fn handle_error(
         &self,
         error: ChainError<'_>,
-        _ctx: &GrpcContext,
+        _ctx: &mut GrpcContext,
     ) -> Option<GrpcStatus> {
         if error.to_string().contains("invalid-qty") {
             Some(GrpcStatus::new(

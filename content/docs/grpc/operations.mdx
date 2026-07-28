@@ -61,16 +61,7 @@ rpc.request{transport="grpc", pattern="toni_examples.orders.Orders/Create", id=.
 
 `pattern` is the full proto method path; `id` is the caller's `x-request-id` metadata, falling back to `grpc-trace-id` (gRPC has no built-in correlation id); `peer` is the remote address. Events emitted from handlers and enhancers inherit these fields, so log lines correlate back to the originating call without threading context by hand.
 
-The span is installed unconditionally and surfaces only when a `tracing` subscriber is installed:
-
-```rust
-tracing_subscriber::fmt()
-    .with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()),
-    )
-    .init();
-```
+The span surfaces out of the box: `ToniFactory::create*` installs a default `tracing` subscriber (stderr, `RUST_LOG` filter, `info` fallback). To customize output, install your own subscriber before `create` — it wins over the default. See [Logging](/docs/techniques/logging).
 
 The same `rpc.request` span shape (with `transport = "tcp"` / `"udp"`) is emitted by the RPC adapters; the repository's `rpc_tracing` example runs all three side by side.
 

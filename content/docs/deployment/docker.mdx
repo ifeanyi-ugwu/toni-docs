@@ -66,7 +66,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:password@db:5432/myapp
       JWT_SECRET: dev-secret-at-least-32-chars-long
-      LOG_LEVEL: debug
+      RUST_LOG: debug
     depends_on:
       db:
         condition: service_healthy
@@ -94,6 +94,8 @@ volumes:
 docker compose up -d
 docker compose logs -f api
 ```
+
+Logs appear without any setup: the framework installs a default `tracing` subscriber writing to stderr, which Docker captures. `RUST_LOG` controls the level (`info` when unset). See [Logging](/docs/techniques/logging).
 
 `docker stop` sends SIGTERM and kills the container after a timeout. Toni installs no signal handlers, so wire SIGTERM to the application's shutdown handle yourself — see [Graceful shutdown](/docs/deployment/production#graceful-shutdown). Without it, in-flight requests are dropped and shutdown hooks never run.
 

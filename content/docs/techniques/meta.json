@@ -1,4 +1,8 @@
 {
   "title": "Techniques",
-  "pages": ["sse", "health"]
+  "pages": [
+    "sse",
+    "health",
+    "logging"
+  ]
 }

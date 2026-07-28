@@ -142,6 +142,8 @@ sudo journalctl -u myapp -f
 
 `systemctl stop` sends SIGTERM, so the [graceful shutdown wiring above](#graceful-shutdown) is what makes it a clean stop.
 
+Logs reach `journalctl` without any setup: the framework's default `tracing` subscriber writes to stderr at `info` level, adjustable per deployment with `RUST_LOG` in the environment file. See [Logging](/docs/techniques/logging).
+
 ## Performance tuning (Axum / Tokio)
 
 ```rust

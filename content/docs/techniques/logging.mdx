@@ -1,0 +1,50 @@
+---
+title: Logging
+description: The default tracing subscriber, RUST_LOG control, and bringing your own.
+---
+
+Toni applications log out of the box. `ToniFactory::create` — and `create_application_context` for CLI tools and workers — installs a default `tracing` subscriber before anything else runs: a fmt writer to **stderr**, filtered by `RUST_LOG`, defaulting to `info`.
+
+<Bridge>
+NestJS prints through its built-in `Logger` from the first `NestFactory.create` call. The default subscriber gives Toni the same out-of-the-box behavior, with `RUST_LOG` in the role of the `logger: [...]` level array.
+</Bridge>
+
+## Controlling the level
+
+`RUST_LOG` takes a [tracing `EnvFilter` directive](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html):
+
+```bash
+RUST_LOG=debug ./my_api                    # everything at debug
+RUST_LOG=my_api=debug,toni=warn ./my_api   # per-crate levels
+RUST_LOG=off ./my_api                      # runtime silence
+```
+
+Unset, the filter is `info`.
+
+## Bringing your own subscriber
+
+The default installs via `try_init()`, which backs off when a global subscriber is already set. Install yours before `create` and it wins:
+
+```rust
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt().json().init(); // yours — the default backs off
+
+    let mut app = ToniFactory::create(AppModule).await;
+    // ...
+}
+```
+
+## Compiling it out
+
+The default subscriber ships behind the default-on `logger` cargo feature, which gates the `tracing-subscriber` dependency:
+
+```toml
+toni = { version = "0.2", default-features = false }
+```
+
+`RUST_LOG=off` silences output at runtime without recompiling; `default-features = false` removes the dependency entirely.
+
+## Where logs go
+
+The default writes human-readable lines to stderr, so `docker logs` and `journalctl` capture them with no configuration. RPC and gRPC calls run inside an `rpc.request` span whose fields (`transport`, `pattern`, `id`, `peer`) every log line emitted from handlers and enhancers inherits — see [gRPC operations](/docs/grpc/operations) for the span shape.

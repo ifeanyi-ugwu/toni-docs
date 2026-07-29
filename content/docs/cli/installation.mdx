@@ -3,12 +3,18 @@ title: CLI Installation
 description: Install the Toni CLI to scaffold new projects and generate resources.
 ---
 
-The Toni CLI (`toni-cli`) scaffolds new projects and generates CRUD resources (module + controller + service, wired in automatically) from the terminal.
+The Toni CLI (`toni-cli`) scaffolds new projects, generates CRUD resources (module + controller + service, wired in automatically), and runs the development watch loop from the terminal.
 
 ## Install
 
 ```bash
 cargo install toni-cli
+```
+
+The `toni dev` command sits behind a default-on `dev` feature carrying the file-watcher dependencies. For a scaffolding-only install that builds faster:
+
+```bash
+cargo install toni-cli --no-default-features
 ```
 
 Verify installation — the version printed matches the installed crate version:

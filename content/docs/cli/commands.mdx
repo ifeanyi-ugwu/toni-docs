@@ -213,10 +213,37 @@ If a rebuild fails, the compile errors are printed and the previous process stay
 **Options:**
 
 - `--release` — build and run in release mode
+- `--listen <ADDR>` — hold the listening socket across restarts (Unix only)
 - `-- <args>` — everything after `--` is passed to the application binary
 
 ```bash
 toni dev --release -- --config config/local.toml
 ```
 
-While the rebuild runs the server is down — connections are refused, not queued. The watcher is restart-based, same as `nest start --watch`; see [Development Workflow](/docs/getting-started/development-workflow) for build-speed tuning that shortens the gap.
+### Surviving the rebuild gap
+
+By default the server is down while a rebuild runs, and connections are refused until the new process binds. `--listen` closes that gap: the socket is bound once by the watcher and passed to every restart, so requests arriving mid-rebuild wait in the kernel accept queue and are answered by the new process instead of failing.
+
+```bash
+toni dev --listen 3000
+# [toni dev] holding 127.0.0.1:3000 — passing it to each restart
+```
+
+A bare port means localhost; pass `host:port` to bind elsewhere. The socket is announced through the systemd socket-activation variables (`LISTEN_FDS`), so the application has to adopt it rather than bind its own:
+
+```rust
+use listenfd::ListenFd;
+
+let mut fds = ListenFd::from_env();
+let target: BindTarget = match fds.take_tcp_listener(0)? {
+    Some(listener) => listener.into(),
+    None => ("127.0.0.1", 3000).into(),
+};
+app.use_http_adapter(AxumAdapter::new(), target)?;
+```
+
+Keep the fallback branch — it is what lets the binary still run on its own, outside the watcher. An application that binds its own address while `--listen` holds it fails at startup with "address in use". See [Bind Targets](/docs/techniques/bind-targets) for the full listener API, and the `socket_activation` example for a running version.
+
+The same code path serves systemd socket activation in production, which uses the same protocol.
+
+Rocket is the exception: it binds through its own configuration and refuses a pre-bound listener, so `--listen` does not work with `toni-rocket`.

@@ -83,11 +83,13 @@ curl --retry 5 --retry-connrefused http://localhost:3000/users
 
 The gap exists because the listening socket dies with the process. Move ownership of the socket to something that outlives the rebuild and it stops being a gap: connections wait in the kernel's accept queue and are answered when the new process starts accepting. A request made mid-rebuild sees latency instead of a refusal.
 
-`toni dev` restarts the process but does not hold the socket. [systemfd](https://crates.io/crates/systemfd) does: it binds the port once and passes the socket to everything it starts, restart after restart. [listenfd](https://crates.io/crates/listenfd) picks it up inside the application.
+`toni dev --listen` does exactly that: it binds the port itself and hands the same socket to every restart.
 
 ```bash
-cargo install systemfd
+toni dev --listen 3000
 ```
+
+The application has to take that socket instead of binding its own. [listenfd](https://crates.io/crates/listenfd) reads it:
 
 ```toml
 # Cargo.toml
@@ -107,14 +109,14 @@ let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
 app.use_http_adapter(AxumAdapter::new(), target)?;
 ```
 
-Then run the watch loop underneath systemfd:
-
-```bash
-systemfd --no-pid -s http::3000 -- toni dev
-```
-
-The port belongs to systemfd; `toni dev` restarts the application beneath it. `--no-pid` is what lets the socket reach a grandchild process, which is the shape of every watcher (`toni dev` runs `cargo run`, which runs your binary).
+Save a file now and the request you fire during the rebuild is answered by the new process rather than refused.
 
 `toni-rocket` is the one adapter this does not work with — Rocket binds internally from its own configuration and rejects a pre-supplied listener, failing at `app.bind()`. See the [adapter capability table](/docs/http-adapters/overview#official-adapters).
 
-The mechanism is systemd's socket activation protocol, so the same code gives zero-downtime restarts under systemd with nothing added — [Production deployment](/docs/deployment/production) covers that side.
+`--listen` needs file-descriptor passing and is therefore Unix-only. [systemfd](https://crates.io/crates/systemfd) is the cross-platform alternative and works with any watcher, including plain `bacon` or `cargo watch`:
+
+```bash
+systemfd --no-pid -s http::3000 -- bacon run
+```
+
+The mechanism behind both is systemd's socket activation protocol, so the same adoption code gives zero-downtime restarts under systemd with nothing added — [Production deployment](/docs/deployment/production) covers that side.

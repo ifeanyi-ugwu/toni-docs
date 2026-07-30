@@ -20,6 +20,7 @@ Five adapter crates ship with the framework:
 | **Separate-port WebSocket** | Yes | No | Yes | Yes | No |
 | **SSE / streaming responses** | Yes | No | Yes | Yes | Yes |
 | **Graceful shutdown** | Yes | Yes | Yes | Yes | Yes |
+| **Pre-bound listener** | Yes | Yes | Yes | Yes | No |
 
 `toni-axum`, `toni-salvo`, and `toni-poem` cover the full capability surface: streaming in both directions and WebSocket in both deployment modes. `toni-axum` is the default choice — it pairs naturally with the Tokio ecosystem (sqlx, reqwest, tonic).
 
@@ -48,12 +49,11 @@ pub trait HttpAdapter: Send + Sync + 'static {
     /// with same-port WebSocket support implement it.
     fn register_ws_route(&mut self, path: &str, callbacks: Arc<WsConnectionCallbacks>) -> Result<()>;
 
-    /// Consume the adapter, bind the listening socket, and return a
+    /// Consume the adapter, acquire the listening socket, and return a
     /// self-contained lifecycle handle the framework drives.
     async fn into_lifecycle(
         self: Box<Self>,
-        port: u16,
-        hostname: &str,
+        target: BindTarget,
         ctx: AdapterContext,
     ) -> Result<HttpLifecycleHandle>;
 }
@@ -61,11 +61,39 @@ pub trait HttpAdapter: Send + Sync + 'static {
 
 The lifecycle:
 
-1. `app.use_http_adapter(adapter, port, host)` boxes the adapter (`ToniApplication` holds it as `Box<dyn HttpAdapter>`) and calls `register_route` for every resolved route.
-2. `app.bind()` calls `into_lifecycle`, which binds the socket synchronously — port conflicts surface here as a `BindError`, not inside a background task. The returned [`BoundAdapters`](/docs/api-reference/core) carries the bound addresses, so passing port `0` and reading the OS-assigned port works.
+1. `app.use_http_adapter(adapter, ("127.0.0.1", 3000))` boxes the adapter (`ToniApplication` holds it as `Box<dyn HttpAdapter>`) and calls `register_route` for every resolved route.
+2. `app.bind()` calls `into_lifecycle`, which acquires the socket synchronously — port conflicts surface here as a `BindError`, not inside a background task. The returned [`BoundAdapters`](/docs/api-reference/core) carries the bound addresses, so passing port `0` and reading the OS-assigned port works.
 3. `app.run()` drives the serve loop until [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) is triggered. `app.start()` is `bind()` + `run()` in one step.
 
 The `AdapterContext` passed to `into_lifecycle` carries the global middleware chain; every adapter runs it *before* its own routing, so global middleware observes every request — including 404s, 405s, and same-port WebSocket upgrades — and a request rewritten in the chain changes which route matches.
+
+## Where to listen
+
+`BindTarget` is either an address to bind or a socket that is already listening. A `(host, port)` tuple converts to the first form, a `std::net::TcpListener` to the second:
+
+```rust
+// Bind an address — the common case.
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))?;
+
+// Serve on a socket you bound yourself.
+let listener = std::net::TcpListener::bind("127.0.0.1:3000")?;
+app.use_http_adapter(AxumAdapter::new(), listener)?;
+```
+
+The second form matters when something outside the process owns the socket. A supervisor that holds the listener across restarts keeps the port answering while the application is replaced: connections queue in the kernel backlog instead of being refused, which is what turns a rebuild in development into added latency rather than a wall of connection errors, and what makes systemd socket activation and zero-downtime restarts work. Tests use it to bind port `0` themselves and keep the address, with no window for another process to take the port.
+
+Pair it with [`listenfd`](https://crates.io/crates/listenfd) to pick up a socket passed in by systemd or [`systemfd`](https://crates.io/crates/systemfd):
+
+```rust
+let mut fds = listenfd::ListenFd::from_env();
+let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
+    Some(listener) => listener.into(),
+    None => ("127.0.0.1", 3000).into(),
+};
+app.use_http_adapter(AxumAdapter::new(), target)?;
+```
+
+Toni reads no environment protocol itself — it accepts a listener and asks nothing about where it came from, so any supervisor works. `toni-rocket` is the exception: Rocket binds inside `launch()` from its own configuration, so passing it a listener fails at `app.bind()` with an error naming the limitation. See [Development Workflow](/docs/getting-started/development-workflow) for the watch-restart loop.
 
 ## Bounded in-flight requests
 

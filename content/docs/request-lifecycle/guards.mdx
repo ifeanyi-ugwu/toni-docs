@@ -223,7 +223,7 @@ let mut factory = ToniFactory::new();
 factory.use_global_http_guards(Arc::new(AuthGuard));
 
 let mut app = factory.create_with(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1")?;
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))?;
 app.start().await?;
 ```
 

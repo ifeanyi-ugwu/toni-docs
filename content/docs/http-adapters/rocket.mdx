@@ -23,7 +23,7 @@ use toni_rocket::RocketAdapter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::new().create_with(AppModule).await;
-    app.use_http_adapter(RocketAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.use_http_adapter(RocketAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }

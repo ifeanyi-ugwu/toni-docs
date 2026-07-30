@@ -23,7 +23,7 @@ use toni_salvo::SalvoAdapter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::new().create_with(AppModule).await;
-    app.use_http_adapter(SalvoAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.use_http_adapter(SalvoAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
@@ -36,7 +36,7 @@ Route paths use Toni's `:param` syntax; the adapter rewrites them to Salvo's `{p
 Same-port gateways (`#[websocket_gateway("/path")]`) upgrade on the HTTP listener automatically. Separate-port gateways (`port = N`) need a second instance registered as the WebSocket adapter:
 
 ```rust
-app.use_http_adapter(SalvoAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(SalvoAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.use_websocket_adapter(SalvoAdapter::new()).unwrap();
 ```
 

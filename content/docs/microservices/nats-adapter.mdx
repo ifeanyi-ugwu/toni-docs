@@ -108,7 +108,7 @@ use toni_axum::AxumAdapter;
 use toni_nats::NatsAdapter;
 
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0")?;
+app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000))?;
 app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222"))?;
 app.start().await?;
 ```

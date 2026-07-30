@@ -68,7 +68,7 @@ async fn shutdown_signal() -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::new().create_with(AppModule).await;
-    app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+    app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 8080)).unwrap();
 
     app.bind().await?;
 
@@ -93,7 +93,7 @@ Without this wiring, SIGTERM kills the process immediately — in-flight request
 For production, listen on `0.0.0.0` (all interfaces) rather than `127.0.0.1` (loopback only):
 
 ```rust
-app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 8080)).unwrap();
 app.start().await?;
 ```
 
@@ -155,7 +155,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap()
         .block_on(async {
             let mut app = ToniFactory::new().create_with(AppModule).await;
-            app.use_http_adapter(AxumAdapter::new(), 8080, "0.0.0.0").unwrap();
+            app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 8080)).unwrap();
             app.start().await
         })
 }

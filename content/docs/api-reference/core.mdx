@@ -67,13 +67,15 @@ Returned by `ToniFactory::create` / `create_with`. Two-phase lifecycle: configur
 Callable only before `bind()`; each returns `Result<&mut Self>`.
 
 ```rust
-app.use_http_adapter<A: HttpAdapter + 'static>(adapter: A, port: u16, hostname: &str)
+app.use_http_adapter<A: HttpAdapter + 'static>(adapter: A, target: impl Into<BindTarget>)
 app.use_websocket_adapter<A: WebSocketAdapter>(adapter: A)
 app.use_rpc_adapter<A: RpcAdapter>(adapter: A)
 app.use_grpc_adapter<A: GrpcAdapter>(adapter: A)
 ```
 
 gRPC is registered separately from RPC because it is contract-first (`.proto` services, streaming) rather than pattern-string + JSON.
+
+`BindTarget` is where the HTTP adapter listens: `("127.0.0.1", 3000)` binds an address, a `std::net::TcpListener` serves on a socket already bound — see [Where to listen](/docs/http-adapters/overview#where-to-listen). RPC and gRPC adapters take their address in their own constructors.
 
 ### Lifecycle
 
@@ -92,7 +94,7 @@ app.shutdown_handle() -> ShutdownHandle
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 0, "127.0.0.1")?;
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 0))?;
 let bound = app.bind().await?;
 println!("listening on {}", bound.http.unwrap());
 app.run().await;

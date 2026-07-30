@@ -60,7 +60,7 @@ use toni_tungstenite::TungsteniteAdapter;
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::create(PingModule).await;
 
-    app.use_http_adapter(toni_axum::AxumAdapter::new(), 3000, "127.0.0.1")
+    app.use_http_adapter(toni_axum::AxumAdapter::new(), ("127.0.0.1", 3000))
         .unwrap();
     app.use_websocket_adapter(TungsteniteAdapter::new()).unwrap();
 
@@ -78,7 +78,7 @@ With `port = 0`, read the assigned address from the `BoundAdapters` returned by 
 
 ```rust
 let mut app = ToniFactory::create(PingModule).await;
-app.use_http_adapter(toni_axum::AxumAdapter::new(), 0, "127.0.0.1").unwrap();
+app.use_http_adapter(toni_axum::AxumAdapter::new(), ("127.0.0.1", 0)).unwrap();
 app.use_websocket_adapter(TungsteniteAdapter::new()).unwrap();
 
 let bound = app.bind().await?;
@@ -105,7 +105,7 @@ Everything else works as on the shared port: `#[subscribe_message]` routing, con
 `AxumAdapter` also implements `WebSocketAdapter` (as do the salvo and poem adapters). Register a second instance to get separate-port listeners with a full HTTP upgrade — path routing and handshake headers/query intact:
 
 ```rust
-app.use_http_adapter(toni_axum::AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(toni_axum::AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.use_websocket_adapter(toni_axum::AxumAdapter::new()).unwrap();
 ```
 

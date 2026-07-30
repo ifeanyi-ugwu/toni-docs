@@ -30,7 +30,7 @@ HTTP and RPC can run on the same application instance:
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0")?;
+app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000))?;
 app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
 app.start().await?;
 ```

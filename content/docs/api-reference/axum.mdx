@@ -15,7 +15,7 @@ Pass to `app.use_http_adapter` after `ToniFactory::create`:
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await.unwrap();
 ```
 
@@ -27,7 +27,7 @@ If you need WebSocket on a different port than HTTP, register a second `AxumAdap
 
 ```rust
 let mut app = ToniFactory::create(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000)).unwrap();
 app.use_websocket_adapter(AxumAdapter::new()).unwrap();
 app.start().await.unwrap();
 ```

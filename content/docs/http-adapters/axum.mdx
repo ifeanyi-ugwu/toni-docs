@@ -23,7 +23,7 @@ use toni_axum::AxumAdapter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::new().create_with(AppModule).await;
-    app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .use_global_http_error_handler(Arc::new(GlobalErrorHandler));
 
     let mut app = factory.create_with(AppModule).await;
-    app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+    app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
@@ -72,14 +72,14 @@ Same-port gateways (`#[websocket_gateway("/path")]`) are wired onto the HTTP lis
 
 ```rust
 let mut app = ToniFactory::new().create_with(AppModule).await;
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await?;
 ```
 
 Separate-port gateways (`#[websocket_gateway("/path", port = N)]`) need a `WebSocketAdapter` as well — register a second `AxumAdapter` instance:
 
 ```rust
-app.use_http_adapter(AxumAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.use_websocket_adapter(AxumAdapter::new()).unwrap();
 ```
 
@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap()
         .block_on(async {
             let mut app = ToniFactory::new().create_with(AppModule).await;
-            app.use_http_adapter(AxumAdapter::new(), 3000, "0.0.0.0").unwrap();
+            app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000)).unwrap();
             app.start().await
         })
 }

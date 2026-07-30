@@ -23,7 +23,7 @@ use toni_poem::PoemAdapter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut app = ToniFactory::new().create_with(AppModule).await;
-    app.use_http_adapter(PoemAdapter::new(), 3000, "127.0.0.1").unwrap();
+    app.use_http_adapter(PoemAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
@@ -36,7 +36,7 @@ Toni and Poem agree on `:param` path syntax, so routes pass through unchanged â€
 Same-port gateways (`#[websocket_gateway("/path")]`) upgrade on the HTTP listener automatically. Separate-port gateways (`port = N`) need a second instance registered as the WebSocket adapter:
 
 ```rust
-app.use_http_adapter(PoemAdapter::new(), 3000, "127.0.0.1").unwrap();
+app.use_http_adapter(PoemAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.use_websocket_adapter(PoemAdapter::new()).unwrap();
 ```
 

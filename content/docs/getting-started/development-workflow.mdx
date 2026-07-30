@@ -1,6 +1,6 @@
 ---
 title: Development Workflow
-description: Rebuild and restart the server on save with watchexec or bacon.
+description: Rebuild and restart the server on save, and keep the port answering across restarts.
 ---
 
 Save a file, the project rebuilds, the server restarts. The CLI ships this loop as `toni dev`; the generic Rust watch tools work just as well.
@@ -78,3 +78,43 @@ While a rebuild runs, the server is down — connections are refused, not queued
 ```bash
 curl --retry 5 --retry-connrefused http://localhost:3000/users
 ```
+
+## Keeping the port alive across restarts
+
+The gap exists because the listening socket dies with the process. Move ownership of the socket to something that outlives the rebuild and it stops being a gap: connections wait in the kernel's accept queue and are answered when the new process starts accepting. A request made mid-rebuild sees latency instead of a refusal.
+
+`toni dev` restarts the process but does not hold the socket. [systemfd](https://crates.io/crates/systemfd) does: it binds the port once and passes the socket to everything it starts, restart after restart. [listenfd](https://crates.io/crates/listenfd) picks it up inside the application.
+
+```bash
+cargo install systemfd
+```
+
+```toml
+# Cargo.toml
+[dependencies]
+listenfd = "1"
+```
+
+Take the inherited socket when there is one, and bind normally when there isn't — one binary then works under the watcher, under systemd, and on its own:
+
+```rust
+let mut fds = listenfd::ListenFd::from_env();
+let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
+    Some(listener) => listener.into(),
+    None => ("127.0.0.1", 3000).into(),
+};
+
+app.use_http_adapter(AxumAdapter::new(), target)?;
+```
+
+Then run the watch loop underneath systemfd:
+
+```bash
+systemfd --no-pid -s http::3000 -- toni dev
+```
+
+The port belongs to systemfd; `toni dev` restarts the application beneath it. `--no-pid` is what lets the socket reach a grandchild process, which is the shape of every watcher (`toni dev` runs `cargo run`, which runs your binary).
+
+`toni-rocket` is the one adapter this does not work with — Rocket binds internally from its own configuration and rejects a pre-supplied listener, failing at `app.bind()`. See the [adapter capability table](/docs/http-adapters/overview#official-adapters).
+
+The mechanism is systemd's socket activation protocol, so the same code gives zero-downtime restarts under systemd with nothing added — [Production deployment](/docs/deployment/production) covers that side.

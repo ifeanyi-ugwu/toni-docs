@@ -213,11 +213,34 @@ If a rebuild fails, the compile errors are printed and the previous process stay
 **Options:**
 
 - `--release` — build and run in release mode
+- `-p, --package <SPEC>` — package to run, for a workspace with more than one
+- `--bin <NAME>` — run this binary instead of the package default
+- `--example <NAME>` — run this example instead of a binary
+- `-F, --features <FEATURES>` — features to activate; repeat the flag or comma-separate the list
+- `--all-features` — activate every feature of every selected package
+- `--no-default-features` — do not activate the `default` feature
+- `--cargo-arg <ARG>` — forward one argument to cargo as given, for a flag this list does not mirror; repeat it once per argument
 - `--listen <ADDR>` — hold the listening socket across restarts (Unix only)
 - `-- <args>` — everything after `--` is passed to the application binary
 
 ```bash
 toni dev --release -- --config config/local.toml
+```
+
+### Choosing what cargo builds
+
+Cargo stops reading its own flags at the `--`, so a target or feature selector belongs before it:
+
+```bash
+toni dev -p my-api --example demo -F tls -- --config config/local.toml
+```
+
+`--bin` and `--example` are refused together — a run has one target.
+
+Flags outside that list go through `--cargo-arg`, one argument per occurrence:
+
+```bash
+toni dev --cargo-arg --offline --cargo-arg --timings
 ```
 
 ### Surviving the rebuild gap

@@ -1,0 +1,92 @@
+---
+title: Bind Targets
+description: Pass an address to bind, or hand over a socket another process already bound — on every transport that listens.
+---
+
+Every server answers "where do I listen" — the sharper question is who owns the socket. When the process binds its own port, the socket dies with the process: a dev-loop restart refuses connections until the rebuild finishes, and a deploy drops whatever arrives during the swap. When something that outlives the process owns the socket — a watcher, systemd, a test harness that bound port `0` itself — connections queue in the kernel's accept backlog and are answered by whichever process accepts next. `BindTarget` makes that ownership a parameter instead of an assumption.
+
+<Bridge>
+NestJS's `app.listen(3000)` always has the process bind its own socket; there is no first-class way to hand Nest a socket another process bound. `BindTarget` is that hand-off made explicit — the same registration call takes either an address or a live listener.
+</Bridge>
+
+## The type
+
+```rust
+#[non_exhaustive]
+pub enum BindTarget {
+    /// Bind a fresh socket at hostname:port. Port 0 asks the OS for a free one.
+    Addr { hostname: String, port: u16 },
+    /// Adopt a socket that is already bound and listening.
+    Listener(std::net::TcpListener),
+}
+```
+
+The common shapes convert directly — `From<(&str, u16)>`, `From<(String, u16)>`, and `From<std::net::TcpListener>`:
+
+```rust
+let by_addr: toni::BindTarget = ("127.0.0.1", 3000).into();
+
+let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+let by_listener: toni::BindTarget = listener.into();
+```
+
+`into_std_listener()` resolves either form to a bound listener — it binds for `Addr` and passes a `Listener` through untouched. That is the method [custom adapters](/docs/http-adapters/custom) call. The enum is `#[non_exhaustive]`, so a `match` outside the `toni` crate needs a wildcard arm.
+
+## HTTP
+
+`use_http_adapter` takes `impl Into<BindTarget>`, so both forms read the same at the call site:
+
+```rust
+// Bind an address — the common case.
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))?;
+
+// Serve on a socket you bound yourself.
+let listener = std::net::TcpListener::bind("127.0.0.1:3000")?;
+app.use_http_adapter(AxumAdapter::new(), listener)?;
+```
+
+Either way, `app.bind()` returns the actual address in [`BoundAdapters`](/docs/api-reference/core) — which is how port `0` works: pass it, read back what the OS assigned.
+
+`toni-axum`, `toni-actix`, `toni-salvo`, and `toni-poem` all adopt a pre-bound listener. `toni-rocket` cannot — Rocket binds inside `launch()` from its own figment config — so handing it a `Listener` fails at `app.bind()` with an error saying to pass a `(host, port)` address instead. The [adapter capability table](/docs/http-adapters/overview#official-adapters) tracks this.
+
+## Taking an inherited socket, with a fallback
+
+A launcher that owns the socket announces it through the `LISTEN_FDS` file-descriptor convention; the [`listenfd`](https://crates.io/crates/listenfd) crate claims it. Keep a fallback branch so the same binary still runs on its own — under a debugger, in tests, from plain `cargo run`:
+
+```rust
+let mut fds = listenfd::ListenFd::from_env();
+let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
+    Some(listener) => listener.into(),
+    None => ("127.0.0.1", 3000).into(),
+};
+app.use_http_adapter(AxumAdapter::new(), target)?;
+```
+
+`examples/socket_activation.rs` in the repository is the runnable version. The same adoption code serves two launchers: `toni dev --listen 3000` in development — see [Development Workflow](/docs/getting-started/development-workflow#keeping-the-port-alive-across-restarts) — and systemd socket activation in production — see [Production deployment](/docs/deployment/production).
+
+## WebSocket
+
+Separate-port gateways (`#[websocket_gateway("/path", port = N)]`) get their sockets through `use_websocket_listener`; the adapter still comes from `use_websocket_adapter`:
+
+```rust
+app.use_websocket_adapter(AxumAdapter::new())?;
+app.use_websocket_listener(4000, listener)?;
+```
+
+The first argument is the declared port — the `N` written in the gateway attribute. It is a key, not a location: it selects which gateway the socket serves, and the socket may be listening on a different port entirely. `BoundAdapters.websocket` reports the address the socket actually listens on. A listener supplied for a port no gateway declares fails `bind()` — nothing would ever accept on it.
+
+Same-port gateways ride the HTTP listener; their socket goes to `use_http_adapter`.
+
+## RPC and gRPC
+
+These adapters own their addressing in their constructors, so listener adoption is a constructor too:
+
+- `TcpAdapter::from_listener(std::net::TcpListener)` — a TCP listener already in listening state.
+- `UdpAdapter::from_socket(std::net::UdpSocket)` — a bound datagram socket, which is what systemd hands over for a `ListenDatagram=` unit. UDP has no accept backlog; holding the socket across a restart buys queueing in the receive buffer rather than ICMP port-unreachable replies.
+- `GrpcAdapter::from_listener(std::net::TcpListener)` — same contract as TCP.
+
+Each replaces the `new(host, port)` / `new(addr)` form; everything else about the adapter is unchanged.
+
+## No environment protocol in core
+
+Toni itself reads no `LISTEN_FDS` and checks no `LISTEN_PID` — it accepts a listener and asks nothing about where it came from. Announcing the socket is the launcher's job (`toni dev --listen`, [`systemfd`](https://crates.io/crates/systemfd), systemd); claiming it is the application's, via `listenfd`. That split is what lets one binary run under any of them, or none.

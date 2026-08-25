@@ -3,6 +3,7 @@
   "pages": [
     "sse",
     "health",
-    "logging"
+    "logging",
+    "bind-targets"
   ]
 }

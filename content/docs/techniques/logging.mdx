@@ -30,7 +30,7 @@ The default installs via `try_init()`, which backs off when a global subscriber 
 async fn main() {
     tracing_subscriber::fmt().json().init(); // yours — the default backs off
 
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
     // ...
 }
 ```

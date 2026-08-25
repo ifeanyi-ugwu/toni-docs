@@ -13,15 +13,15 @@ Reference for the public surface of the `toni` crate. Items are shown with their
 ToniFactory::new() -> ToniFactory
 
 // Shorthand — no factory config needed
-ToniFactory::create(module: impl ModuleMetadata + 'static) -> ToniApplication        // async
-ToniFactory::create_application_context(module) -> ToniApplicationContext            // async
+ToniFactory::create(module: impl ModuleMetadata + 'static) -> Result<ToniApplication, StartupError>        // async
+ToniFactory::create_application_context(module) -> Result<ToniApplicationContext, StartupError>            // async
 
 // Instance methods (use after registering globals)
-factory.create_with(module) -> ToniApplication                                       // async
-factory.create_application_context_with(module) -> ToniApplicationContext            // async
+factory.create_with(module) -> Result<ToniApplication, StartupError>                                       // async
+factory.create_application_context_with(module) -> Result<ToniApplicationContext, StartupError>            // async
 ```
 
-Modules pass directly: `ToniFactory::create(AppModule).await`. Any `ModuleMetadata` works as the root — including a `DynamicModule` such as `SeaOrmModule::for_root(url)`. On module-initialization failure, `create_with` / `create_application_context_with` log the error and call `std::process::exit(1)`.
+Modules pass directly: `ToniFactory::create(AppModule).await?`. Any `ModuleMetadata` works as the root — including a `DynamicModule` or a `CheckedModule` from an integration's `for_root`-style constructor. Failures are returned as [`StartupError`](#startuperror): `Setup` for a module graph that does not resolve, `HookFailed` for an `on_module_init` hook that returned `Err`. `create_application_context*` also runs `on_application_bootstrap` hooks (a standalone context has no `bind()` phase), so those failures surface here too.
 
 ### Global registration
 
@@ -33,20 +33,20 @@ factory.use_global_error_observer(Arc<dyn ErrorObserver>)
 
 // HTTP
 factory.use_global_http_guards(Arc<dyn Guard<HttpContext>>)
-factory.use_global_http_interceptors(Arc<dyn Interceptor<HttpContext>>)
-factory.use_global_http_pipes(Arc<dyn Pipe<HttpContext>>)
+factory.use_global_http_interceptors(Arc<dyn Interceptor<HttpContext, HttpResponse>>)
+factory.use_global_http_pipes(Arc<dyn Pipe<HttpContext, HttpResponse>>)
 factory.use_global_http_error_handler(Arc<dyn ErrorHandler<HttpContext, HttpResponse>>)
 
 // RPC
 factory.use_global_rpc_guards(Arc<dyn Guard<RpcContext>>)
-factory.use_global_rpc_interceptors(Arc<dyn Interceptor<RpcContext>>)
-factory.use_global_rpc_pipes(Arc<dyn Pipe<RpcContext>>)
+factory.use_global_rpc_interceptors(Arc<dyn Interceptor<RpcContext, RpcHandlerResult>>)
+factory.use_global_rpc_pipes(Arc<dyn Pipe<RpcContext, RpcHandlerResult>>)
 factory.use_global_rpc_error_handler(Arc<dyn ErrorHandler<RpcContext, RpcData>>)
 
 // WebSocket
 factory.use_global_ws_guards(Arc<dyn Guard<WsContext>>)
-factory.use_global_ws_interceptors(Arc<dyn Interceptor<WsContext>>)
-factory.use_global_ws_pipes(Arc<dyn Pipe<WsContext>>)
+factory.use_global_ws_interceptors(Arc<dyn Interceptor<WsContext, WsHandlerResult>>)
+factory.use_global_ws_pipes(Arc<dyn Pipe<WsContext, WsHandlerResult>>)
 factory.use_global_ws_error_handler(Arc<dyn ErrorHandler<WsContext, WsMessage>>)
 ```
 
@@ -55,12 +55,18 @@ Global error handlers stack with controller- and method-level handlers; the most
 ```rust
 let mut factory = ToniFactory::new();
 factory.use_global_http_guards(Arc::new(AuthGuard::default()));
-let app = factory.create_with(AppModule).await;
+let app = factory.create_with(AppModule).await?;
 ```
 
 ## ToniApplication
 
-Returned by `ToniFactory::create` / `create_with`. Two-phase lifecycle: configure adapters, then `bind()` + `run()` (or `start()` for both in one step).
+Returned by `ToniFactory::create` / `create_with`. Configure adapters, then `bind()` + `run()` (or `start()` for both in one step).
+
+Startup runs in three phases, each with its own failure class:
+
+- `create` builds the module graph, constructs providers, and runs `on_module_init` — where an integration confirms the **outbound** dependencies it needs will answer.
+- `bind()` runs `on_application_bootstrap`, then acquires the **inbound** sockets this process serves on.
+- `run()` drives the serve loops until shutdown.
 
 ### Adapter registration
 
@@ -69,6 +75,7 @@ Callable only before `bind()`; each returns `Result<&mut Self>`.
 ```rust
 app.use_http_adapter<A: HttpAdapter + 'static>(adapter: A, target: impl Into<BindTarget>)
 app.use_websocket_adapter<A: WebSocketAdapter>(adapter: A)
+app.use_websocket_listener(declared_port: u16, listener: std::net::TcpListener)
 app.use_rpc_adapter<A: RpcAdapter>(adapter: A)
 app.use_grpc_adapter<A: GrpcAdapter>(adapter: A)
 ```
@@ -77,23 +84,26 @@ gRPC is registered separately from RPC because it is contract-first (`.proto` se
 
 `BindTarget` is where the HTTP adapter listens: `("127.0.0.1", 3000)` binds an address, a `std::net::TcpListener` serves on a socket already bound — see [Where to listen](/docs/http-adapters/overview#where-to-listen). RPC and gRPC adapters take their address in their own constructors.
 
+`use_websocket_listener` hands a pre-bound socket to the separate-port gateways declared with `port = declared_port`; the declared port selects the gateway, `BoundAdapters.websocket` reports where the socket actually listens. A listener supplied for a port no gateway declares fails `bind()`. Same-port gateways ride the HTTP listener — pass their socket to `use_http_adapter` instead.
+
 ### Lifecycle
 
 ```rust
-app.bind() -> Result<BoundAdapters, BindError>   // async — sockets live on return
-app.run()                                        // async — consumes self; drives serve loops until shutdown
-app.start() -> Result<()>                        // async — consumes self; bind() + run()
-app.close(&mut self)                             // async — returns (); immediate hooks + adapter close
+app.bind() -> Result<BoundAdapters, StartupError>   // async — sockets live on return
+app.run()                                           // async — consumes self; drives serve loops until shutdown
+app.start() -> Result<()>                           // async — consumes self; bind() + run()
+app.close(&mut self)                                // async — returns (); immediate hooks + adapter close
 app.shutdown_handle() -> ShutdownHandle
 ```
 
 - `bind()` runs bootstrap hooks, discovers gateways/RPC controllers/gRPC services, and binds every adapter. Sockets are listening when it returns — pass port `0` and read the assigned address from `BoundAdapters`.
-- `run()` panics if called before `bind()`. On a shutdown signal it closes adapters first (draining in-flight requests), then runs lifecycle hooks.
+- Every transport the application declares must come up. A failing adapter returns `StartupError::Adapter`; a declaration with nothing registered to serve it returns `StartupError::Setup`. Every adapter takes its handlers before any socket is acquired, so a wrong application reports before a busy environment. On failure, sockets already acquired are closed and the application enters a terminal failed state — build a new one.
+- `run()` panics if called before `bind()`. On a shutdown signal it closes adapters first (draining in-flight requests), then runs lifecycle hooks. A serve loop that returns on its own signals shutdown for the whole application — a process serving less than it advertises does not keep running.
 - `close()` returns `()`, not `Result` — no `?` or `.unwrap()`.
 - The framework installs no SIGTERM/SIGINT handlers. Wire signals to `shutdown_handle()` yourself.
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await?;
 app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 0))?;
 let bound = app.bind().await?;
 println!("listening on {}", bound.http.unwrap());
@@ -109,11 +119,11 @@ app.get::<T>() -> Result<T>                                     // search all mo
 app.get_from::<T>(module_token: &str) -> Result<T>              // one module's scope
 app.get_by_token::<T>(token: impl IntoToken) -> Result<T>       // custom token
 app.get_from_by_token::<T>(module_token, token) -> Result<T>
-app.resolve::<T>(parts: &RequestPart) -> Result<T>              // request-scoped/transient, synthetic ctx
-app.resolve_by_token::<T>(token, parts: &RequestPart) -> Result<T>
+app.resolve::<T>(execution: &ProviderContext) -> Result<T>      // request-scoped, in an execution
+app.resolve_by_token::<T>(token, execution: &ProviderContext) -> Result<T>
 ```
 
-`get*` refuses request-scoped providers; use `resolve*` with a synthetic `RequestPart` for those.
+`get*` builds outside any execution and refuses request-scoped providers with an error. `resolve*` builds in the execution you hand it — everything resolved against one `ProviderContext` shares its cache, so a request-scoped provider is constructed once for all of them. Use [`ProviderContext::standalone()`](#providercontext) where the work arrived over no transport.
 
 ### BoundAdapters
 
@@ -148,19 +158,21 @@ tokio::spawn(async move {
 app.run().await;
 ```
 
-### InitResult and BindError
+### StartupError
 
 ```rust
 // Return type for startup hooks (#[on_module_init], #[on_application_bootstrap])
 pub type InitResult = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
 
-pub enum BindError {
+#[non_exhaustive]
+pub enum StartupError {
     HookFailed { module: String, hook: &'static str, source: Box<dyn Error + Send + Sync> },
-    Setup(Box<dyn Error + Send + Sync>),   // no adapter, wrong call order, bind failures
+    Adapter { transport: &'static str, source: Box<dyn Error + Send + Sync> },  // "http" | "websocket" | "rpc" | "grpc"
+    Setup(Box<dyn Error + Send + Sync>),   // graph doesn't resolve, no adapter, wrong call order
 }
 ```
 
-`BindError::HookFailed` names the failing module and hook so callers can identify the source without parsing the message.
+`HookFailed` names the failing module and hook: it comes from `create` for `on_module_init` and from `bind()` for `on_application_bootstrap`. `Adapter` names the transport that could not start; only `bind()` produces it. The enum is `#[non_exhaustive]` — match with a wildcard arm.
 
 ## ToniApplicationContext
 
@@ -171,82 +183,86 @@ ctx.get::<T>() -> Result<T>
 ctx.get_from::<T>(module_token: &str) -> Result<T>
 ctx.get_by_token::<T>(token: impl IntoToken) -> Result<T>
 ctx.get_from_by_token::<T>(module_token, token) -> Result<T>
-ctx.resolve::<T>(parts: &RequestPart) -> Result<T>
-ctx.resolve_by_token::<T>(token, parts: &RequestPart) -> Result<T>
+ctx.resolve::<T>(execution: &ProviderContext) -> Result<T>
+ctx.resolve_by_token::<T>(token, execution: &ProviderContext) -> Result<T>
 ctx.close(&mut self)        // async — returns (); runs destroy/shutdown hooks
 ```
 
 ## Contexts
 
-`toni::context` — per-request execution contexts, one concrete type per transport. All four implement `HandlerContext`, so an enhancer can be written for one transport (`Guard<HttpContext>`) or all of them (`impl<C: HandlerContext + ?Sized> Guard<C>`).
+`toni::context` — per-execution contexts, one concrete type per transport plus `StandaloneContext` for work that arrived over none. All five implement `HandlerContext`, so an enhancer can be written for one transport (`Guard<HttpContext>`) or all of them (`impl<C: HandlerContext + ?Sized> Guard<C>`). Every context is a cheap-clone handle: cloning shares the execution rather than copying it, and its state (`Extensions`, `ExecutionCache`, `CancellationToken`) mutates through `&self`.
 
-Re-exported at the root: `HandlerContext`, `HttpContext`, `RpcContext`, `WsContext`, `GrpcContext`, `CancellationToken`.
+Re-exported at the root: `HandlerContext`, `HttpContext`, `RpcContext`, `WsContext`, `GrpcContext`, `StandaloneContext`, `CancellationToken`. `Extensions` and `Metadata` are at `toni::context`, not the root.
 
 ### HandlerContext
 
 ```rust
-pub trait HandlerContext: Send {
-    fn route_metadata(&self) -> Option<&RouteMetadata>;  // #[set_metadata] values; None for global handlers
-    fn extensions(&self) -> &Extensions;                 // per-request typed key-value bag
-    fn extensions_mut(&mut self) -> &mut Extensions;
+pub trait HandlerContext: Send + Sync {
+    fn metadata(&self) -> Option<&Metadata>;      // #[set_metadata] declarations; None for global handlers
+    fn extensions(&self) -> &Extensions;          // per-execution typed key-value bag
+    fn cache(&self) -> &ExecutionCache;           // instances built for this execution
     fn cancellation(&self) -> &CancellationToken;
-    fn deadline(&self) -> Option<Instant> { None }       // transports without deadlines return None
-    fn abort(&mut self);                                 // short-circuit the chain
-    fn should_abort(&self) -> bool;
+    fn deadline(&self) -> Option<Instant> { None }  // no transport sets one yet
 }
 ```
 
 `dyn HandlerContext` additionally has `time_remaining() -> Option<Duration>`.
 
+`cache()` is what makes request scope work: a request-scoped type resolved twice in one execution is constructed once and shared by clone. There is no response slot and no abort flag on any context — a handler answers by returning, and an enhancer that wants to answer without reaching the handler returns too (see [Interceptor](#interceptor) and [Pipe](#pipe)).
+
 ### HttpContext
 
 ```rust
-HttpContext::new(req: HttpRequest, route_metadata: Arc<RouteMetadata>) -> Self
+HttpContext::new(req: HttpRequest, metadata: Arc<Metadata>) -> Self
 HttpContext::from_request(req: impl Into<HttpRequest>) -> Self       // testing convenience
 HttpContext::from_parts(parts: RequestPart) -> Self                  // empty body
 
 ctx.request() -> &RequestPart
-ctx.take_request() -> HttpRequest            // reconstructs parts + body; body is consumed once
-ctx.response() -> Option<&HttpResponse>
-ctx.response_mut() -> Option<&mut HttpResponse>
-ctx.set_response(HttpResponse)
-ctx.take_response() -> Option<HttpResponse>
+ctx.take_request() -> Option<HttpRequest>    // parts + body; None once the body has been taken
 ```
+
+The parts are readable any number of times; the body is not — it may be a stream, so `take_request()` yields it exactly once. An enhancer that takes it leaves nothing for the handler, and the `Option` makes that visible at the second call site.
 
 ### RpcContext
 
 ```rust
 ctx.pattern() -> &str
-ctx.metadata() -> &HashMap<String, String>
-ctx.metadata_mut() -> &mut HashMap<String, String>
-ctx.get_metadata(key: &str) -> Option<&str>
 ctx.data() -> &RpcData
-ctx.transport_extensions() -> &Extensions    // adapter-specific (e.g. raw NATS message)
-ctx.response() / set_response(Result<Option<RpcData>, RpcError>) / take_response()
+ctx.headers() -> &HashMap<String, String>    // wire fields: NATS/AMQP/Kafka headers, MQTT user properties
+ctx.header(key: &str) -> Option<&str>
 ```
 
-Fields are private — RPC handlers receive `&RpcContext` and read through these methods.
+Fields are private — RPC handlers receive `&RpcContext` and read through these methods. `headers()` is what the call arrived with; `metadata()` (from `HandlerContext`) is what `#[set_metadata]` declared.
 
 ### WsContext
 
 ```rust
 ctx.client() -> &WsClient
+ctx.session() -> &Session       // connection-scoped store; outlives this execution
 ctx.message() -> &WsMessage
 ctx.event() -> &str
-ctx.response() / set_response(Result<Option<WsMessage>, WsError>) / take_response()
 ```
+
+`session()` holds what a connect guard establishes and every later message reads; `extensions()` empties with the execution.
 
 ### GrpcContext
 
 ```rust
 ctx.method() -> &str                          // e.g. "orders.OrdersService/CreateOrder"
-ctx.metadata() -> &HashMap<String, String>    // ASCII metadata
-ctx.get_metadata(key: &str) -> Option<&str>
+ctx.headers() -> &HashMap<String, String>     // wire fields (gRPC calls these metadata)
+ctx.header(key: &str) -> Option<&str>
 ctx.peer() -> Option<SocketAddr>
-ctx.response() / set_response(Result<(), GrpcStatus>) / take_response()
 ```
 
-The response slot is error-only: gRPC payloads are method-typed, so guards/interceptors can short-circuit with a `GrpcStatus` but cannot substitute a success value. Pipes are not supported on gRPC for the same reason.
+gRPC handlers never see this context — their signature is the tonic trait's. Guards, interceptors, and error handlers are the only participants that receive one, and the only ones that can read `#[set_metadata]` declarations. A handler reads the extension bag off the tonic request instead: `Extensions::adopt(request.extensions())`. Pipes are not supported on gRPC — the payload is method-typed and there is no untyped place to transform it.
+
+### StandaloneContext
+
+```rust
+StandaloneContext::new() -> Self    // also Default
+```
+
+An execution with no transport behind it — a CLI command, a cron tick, a test. Nothing dispatches to it: there is no handler and no enhancer chain. It exists so a request-scoped provider can be built into an execution a caller drives by hand — usually reached through [`ProviderContext::standalone()`](#providercontext). The execution lasts as long as the handle; dropping it drops the instances built into it.
 
 ### CancellationToken
 
@@ -259,44 +275,57 @@ token.is_cancelled() -> bool
 token.cancelled()                 // async — resolves once cancel() was called
 ```
 
+The framework fires it when a streaming response body or a WebSocket push stream is dropped before its last frame — the client is gone, and work feeding the stream would otherwise learn only at its next send. Buffered responses never fire it: the execution ends with the handler. The `Cancelled` framework event currently has no producer.
+
 ## Enhancer traits
 
-Import from `toni::traits_helpers::*` (guards, interceptors, pipes, error handlers, observers) and `toni::middleware::*` (middleware). All are generic over the context type `C: HandlerContext`; there are no role-marker macros — the framework detects the role from the trait impl on an `#[injectable]` type.
+Import from `toni::traits_helpers::*` (guards, interceptors, pipes, error handlers, observers) and `toni::middleware::*` (middleware). All are generic over the context type `C: HandlerContext`; interceptors, pipes, and error handlers are additionally generic over `R`, what the transport answers with. There are no role-marker macros — the framework detects the role from the trait impl on an `#[injectable]` type.
+
+`R` per transport for interceptors and pipes:
+
+| Transport | `R` |
+|---|---|
+| HTTP | `HttpResponse` |
+| RPC | `RpcHandlerResult` = `Result<Option<RpcData>, RpcError>` |
+| WebSocket | `WsHandlerResult` = `Result<WsHandlerOutput, WsError>` |
+| gRPC | `GrpcHandlerResult` = `Result<(), GrpcStatus>` |
 
 ### Guard
 
 ```rust
 #[async_trait]
 pub trait Guard<C: ?Sized + HandlerContext>: Send + Sync {
-    async fn can_activate(&self, context: &mut C) -> bool;
+    async fn can_activate(&self, context: &C) -> bool;
 }
 ```
 
-Returning `false` produces a `GuardRejection` (403 on HTTP). Guards cannot return errors; reshape rejections with a `#[catch(GuardRejection)]` handler. The `&mut` context lets a guard attach values for downstream enhancers and the handler via `context.extensions_mut()`.
+Returning `false` produces a `GuardRejection` (403 on HTTP). Guards cannot return errors; reshape rejections with a `#[catch(GuardRejection)]` handler. A guard attaches values for downstream enhancers and the handler via `context.extensions().insert(v)` — the bag is a shared handle and mutates through `&self`.
 
 ### Interceptor
 
 ```rust
 #[async_trait]
-pub trait InterceptorNext<C: ?Sized + HandlerContext>: Send {
-    async fn run(self: Box<Self>, context: &mut C);
+pub trait InterceptorNext<C: ?Sized + HandlerContext, R>: Send {
+    async fn run(self: Box<Self>, context: &C) -> R;
 }
 
 #[async_trait]
-pub trait Interceptor<C: ?Sized + HandlerContext>: Send + Sync {
-    async fn intercept(&self, context: &mut C, next: Box<dyn InterceptorNext<C>>);
+pub trait Interceptor<C: ?Sized + HandlerContext, R>: Send + Sync {
+    async fn intercept(&self, context: &C, next: Box<dyn InterceptorNext<C, R>>) -> R;
 }
 ```
 
-`next.run(context)` consumes the box — an interceptor cannot invoke the downstream handler twice. Skipping the call skips the handler entirely (caching, circuit breakers).
+Whatever `intercept` returns is the answer, whether it came from downstream or from the interceptor itself. `next.run(context)` consumes the box — an interceptor cannot invoke the downstream handler twice. Returning without calling it short-circuits: the handler never runs (caching, circuit breakers).
 
 ### Pipe
 
 ```rust
-pub trait Pipe<C: ?Sized + HandlerContext>: Send + Sync {
-    fn process(&self, data: &mut C);        // sync
+pub trait Pipe<C: ?Sized + HandlerContext, R>: Send + Sync {
+    fn process(&self, data: &C) -> Option<R>;        // sync
 }
 ```
+
+`None` continues to the next pipe and then the handler. `Some` answers the request there and then — the remaining pipes and the handler are skipped. Rejecting invalid input is the usual reason to answer from a pipe.
 
 ### ErrorHandler
 
@@ -305,11 +334,11 @@ pub type ChainError<'a> = &'a (dyn std::error::Error + Send + Sync + 'static);
 
 #[async_trait]
 pub trait ErrorHandler<C: ?Sized + HandlerContext, R>: Send + Sync {
-    async fn handle_error(&self, error: ChainError<'_>, ctx: &mut C) -> Option<R>;
+    async fn handle_error(&self, error: ChainError<'_>, ctx: &C) -> Option<R>;
 }
 ```
 
-`R` is the transport's response type: `HttpResponse`, `RpcData`, or `WsMessage`. Handlers run method → controller → global until one returns `Some`; `None` falls through, and if all decline the framework default renders. Downcast with `error.downcast_ref::<T>()`, or use the `#[catch(T)]` macro which generates the downcast.
+`R` is the transport's response type: `HttpResponse`, `RpcData`, `WsMessage`, or `GrpcStatus`. Handlers run method → controller → global until one returns `Some`; `None` falls through, and if all decline the framework default renders. Downcast with `error.downcast_ref::<T>()`, or use the `#[catch(T)]` macro which generates the downcast.
 
 ### Middleware
 
@@ -367,7 +396,7 @@ pub trait ErrorObserver: Send + Sync {
     async fn observe<'a>(
         &'a self,
         error: &'a (dyn std::error::Error + Send + Sync + 'static),
-        ctx: &'a mut (dyn HandlerContext + 'a),
+        ctx: &'a (dyn HandlerContext + 'a),
     );
 }
 ```
@@ -468,7 +497,7 @@ err.to_message() -> WsMessage  // text frame: {"status":"error","kind":"...","me
 | `GuardRejection { guard_index, reason }` | `Forbidden` | a guard returned `false` |
 | `MiddlewareFailure { message }` | `Internal` | middleware returned `Err` |
 | `PanicRecovered { during, message }` | `Internal` | `catch_unwind` caught a panic |
-| `Cancelled { reason }` | `Unavailable` | client disconnect / deadline; observer-only |
+| `Cancelled { reason }` | `Unavailable` | reserved for client-gave-up reporting; observer-only, currently no producer |
 
 `PanicRecovered.during` is a `PipelineSegment` (`HandlerBody`, `ResponseRendering`, `Middleware`, `Pipe`, `Guard`, `ErrorHandler`, `Other`) identifying where the panic was caught.
 
@@ -539,16 +568,17 @@ pub trait IntoResponse {
 
 Implemented for `HttpResponse`, `Body`, `String`, `&'static str`, `serde_json::Value`, `u16` (status only), `(u16, Body)`, `Vec<(String, String)>` (headers only), `HttpError`, and `Sse<S>`. Handlers can return any of these, or `Result<T: IntoResponse, E>` where `E` converts into `HttpError`.
 
-### RouteMetadata
+### Metadata
 
-Static per-route storage populated by `#[set_metadata(...)]` at registration time and shared across requests.
+`toni::context::Metadata` (not a root re-export) — a handler's declared configuration, built once at registration from the `#[set_metadata(...)]` entries on the handler and on its impl block, and shared unchanged by every execution on every transport.
 
 ```rust
-metadata.insert<T: Clone + Send + Sync + 'static>(val: T) -> Option<T>
-metadata.get<T: Send + Sync + 'static>() -> Option<&T>
+metadata.insert<T: Clone + Send + Sync + 'static>(val: T)   // records; never replaces
+metadata.get<T>() -> Option<&T>       // the most specific declaration: handler over impl block
+metadata.get_all<T>() -> &[T]         // every declaration, least-specific first
 ```
 
-Read in enhancers via `ctx.route_metadata().and_then(|m| m.get::<T>())`.
+Read in enhancers via `ctx.metadata().and_then(|m| m.get::<T>())`. A type nothing declared reads back as absent rather than as an error, so one guard serves annotated and unannotated handlers alike.
 
 ### Server-Sent Events
 
@@ -568,38 +598,46 @@ Sse::new(stream)                  // fallible: S: Stream<Item = Result<SseEvent,
 
 ## Extractors
 
-`toni::extractors` (also `toni::{BodyStream, FromRequest, FromRequestParts}` at the root). Handler parameters are extracted by type.
+`toni::extractors` (also `toni::{BodyStream, FromContext, take_body}` at the root). Handler parameters are extracted by type — anything implementing `FromContext` for the handler's context.
 
-### Traits
+### FromContext
 
 ```rust
-pub trait FromRequestParts: Sized {
+pub trait FromContext<C: HandlerContext>: Sized {
     type Error: std::fmt::Display;
-    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error>;   // sync
-}
-
-pub trait FromRequest: Sized {
-    type Error: std::fmt::Display + Send + Sync + 'static;
-    async fn from_request(req: HttpRequest) -> Result<Self, Self::Error>;      // consumes the request
+    fn extract(ctx: &C) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 ```
 
-Every `FromRequestParts` type gets `FromRequest` via a blanket impl that discards the body. Only one body-consuming extractor may appear per handler — the body is single-use. Extraction failure returns an inline 400 (not 422, not via the error-handler chain).
+One trait for every transport. An extractor names the contexts it is valid for by which impls it carries — there are no blanket impls, so an HTTP extractor in a WebSocket handler is a trait-bound error rather than something a macro catches by name. Extraction failure returns an inline 400 (not 422, not via the error-handler chain).
+
+On HTTP an extractor is written in one of two shapes, and the shape decides whether it touches the body:
+
+- **Metadata** — borrow the parts from `ctx.request()`, which leaves the body untouched; any number of these can run on one handler.
+- **Body** — take it with `take_body`:
+
+```rust
+pub fn take_body<T>(ctx: &HttpContext) -> Result<HttpRequest, BodyAlreadyRead>
+```
+
+The first line of a body extractor's `extract` impl (`take_body::<Self>(ctx)?`). The body is single-use — it may be a stream — so only one body extractor may appear per handler. The macro rejects a second one it recognises at compile time; a custom extractor it has never heard of fails at extraction with `BodyAlreadyRead`, naming itself. `BodyExtractionError<E>` wraps both failure modes: `AlreadyRead(BodyAlreadyRead)` | `Extract(E)`.
 
 ### Built-in extractors
 
-| Extractor | Trait | Extracts |
+| Extractor | Reads | Extracts |
 |---|---|---|
-| `Path<T>` | `FromRequestParts` | typed path params; scalars via `FromStr`, structs via urlencoded round-trip |
-| `Query<T>` | `FromRequestParts` | query string via `serde_urlencoded` |
-| `Json<T>` | `FromRequest` | JSON body (`Content-Type` not checked) |
-| `Body<T>` | `FromRequest` | body by content type: JSON or `x-www-form-urlencoded` |
-| `Bytes` | `FromRequest` | raw body as `Vec<u8>` |
-| `BodyStream` | `FromRequest` | unbuffered stream; `.into_stream()` / `.collect()` |
-| `Multipart` | `FromRequest` | `multipart/form-data`; `.next_field()` yields `multer::Field` |
-| `Validated<E>` | `FromRequest` | wraps another extractor, runs `validator::Validate` |
+| `Path<T>` | metadata | typed path params; scalars via `FromStr`, structs via urlencoded round-trip |
+| `Query<T>` | metadata | query string via `serde_urlencoded` |
+| `Request` | metadata | request view: `method()`, `uri()`, `headers()`, `path_params()`, `query_params()` |
+| `Extensions` | metadata (any transport) | the execution's typed key-value bag |
+| `Json<T>` | body | JSON body (`Content-Type` not checked) |
+| `Body<T>` | body | body by content type: JSON or `x-www-form-urlencoded` |
+| `Bytes` | body | raw body as `Vec<u8>` |
+| `BodyStream` | body | unbuffered stream; `.into_stream()` / `.collect()` |
+| `Multipart` | body | `multipart/form-data`; `.next_field()` yields `multer::Field` |
+| `Validated<E>` | what `E` reads | wraps another extractor, runs `validator::Validate` |
 
-All wrappers expose the value as field `0`, `into_inner()`, and `Deref`.
+`Path`, `Query`, `Json`, `Body`, `Bytes`, and `Validated` expose the value as field `0`, `into_inner()`, and `Deref`. `BodyStream` and `Multipart` do not — they are consumed through their own methods.
 
 ```rust
 #[post("/users")]
@@ -621,6 +659,8 @@ pub trait ValidatableExtractor {
 }
 ```
 
+`Validated<E>` reads only what `E` reads: `Validated<Query<T>>` is a metadata extractor and may sit beside a body extractor on the same handler; `Validated<Json<T>>` counts as the body reader.
+
 Failure type is `ValidationError` (`ExtractionError(String)` | `ValidationFailed(validator::ValidationErrors)`); both `ValidatableExtractor` and `ValidationError` are exported from `toni::extractors`.
 
 ## RPC client
@@ -637,11 +677,13 @@ client.emit_json::<T>(pattern, data: &T) -> Result<(), RpcClientError>
 client.connect() -> Result<(), RpcClientError>   // eager connect; transports are lazy by default
 client.close() -> Result<(), RpcClientError>     // flush + close
 
-// Per-call metadata builder
+// Per-call header builder
 client.request(pattern) -> RpcRequest
-    .metadata(key, value)                        // chainable; repeated key overwrites
+    .header(key, value)                          // chainable; repeated key overwrites
     .send(data) / .emit(data) / .send_json(&t) / .emit_json(&t)
 ```
+
+Headers ride as whatever the transport calls them — NATS headers, AMQP headers, Kafka record headers, MQTT user properties — and the handler reads them back through `RpcContext::headers()`.
 
 All calls are async. `RpcClient` implements `Provider`, connecting on `on_application_bootstrap` and closing on shutdown when registered in DI.
 
@@ -668,7 +710,7 @@ RpcData::from_serialize(&T) -> Result<RpcData, serde_json::Error>
 
 ### RpcCallInfo
 
-Wire-level call info adapters pass into the dispatcher: `pattern: String`, `metadata: HashMap<String, String>`, `extensions: Extensions`. Relevant when implementing a custom RPC adapter; handlers use `RpcContext` instead.
+Wire-level call info adapters pass into the dispatcher: `pattern: String`, `headers: HashMap<String, String>`, `extensions: TypeMap`; builder `with_header(k, v)`, accessor `header(k) -> Option<&str>`. Relevant when implementing a custom RPC adapter; handlers use `RpcContext` instead.
 
 ## gRPC types
 
@@ -700,31 +742,65 @@ pub enum WsHandlerOutput {
 pub type WsHandlerResult = Result<WsHandlerOutput, WsError>;
 ```
 
-`From<WsMessage>` and `From<Option<WsMessage>>` are implemented for `WsHandlerOutput`, so `Ok(msg.into())` works in handlers. Also exported: `WsClient` (id + `handshake` with headers), `WsHandshake`, `WsSink`, `ClientId`, `RoomId`, `DisconnectReason`, `BroadcastService`, `BroadcastModule`, `BroadcastTarget`, `BroadcastError`, `SendError`, `TrySendError`, `GatewayTrait`, `GatewayWrapper`.
+`From<WsMessage>` and `From<Option<WsMessage>>` are implemented for `WsHandlerOutput`, so `Ok(msg.into())` works in handlers. Also exported: `WsClient` (public `id` and `handshake` fields; the connection-scoped store is read through `session()`), `Session`, `WsHandshake`, `WsSink`, `ClientId`, `RoomId`, `DisconnectReason`, `BroadcastService`, `BroadcastModule`, `BroadcastTarget`, `BroadcastError`, `SendError`, `TrySendError`, `GatewayTrait`, `GatewayWrapper`.
 
 ## DI utilities
 
 ```rust
 // toni::ProviderScope — provider lifecycle
-pub enum ProviderScope { Singleton, Request, Transient }
+pub enum ProviderScope { Singleton, Request, Transient }   // Request = one instance per execution
 
 // toni::ModuleRef — injectable handle for runtime resolution from the current module
-module_ref.get::<T>() -> ModuleRefQuery<'_, T>
+module_ref.get::<T>() -> ModuleRefQuery<'_, T>                 // outside any execution
 module_ref.get_by_token::<T>(token) -> ModuleRefQuery<'_, T>
+module_ref.resolve::<T>(execution: &ProviderContext) -> ModuleRefQuery<'_, T>   // in an execution
+module_ref.resolve_by_token::<T>(token, execution: &ProviderContext) -> ModuleRefQuery<'_, T>
 module_ref.current_module() -> &str
-// query: .global() widens to exported/global providers; .execute().await -> Result<T>
+// query: .global() widens to exported/global providers; .await (or .execute().await) -> Result<T>
 
 // toni::IntoToken — accepted by all *_by_token methods; implemented for &str and String
 pub trait IntoToken { fn into_token(self) -> String; }
 
-// toni::DynamicModule — module built at runtime (integration crates return these)
+// toni::DynamicModule — module built at runtime
 DynamicModule::builder(id) -> DynamicModuleBuilder
     .provider(factory).export::<T>().export_token(token).global().build()
 ```
 
-Provider tokens default to the fully qualified `std::any::type_name::<T>()`.
+Provider tokens default to the fully qualified `std::any::type_name::<T>()`. `get` refuses request-scoped providers — those are reached with `resolve`, which builds them into the execution's cache, so resolving one twice in the same execution returns the instance the handler is holding.
 
-A `DynamicModule` also works as the root module (`ToniFactory::create(SeaOrmModule::for_root(url))`). Its identity is the builder id plus its providers' `ProviderFactory::identity_hint()` values: identical imports dedup, and two same-token modules with different hints are refused at startup. Multi-instance modules implement `identity_hint` and offer named registration — see [Modules — identity and deduplication](/docs/core-concepts/modules#identity-and-deduplication).
+### ProviderContext
+
+The execution a provider is built for; an "execution" is one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone unit of work.
+
+```rust
+#[non_exhaustive]
+pub enum ProviderContext {
+    Http(HttpContext), WebSocket(WsContext), Rpc(RpcContext), Grpc(GrpcContext),
+    Standalone(StandaloneContext),
+    None,           // no active execution — module init, ApplicationContext::get
+}
+
+ProviderContext::standalone() -> Self    // a fresh execution belonging to no transport
+// From<HttpContext> / From<WsContext> / From<RpcContext> / From<GrpcContext> / From<StandaloneContext>
+```
+
+Everything resolved against one value shares its cache — a request-scoped provider is built once for all of them, and the execution ends when the value is dropped. Resolving a request-scoped provider against `None` is refused with an error, not a panic.
+
+### CheckedModule and StartupCheck
+
+```rust
+// toni::CheckedModule — a DynamicModule carrying the StartupCheck its providers run
+module.with_startup_check(check: StartupCheck) -> Self
+module.without_startup_check() -> Self        // start without contacting the dependency
+module.startup_check() -> Option<&StartupCheck>
+
+// toni::StartupCheck — retry schedule; default: 3 attempts, 2s apart, 5s per attempt
+StartupCheck::default().attempts(u32).delay(Duration).timeout(Duration)
+```
+
+Database integrations' `for_root`-style constructors return `CheckedModule` rather than a bare `DynamicModule`, so a caller can weaken or drop the check without a second constructor. A failing check surfaces as `StartupError::HookFailed` from `ToniFactory::create`, naming the module. A `CheckedModule` works anywhere a module does, including as the root.
+
+A `DynamicModule` also works as the root module. Its identity is the builder id plus its providers' `ProviderFactory::identity_hint()` values: identical imports dedup, and two same-token modules with different hints are refused at startup. Multi-instance modules implement `identity_hint` and offer named registration — see [Modules — identity and deduplication](/docs/core-concepts/modules#identity-and-deduplication).
 
 ## Adapter SPI
 

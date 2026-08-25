@@ -5,7 +5,7 @@ description: Reference for all procedural macros provided by the toni-macros cra
 
 All macros are re-exported through the `toni` crate — no direct `toni-macros` dependency is needed.
 
-There are no `#[guard]` / `#[interceptor]` / `#[pipe]` / `#[middleware]` / `#[error_handler]` marker macros. Enhancer roles are detected from the trait impl: declare `#[injectable]`, implement `Guard<C>` / `Interceptor<C>` / `Pipe<C>` / `ErrorHandler<C, R>` / `Middleware`, list the type in `providers`, and apply it with `#[use_*]` or a factory `use_global_*` call.
+There are no `#[guard]` / `#[interceptor]` / `#[pipe]` / `#[middleware]` / `#[error_handler]` marker macros. Enhancer roles are detected from the trait impl: declare `#[injectable]`, implement `Guard<C>` / `Interceptor<C, R>` / `Pipe<C, R>` / `ErrorHandler<C, R>` / `Middleware`, list the type in `providers`, and apply it with `#[use_*]` or a factory `use_global_*` call.
 
 ## Module
 
@@ -24,7 +24,7 @@ There are no `#[guard]` / `#[interceptor]` / `#[pipe]` / `#[middleware]` / `#[er
 pub struct AppModule;
 ```
 
-All keys are optional. Modules pass directly to the factory: `ToniFactory::create(AppModule).await`.
+All keys are optional. Modules pass directly to the factory: `ToniFactory::create(AppModule).await?`.
 
 The impl form allows two kinds of methods:
 
@@ -150,7 +150,9 @@ For setup that can fail before streaming starts, use a `#[get]` handler returnin
 
 ### `#[set_metadata]`
 
-**Target:** route/handler methods. Attaches typed metadata, stored once at startup and read by enhancers via `ctx.route_metadata().and_then(|m| m.get::<T>())`. Repeatable.
+**Target:** handler methods, and the `#[routes]` / `#[subscriptions]` / `#[patterns]` / `#[grpc_methods]` impl block (applies to every handler in it). Takes one expression per attribute; repeatable. Attaches typed metadata, stored once at startup and read by enhancers via `ctx.metadata().and_then(|m| m.get::<T>())`.
+
+Every declaration is kept: `get::<T>()` returns the most specific (the handler's over the impl block's), `get_all::<T>()` returns all of them, least-specific first. Works on all four transports; gRPC handlers cannot read it (their signature is the tonic trait's), but their guards, interceptors, and error handlers can.
 
 ```rust
 #[derive(Clone)]
@@ -194,7 +196,7 @@ impl AdminController {
 
 ```rust
 #[catch(GuardRejection)]
-async fn shape_rejection(err: &GuardRejection, _ctx: &mut HttpContext) -> HttpResponse {
+async fn shape_rejection(err: &GuardRejection, _ctx: &HttpContext) -> HttpResponse {
     HttpResponse::forbidden()
         .json(serde_json::json!({ "denied_by_guard": err.guard_index }))
         .build()
@@ -218,7 +220,7 @@ The primary error path needs no `#[catch]` — a domain type implementing `toni:
 | `#[before_application_shutdown]` | `async fn(&self, signal: Option<String>)` | before shutdown begins |
 | `#[on_application_shutdown]` | `async fn(&self, signal: Option<String>)` | as the application shuts down |
 
-Returning `Err` from a startup hook aborts startup (`BindError::HookFailed` from `app.bind()`).
+Returning `Err` from a startup hook aborts startup with `StartupError::HookFailed`, naming the module and hook: `on_module_init` failures surface from `ToniFactory::create`, `on_application_bootstrap` failures from `app.bind()`.
 
 ## WebSocket gateway macros
 
@@ -253,6 +255,8 @@ async fn on_message(&self, client: WsClient, msg: WsMessage) -> WsHandlerResult 
 }
 ```
 
+Parameters are `FromContext<WsContext>` extractors, in any order and any subset (including none): `WsClient`, `WsMessage`, `Payload<T>` (the message deserialised), `Extensions`, `Session`, or `&WsContext` itself. The `(client, msg)` pair above is the common case, not the required signature.
+
 Return `Ok(WsHandlerOutput::Empty)` for no reply, `::Single(msg)` (or `msg.into()`) for one, `::Stream(boxed)` for a push stream.
 
 ### `#[on_connect]`, `#[on_disconnect]`, `#[after_init]`
@@ -261,15 +265,17 @@ Return `Ok(WsHandlerOutput::Empty)` for no reply, `::Single(msg)` (or `msg.into(
 
 | Attribute | Signature | Notes |
 |---|---|---|
-| `#[on_connect]` | `async fn(&self, client: &WsClient) -> Result<(), WsError>` | `Err` rejects the connection |
-| `#[on_disconnect]` | `async fn(&self, client: &WsClient)` | |
+| `#[on_connect]` | `async fn(&self)` \| `(&self, &WsClient)` \| `(&self, &WsClient, &WsContext)`, returning `Result<(), WsError>` | `Err` rejects the connection |
+| `#[on_disconnect]` | same three shapes, no return value | |
 | `#[after_init]` | `async fn(&self)` | once, after the path is registered |
+
+A hook takes what it asks for, positionally. The trailing `&WsContext` is how a hook reaches the connection's session, which is not on the client.
 
 ## RPC controller macros
 
 ### `#[rpc_controller]`
 
-**Target:** struct. Same field rules as `#[injectable]`. Implements `RpcControllerTrait`. RPC has no connection hooks — `#[patterns]` is the only impl marker. A bare `#[rpc_controller]` with no `#[patterns]` is a valid provider that routes nothing.
+**Target:** struct. Same field rules as `#[injectable]`. A dispatch target — declare it in the module's `controllers:` list, not `providers:` (WebSocket gateways stay in `providers:`). RPC has no connection hooks — `#[patterns]` is the only impl marker. A bare `#[rpc_controller]` with no `#[patterns]` is valid and routes nothing.
 
 ```rust
 #[rpc_controller]
@@ -300,13 +306,13 @@ impl OrdersController {
 }
 ```
 
-Typed payloads and returns are supported — declare a `Deserialize` parameter type and/or a `Serialize` return type and the macro inserts `RpcData::parse` / `from_serialize`. Errors may be any `toni::Error` type (auto-lifted to `RpcError::AppError` via `?`).
+Parameters are `FromContext<RpcContext>` extractors, in any order and any subset (including none): `RpcData`, `Payload<T>`, `Extensions`, or `&RpcContext` itself. A parameter of any other type is the call's payload, deserialised into it via `RpcData::parse`; a `Serialize` return type is serialised via `from_serialize`. Errors may be any `toni::Error` type (auto-lifted to `RpcError::AppError` via `?`).
 
 ## gRPC service macros
 
 ### `#[grpc_service]`
 
-**Target:** the service's inherent impl block, with the struct definition inline in the attribute (or a separate struct plus a `fn new(...)` constructor in the impl). Registers the struct as a singleton DI provider that the framework hands to the gRPC adapter at bind time.
+**Target:** the service's inherent impl block, with the struct definition inline in the attribute (or a separate struct plus a `fn new(...)` constructor in the impl). A dispatch target — declare it in the module's `controllers:` list; the framework hands it to the gRPC adapter at bind time. A request-scoped service is built per call rather than once.
 
 ```rust
 #[grpc_service(pub struct OrdersGrpcService {

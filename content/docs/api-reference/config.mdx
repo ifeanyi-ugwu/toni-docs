@@ -59,7 +59,7 @@ impl AppModule {}
 ```
 
 ```rust
-ConfigModule::<T>::new() -> Self                                       // exits the process on failure
+ConfigModule::<T>::new() -> Self                                       // panics on failure
 ConfigModule::<T>::from_env() -> Result<Self, ConfigError>
 ConfigModule::<T>::from_file(path: impl Into<PathBuf>) -> Result<Self, ConfigError>
 ConfigModule::<T>::from_env_file(env: Environment) -> Result<Self, ConfigError>
@@ -68,7 +68,7 @@ module.get() -> T        // clones the config
 module.get_ref() -> &T
 ```
 
-- `new()` loads from the environment and calls `std::process::exit(1)` if loading or validation fails (fail-fast).
+- `new()` loads from the environment and panics if loading or validation fails, with a message naming the config type — the process still stops before serving anything, but an embedding process or a test can catch the unwind. The `from_*` constructors return `Result` instead.
 - `from_file(path)` loads the given `.env` file, then reads the environment.
 - `from_env_file(Environment::Production)` loads `.env.production`; `Environment::Custom(name)` loads `.env.<name>`.
 - `.env` file loading is built in — the crate has no Cargo features.

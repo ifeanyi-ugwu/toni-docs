@@ -14,7 +14,7 @@ ActixAdapter::new() -> ActixAdapter
 Pass to `app.use_http_adapter` after `ToniFactory::create`:
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await.unwrap();
 app.use_http_adapter(ActixAdapter::new(), ("0.0.0.0", 8080)).unwrap();
 app.start().await.unwrap();
 ```

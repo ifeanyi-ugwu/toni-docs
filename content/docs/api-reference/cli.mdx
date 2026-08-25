@@ -53,6 +53,31 @@ The resource is wired in automatically: `<Name>Module` is added to the `imports`
 
 `resource` is the only generate type.
 
+### toni dev
+
+```
+toni dev [OPTIONS] [-- <args>...]
+```
+
+Runs `cargo run` and restarts the application whenever a `.rs` or `.toml` file changes (250 ms throttle). The watch excludes `.gitignore` paths, `**/target/**`, and `**/.git/**`. On restart the old process gets SIGTERM, then SIGKILL after a 2 s grace.
+
+| Flag | Effect |
+|------|--------|
+| `--listen <ADDR>` | Bind the socket once in the watcher and pass it to every restart via the `LISTEN_FDS` protocol; a bare port means localhost. Unix only; not supported with `toni-rocket` |
+| `--release` | Build and run in release mode |
+| `-p, --package <SPEC>` | Package to run, for a workspace with more than one |
+| `--bin <NAME>` | Run this binary instead of the package default |
+| `--example <NAME>` | Run this example instead of a binary (refused together with `--bin`) |
+| `-F, --features <FEATURES>` | Features to activate; repeat the flag or comma-separate the list |
+| `--all-features` | Activate every feature of every selected package |
+| `--no-default-features` | Do not activate the `default` feature |
+| `--cargo-arg <ARG>` | Forward one argument to cargo as given; repeat once per argument |
+| `-- <args>` | Everything after `--` is passed to the application binary |
+
+The cargo command is assembled as `run`, `--release`, the target selector, `--features`, `--all-features`, `--no-default-features`, the `--cargo-arg` values in order, then `--` and the application arguments.
+
+The command sits behind toni-cli's default-on `dev` cargo feature; installing with `cargo install toni-cli --no-default-features` omits it. See [CLI Commands](/docs/cli/commands) for the dev-loop walkthrough.
+
 ## Version
 
 ```bash

@@ -37,9 +37,26 @@ use toni_seaorm::SeaOrmModule;
 pub struct AppModule;
 ```
 
-`for_root` returns a **global** `DynamicModule`. `DatabaseConnection` is available to every module in the application without needing to import `SeaOrmModule` into each feature module.
+`for_root` returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
 
-The connection is established at startup and panics on failure, so a bad URL or unreachable host surfaces immediately rather than on the first query.
+The connection object itself is constructed lazily, without dialing. What verifies the database is the [startup check](#startup-check): it probes the server in `on_module_init`, so a bad URL or unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the connection URL redacted (`postgres://user:***@localhost/mydb`) — rather than on the first query.
+
+## Startup check
+
+By default the module confirms the database answers before the application starts: 3 attempts, 2 seconds apart, each bounded to 5 seconds — worst case ≈ 19 s. Tune the schedule with `with_startup_check`:
+
+```rust
+use toni::StartupCheck;
+
+SeaOrmModule::for_root(url)
+    .with_startup_check(StartupCheck::default().attempts(5))
+```
+
+`StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
+
+Opt out with `.without_startup_check()` — the application then starts without contacting the database, and failures surface where the connection is first used. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
+
+A named connection (see below) runs the same check and reports failures under its name.
 
 ## Injecting the connection
 
@@ -108,7 +125,7 @@ Combine with `toni-config` or `std::env::var` to avoid hardcoding credentials:
 pub struct AppModule;
 ```
 
-Or with a typed config. A `DynamicModule` is not a provider — it can't be produced by a factory at injection time, so the URL must be known when the module tree is built. Load the config first, then pass the value to `for_root`:
+Or with a typed config. A module is not a provider — it can't be produced by a factory at injection time, so the URL must be known when the module tree is built. Load the config first, then pass the value to `for_root`:
 
 ```rust
 use toni_config::{Config, ConfigModule};
@@ -119,7 +136,7 @@ pub struct AppConfig {
     pub database_url: String,
 }
 
-fn database_module() -> toni::DynamicModule {
+fn database_module() -> toni::CheckedModule {
     let config = ConfigModule::<AppConfig>::from_env()
         .expect("invalid configuration");
     SeaOrmModule::for_root(config.get_ref().database_url.clone())
@@ -137,19 +154,20 @@ pub struct AppModule;
 
 ## Health checks
 
-Enable the `health` feature to have `for_root` also register a `SeaOrmHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
+Enable the `health` feature to have `for_root` also register a `SeaOrmHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. The indicator shares the registered connection — enabling `health` opens no second pool — and resolves it lazily on each check. See [Health checks](/docs/techniques/health).
 
 ## API reference
 
 ```rust
 use toni_seaorm::SeaOrmModule;
 
-SeaOrmModule::for_root(url: impl Into<String>) -> DynamicModule
-SeaOrmModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
+SeaOrmModule::for_root(url: impl Into<String>) -> CheckedModule
+SeaOrmModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> CheckedModule
 ```
 
-The returned `DynamicModule`:
+The returned `CheckedModule`:
 - is named `"SeaOrmModule"`
 - provides `sea_orm::DatabaseConnection` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `DatabaseConnection`
 - is **global** (no need to import into feature modules)
+- carries the startup check — reconfigure with `.with_startup_check(StartupCheck)`, drop it with `.without_startup_check()`

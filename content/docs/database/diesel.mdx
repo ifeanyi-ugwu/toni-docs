@@ -46,7 +46,26 @@ pub struct AppModule;
 DieselModule::mysql("mysql://user:pass@localhost/mydb")
 ```
 
-Each constructor returns a **global** `DynamicModule`. The pool is created at startup and panics on failure.
+Each constructor returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
+
+The pool itself is constructed lazily, without dialing. What verifies the database is the [startup check](#startup-check): it probes the server in `on_module_init`, so an unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the connection URL redacted (`postgresql://user:***@localhost/mydb`) — rather than on the first query. This is a behavioral change: earlier versions never dialed at startup, so an application could come up against an absent database and only find out on first use.
+
+## Startup check
+
+By default the module confirms the database answers before the application starts: 3 attempts, 2 seconds apart, each bounded to 5 seconds — worst case ≈ 19 s. Tune the schedule with `with_startup_check`:
+
+```rust
+use toni::StartupCheck;
+
+DieselModule::postgres(url)
+    .with_startup_check(StartupCheck::default().attempts(5))
+```
+
+`StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
+
+Opt out with `.without_startup_check()` — the application then starts without contacting the database, restoring the old first-use failure mode. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
+
+A named pool (see below) runs the same check and reports failures under its name.
 
 ## Injecting the pool
 
@@ -133,26 +152,27 @@ pub struct AppModule;
 
 ## Health checks
 
-Enable the `health` feature to have each constructor also register a health indicator — `PgHealthIndicator` for PostgreSQL, `MySqlHealthIndicator` for MySQL — exposing `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
+Enable the `health` feature to have each constructor also register a health indicator — `PgHealthIndicator` for PostgreSQL, `MySqlHealthIndicator` for MySQL — exposing `ping_check(key)` for use with `toni-terminus`. The indicator shares the registered pool — enabling `health` opens no second one — and resolves it lazily on each check. See [Health checks](/docs/techniques/health).
 
 ## API reference
 
 ```rust
 use toni_diesel::DieselModule;
 
-DieselModule::postgres(url: impl Into<String>) -> DynamicModule
-DieselModule::mysql(url: impl Into<String>)    -> DynamicModule
+DieselModule::postgres(url: impl Into<String>) -> CheckedModule
+DieselModule::mysql(url: impl Into<String>)    -> CheckedModule
 
-DieselModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
-DieselModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> DynamicModule
+DieselModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> CheckedModule
+DieselModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> CheckedModule
 ```
 
 Each constructor is gated behind its database feature (`postgres`, `mysql`).
 
-Each returned `DynamicModule`:
+Each returned `CheckedModule`:
 - provides the database-specific `deadpool::Pool<Connection>` type — by type for the default constructors, under the `name` token for the `_named` variants
 - exports the pool
 - is **global** (no need to import into feature modules)
+- carries the startup check — reconfigure with `.with_startup_check(StartupCheck)`, drop it with `.without_startup_check()`
 
 Re-exports available from `toni_diesel` (feature-gated):
 - `PgPool` — `deadpool::Pool<AsyncPgConnection>` (feature: `postgres`)

@@ -37,9 +37,26 @@ use toni_mongodb::MongoModule;
 pub struct AppModule;
 ```
 
-`for_root` returns a **global** `DynamicModule`. `mongodb::Database` is available to every module without additional imports.
+`for_root` returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
 
-The connection is established at startup and panics on failure, so an invalid URI or unreachable host surfaces immediately rather than on the first query.
+The client itself is constructed lazily, without dialing. What verifies the server is the [startup check](#startup-check): it probes MongoDB in `on_module_init`, so an unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the URI redacted (`mongodb://user:***@host:27017`) — rather than on the first query. This is a behavioral change: earlier versions never dialed at startup, so an application could come up against an absent database and only find out on first use.
+
+## Startup check
+
+By default the module confirms MongoDB answers before the application starts: 3 attempts, 2 seconds apart, each bounded to 5 seconds — worst case ≈ 19 s. Tune the schedule with `with_startup_check`:
+
+```rust
+use toni::StartupCheck;
+
+MongoModule::for_root(uri, "mydb")
+    .with_startup_check(StartupCheck::default().attempts(5))
+```
+
+`StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
+
+Opt out with `.without_startup_check()` — the application then starts without contacting MongoDB, restoring the old first-use failure mode. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
+
+A named connection (see below) runs the same check and reports failures under its name.
 
 ## Injecting the database
 
@@ -130,7 +147,7 @@ pub struct AppModule;
 
 ## Health checks
 
-Enable the `health` feature to have `for_root` also register a `MongoHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
+Enable the `health` feature to have `for_root` also register a `MongoHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. The indicator shares the registered database handle — enabling `health` opens no second client — and resolves it lazily on each check. See [Health checks](/docs/techniques/health).
 
 ## API reference
 
@@ -140,20 +157,21 @@ use toni_mongodb::MongoModule;
 MongoModule::for_root(
     uri: impl Into<String>,
     db_name: impl Into<String>,
-) -> DynamicModule
+) -> CheckedModule
 
 MongoModule::for_root_named(
     name: impl Into<String>,
     uri: impl Into<String>,
     db_name: impl Into<String>,
-) -> DynamicModule
+) -> CheckedModule
 ```
 
-The returned `DynamicModule`:
+The returned `CheckedModule`:
 - is named `"MongoModule"`
 - provides `mongodb::Database` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `Database`
 - is **global** (no need to import into feature modules)
+- carries the startup check — reconfigure with `.with_startup_check(StartupCheck)`, drop it with `.without_startup_check()`
 
 Re-exports available from `toni_mongodb`:
 - `mongodb::Collection`

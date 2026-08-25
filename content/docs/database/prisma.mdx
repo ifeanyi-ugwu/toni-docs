@@ -46,6 +46,8 @@ pub struct AppModule;
 
 `for_root` calls the closure once at startup and registers the resulting client as a global provider. The closure must return a `Future` that resolves to your `PrismaClient` type.
 
+Prisma is the one database integration without a startup check. The other integrations return a `CheckedModule` that probes the server before the application serves; Prisma's `connect` closure is opaque — there is no operation the framework can call on an arbitrary client type to see whether it works — so `for_root` returns a plain `DynamicModule` and an unreachable database surfaces where the client is first used, not from `ToniFactory::create`.
+
 ## Injecting the client
 
 The default client is injected by its concrete Rust type — no token string needed:

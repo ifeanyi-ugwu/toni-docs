@@ -49,9 +49,26 @@ SqlxModule::mysql("mysql://user:pass@localhost/mydb")
 SqlxModule::sqlite("sqlite:./data.db")
 ```
 
-Each constructor returns a **global** `DynamicModule`. The connection pool is available everywhere without additional imports.
+Each constructor returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
 
-The pool is created at startup and panics on failure, so a bad URL or unreachable host surfaces immediately.
+The pool itself is constructed lazily, without dialing. What verifies the database is the [startup check](#startup-check): it probes the server in `on_module_init`, so a bad URL or unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the connection URL redacted (`postgresql://user:***@localhost/mydb`) — rather than on the first query.
+
+## Startup check
+
+By default the module confirms the database answers before the application starts: 3 attempts, 2 seconds apart, each bounded to 5 seconds — worst case ≈ 19 s. Tune the schedule with `with_startup_check`:
+
+```rust
+use toni::StartupCheck;
+
+SqlxModule::postgres(url)
+    .with_startup_check(StartupCheck::default().attempts(5))
+```
+
+`StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
+
+Opt out with `.without_startup_check()` — the application then starts without contacting the database, and failures surface where the pool is first used. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
+
+A named pool (see below) runs the same check and reports failures under its name.
 
 ## Injecting the pool
 
@@ -136,28 +153,29 @@ pub struct AppModule;
 
 ## Health checks
 
-Enable the `health` feature to have each constructor also register a `SqlxHealthIndicator<DB>` (aliased per database as `PostgresHealthIndicator`, `MySqlHealthIndicator`, `SqliteHealthIndicator`), which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
+Enable the `health` feature to have each constructor also register a `SqlxHealthIndicator<DB>` (aliased per database as `PostgresHealthIndicator`, `MySqlHealthIndicator`, `SqliteHealthIndicator`), which exposes `ping_check(key)` for use with `toni-terminus`. The indicator shares the registered pool — enabling `health` opens no second one — and resolves it lazily on each check. See [Health checks](/docs/techniques/health).
 
 ## API reference
 
 ```rust
 use toni_sqlx::SqlxModule;
 
-SqlxModule::postgres(url: impl Into<String>) -> DynamicModule
-SqlxModule::mysql(url: impl Into<String>)    -> DynamicModule
-SqlxModule::sqlite(url: impl Into<String>)   -> DynamicModule
+SqlxModule::postgres(url: impl Into<String>) -> CheckedModule
+SqlxModule::mysql(url: impl Into<String>)    -> CheckedModule
+SqlxModule::sqlite(url: impl Into<String>)   -> CheckedModule
 
-SqlxModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
-SqlxModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> DynamicModule
-SqlxModule::sqlite_named(name: impl Into<String>, url: impl Into<String>)   -> DynamicModule
+SqlxModule::postgres_named(name: impl Into<String>, url: impl Into<String>) -> CheckedModule
+SqlxModule::mysql_named(name: impl Into<String>, url: impl Into<String>)    -> CheckedModule
+SqlxModule::sqlite_named(name: impl Into<String>, url: impl Into<String>)   -> CheckedModule
 ```
 
 Each constructor is gated behind its database feature (`postgres`, `mysql`, `sqlite`).
 
-Each returned `DynamicModule`:
+Each returned `CheckedModule`:
 - provides the database-specific `Pool<DB>` type — by type for the default constructors, under the `name` token for the `_named` variants
 - exports the pool
 - is **global** (no need to import into feature modules)
+- carries the startup check — reconfigure with `.with_startup_check(StartupCheck)`, drop it with `.without_startup_check()`
 
 Re-exports available from `toni_sqlx` (feature-gated):
 - `PgPool` — `sqlx::Pool<Postgres>` (feature: `postgres`)

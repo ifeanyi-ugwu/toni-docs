@@ -33,9 +33,26 @@ use toni_redis::RedisModule;
 pub struct AppModule;
 ```
 
-`for_root` returns a **global** `DynamicModule`. `ConnectionManager` is available to every module in the application without additional imports.
+`for_root` returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
 
-The connection is established at startup and panics on failure. An invalid URL or an unreachable Redis server surfaces immediately.
+The `ConnectionManager` itself is constructed lazily, without dialing. What verifies the server is the [startup check](#startup-check): it probes Redis in `on_module_init`, so an invalid URL or an unreachable server surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the connection URL redacted (`redis://user:***@host:6379`) — rather than on the first command.
+
+## Startup check
+
+By default the module confirms Redis answers before the application starts: 3 attempts, 2 seconds apart, each bounded to 5 seconds — worst case ≈ 19 s. Tune the schedule with `with_startup_check`:
+
+```rust
+use toni::StartupCheck;
+
+RedisModule::for_root(url)
+    .with_startup_check(StartupCheck::default().attempts(5))
+```
+
+`StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
+
+Opt out with `.without_startup_check()` — the application then starts without contacting Redis, and failures surface where the connection is first used. Worth taking when a readiness probe already reports Redis and the application should stay up while it recovers.
+
+A named connection (see below) runs the same check and reports failures under its name.
 
 ## Injecting the connection
 
@@ -112,19 +129,20 @@ pub struct AppModule;
 
 ## Health checks
 
-Enable the `health` feature to have `for_root` also register a `RedisHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. See [Health checks](/docs/techniques/health).
+Enable the `health` feature to have `for_root` also register a `RedisHealthIndicator`, which exposes `ping_check(key)` for use with `toni-terminus`. The indicator shares the registered connection — enabling `health` opens no second client — and resolves it lazily on each check. See [Health checks](/docs/techniques/health).
 
 ## API reference
 
 ```rust
 use toni_redis::RedisModule;
 
-RedisModule::for_root(url: impl Into<String>) -> DynamicModule
-RedisModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> DynamicModule
+RedisModule::for_root(url: impl Into<String>) -> CheckedModule
+RedisModule::for_root_named(name: impl Into<String>, url: impl Into<String>) -> CheckedModule
 ```
 
-The returned `DynamicModule`:
+The returned `CheckedModule`:
 - is named `"RedisModule"`
 - provides `redis::aio::ConnectionManager` — by type for `for_root`, under the `name` token for `for_root_named`
 - exports `ConnectionManager`
 - is **global** (no need to import into feature modules)
+- carries the startup check — reconfigure with `.with_startup_check(StartupCheck)`, drop it with `.without_startup_check()`

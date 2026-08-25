@@ -112,14 +112,14 @@ impl Orders for OrdersGrpcService {
 }
 ```
 
-`#[grpc_service]` registers the struct as a singleton provider. `#[grpc_methods]` emits the tonic registration — there is no `OrdersServer::new(...)` and no `adapter.add_service(...)` in user code; listing the service in a module's `providers` is the entire wiring story.
+`#[grpc_service]` makes the struct a dispatch target — declared in a module's `controllers` list, like an HTTP or RPC controller, and not injectable. It is a singleton unless a dependency is request-scoped, in which case it auto-elevates and is built per call. `#[grpc_methods]` emits the tonic registration — there is no `OrdersServer::new(...)` and no `adapter.add_service(...)` in user code; the `controllers` entry is the entire wiring story.
 
 By convention the server wrapper is inferred from the trait name: a trailing `Service` is stripped and `Server` appended (`Orders` → `OrdersServer`, `OrdersService` → `OrdersServer`), resolved in the trait's parent path. When the tonic-generated wrapper lives elsewhere or has a non-standard name, point at it explicitly: `#[grpc_methods(server = path::to::OrdersServer)]`.
 
 ## 4. Wire the module and start
 
 ```rust
-#[module(providers: [OrdersCounter, OrdersGrpcService])]
+#[module(controllers: [OrdersGrpcService], providers: [OrdersCounter])]
 struct AppModule;
 
 #[tokio::main(flavor = "current_thread")]
@@ -127,7 +127,7 @@ async fn main() {
     let local = tokio::task::LocalSet::new();
     local.run_until(async move {
         let addr: SocketAddr = "127.0.0.1:50051".parse().unwrap();
-        let mut app = ToniFactory::create(AppModule).await;
+        let mut app = ToniFactory::create(AppModule).await.unwrap();
         app.use_grpc_adapter(toni_grpc::GrpcAdapter::new(addr)).unwrap();
         app.start().await.unwrap();
     }).await;

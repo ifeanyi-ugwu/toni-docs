@@ -45,7 +45,7 @@ protoc-bin-vendored = "3"   # optional — vendors protoc for the build
 
 ## What the adapter provides
 
-- **DI-registered services** — `#[grpc_service]` makes the service a singleton provider; `#[inject]` fields resolve from the module's providers
+- **DI-registered services** — `#[grpc_service]` makes the service a dispatch target, declared in a module's `controllers` list; `#[inject]` fields resolve from the module's providers
 - **Enhancers per call** — guards, interceptors, and error handlers at service or method level ([enhancers](/docs/grpc/enhancers))
 - **Panic recovery** — a panicking handler surfaces as `Internal` on the wire; the server stays up ([error handling](/docs/grpc/error-handling))
 - **All four call modes** — unary, server-streaming, client-streaming, bidirectional ([streaming](/docs/grpc/streaming))
@@ -56,7 +56,7 @@ protoc-bin-vendored = "3"   # optional — vendors protoc for the build
 The gRPC adapter participates in the standard bind → run → shutdown sequence:
 
 - `app.use_grpc_adapter(GrpcAdapter::new(addr))` registers the adapter during configuration.
-- `app.bind()` resolves the DI-registered services, registers them with tonic, and binds the socket **synchronously** — a port conflict surfaces as `Err` from `bind()`, not a panic inside the serve loop. The returned `BoundAdapters.grpc: Option<SocketAddr>` carries the bound address (port-0 friendly).
+- `app.bind()` resolves the DI-registered services, registers them with tonic, and binds the socket **synchronously** — a port conflict surfaces as `StartupError::Adapter { transport: "grpc", .. }` from `bind()`, not a panic inside the serve loop. The returned `BoundAdapters.grpc: Option<SocketAddr>` carries the bound address (port-0 friendly).
 - `app.run()` drives the serve loop alongside every other adapter until shutdown is signalled via `ShutdownHandle`.
 - On shutdown, tonic drains in-flight calls under a drain timer (default 10 s); when the budget elapses, remaining streams are aborted and clients see `UNAVAILABLE`.
 

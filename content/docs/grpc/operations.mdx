@@ -10,7 +10,7 @@ Runtime knobs on `GrpcAdapter` and how the adapter behaves in production. All sn
 Shutdown is signalled through the application's `ShutdownHandle` — the framework installs no signal handlers, so wire them yourself:
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await.unwrap();
 app.use_grpc_adapter(toni_grpc::GrpcAdapter::new(addr)).unwrap();
 
 let bound = app.bind().await.unwrap();
@@ -88,3 +88,7 @@ println!("gRPC listening on {grpc_addr}");
 ```
 
 `bound.grpc` is `Option<SocketAddr>` — `None` when no gRPC adapter is registered. Binding to port 0 and reading the real port back from `bound.grpc` is the pattern the integration suite uses for test isolation.
+
+## Adopting a pre-bound listener
+
+`GrpcAdapter::from_listener(std::net::TcpListener)` serves on a socket the caller already bound and put into listening state instead of binding one — the route to systemd socket activation and zero-downtime restarts, where a supervisor holds the socket across process restarts. Pair with the `listenfd` crate to claim an inherited descriptor; see [Bind targets](/docs/techniques/bind-targets).

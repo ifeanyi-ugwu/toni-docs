@@ -67,7 +67,7 @@ async fn shutdown_signal() -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 8080)).unwrap();
 
     app.bind().await?;
@@ -106,11 +106,11 @@ let port: u16 = std::env::var("PORT")
     .parse()
     .expect("PORT must be a number");
 
-app.use_http_adapter(AxumAdapter::new(), port, &host).unwrap();
+app.use_http_adapter(AxumAdapter::new(), (host, port)).unwrap();
 app.start().await?;
 ```
 
-`start()` returns `Result<()>` — bind failures (port already in use, permission denied) surface here rather than panicking inside the server.
+`start()` returns `Result<()>`. Underneath, `bind()` acquires sockets for **every** declared transport — HTTP, WebSocket, RPC, gRPC — and refuses if any of them fails: the error is a `StartupError` naming the transport, any sockets already acquired are closed, and nothing serves. Port conflicts, permission denials, and configuration errors surface here rather than panicking inside the server. Startup-hook failures — an `on_module_init` that returns `Err`, a database [startup check](/docs/database/seaorm#startup-check) that cannot reach its server — surface earlier, as `StartupError::HookFailed` from `create`.
 
 ## Systemd service
 
@@ -142,7 +142,48 @@ sudo journalctl -u myapp -f
 
 `systemctl stop` sends SIGTERM, so the [graceful shutdown wiring above](#graceful-shutdown) is what makes it a clean stop.
 
+One caveat on `Restart=on-failure`: a serve loop that dies at runtime closes the whole application — the remaining transports drain and the process exits **cleanly**, status 0. `on-failure` will not restart a clean exit, so use `Restart=always` if a self-closing application should come back.
+
 Logs reach `journalctl` without any setup: the framework's default `tracing` subscriber writes to stderr at `info` level, adjustable per deployment with `RUST_LOG` in the environment file. See [Logging](/docs/techniques/logging).
+
+## Socket activation
+
+systemd can own the listening socket and pass it to the service. The socket stays open across restarts, so requests arriving while the service is down wait in the kernel accept queue instead of being refused. Declare it in a `.socket` unit:
+
+```ini
+# /etc/systemd/system/myapp.socket
+[Socket]
+ListenStream=8080
+
+[Install]
+WantedBy=sockets.target
+```
+
+```bash
+sudo systemctl enable --now myapp.socket
+```
+
+systemd announces the inherited socket through `LISTEN_FDS`, which the framework does not read itself. Adopt the socket with the [`listenfd`](https://docs.rs/listenfd) crate and hand it to `use_http_adapter` as a `BindTarget`, keeping a fallback branch so the binary still runs on its own — under a debugger, in tests, or from `cargo run`:
+
+```rust
+use listenfd::ListenFd;
+use toni::BindTarget;
+
+/// Take the inherited socket if there is one, otherwise bind normally.
+fn http_target() -> anyhow::Result<BindTarget> {
+    let mut fds = ListenFd::from_env();
+    match fds.take_tcp_listener(0)? {
+        Some(listener) => Ok(listener.into()),
+        None => Ok(("0.0.0.0", 8080).into()),
+    }
+}
+
+let mut app = ToniFactory::new().create_with(AppModule).await?;
+app.use_http_adapter(AxumAdapter::new(), http_target()?)?;
+app.start().await?;
+```
+
+`toni dev --listen` announces its socket over the same protocol, so this adoption code serves development and production unchanged — see the [development workflow](/docs/getting-started/development-workflow). All HTTP adapters accept a pre-bound listener except rocket, which refuses it at `bind()`. See [Bind targets](/docs/techniques/bind-targets) for the full `BindTarget` API.
 
 ## Performance tuning (Axum / Tokio)
 
@@ -154,7 +195,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async {
-            let mut app = ToniFactory::new().create_with(AppModule).await;
+            let mut app = ToniFactory::new().create_with(AppModule).await?;
             app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 8080)).unwrap();
             app.start().await
         })

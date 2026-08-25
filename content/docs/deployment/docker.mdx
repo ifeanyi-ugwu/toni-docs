@@ -90,6 +90,8 @@ volumes:
   postgres_data:
 ```
 
+`depends_on: service_healthy` and `restart: unless-stopped` are load-bearing here: database [startup checks](/docs/database/seaorm#startup-check) are on by default, so an app whose database is not yet up fails `create` after ≈ 19 s worst case — the health gate starts the app only once Postgres answers, and the restart policy covers the remaining races.
+
 ```bash
 docker compose up -d
 docker compose logs -f api
@@ -124,9 +126,11 @@ For real dependency checks (database pings, memory thresholds) behind liveness/r
 Configure it in the Dockerfile:
 
 ```dockerfile
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=25s --retries=3 \
   CMD wget -q --spider http://localhost:8080/health || exit 1
 ```
+
+The 25 s start period covers the default database startup check, whose worst case is ≈ 19 s before the app begins serving.
 
 ## Static binary with musl
 

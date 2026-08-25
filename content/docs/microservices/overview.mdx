@@ -19,7 +19,7 @@ use toni_tcp::TcpAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
     app.start().await?;
     Ok(())
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 HTTP and RPC can run on the same application instance:
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await?;
 app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000))?;
 app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
 app.start().await?;
@@ -89,7 +89,7 @@ impl InventoryService {
 }
 ```
 
-Every client transport connects lazily on first use and defaults to a 5-second request-response timeout, overridable with `with_timeout`. The full client API — typed helpers, per-call metadata, `connect`/`close` — is documented in [RPC Controllers](/docs/microservices/rpc-controllers#rpcclient).
+Every client transport connects lazily on first use and defaults to a 5-second request-response timeout, overridable with `with_timeout`. The full client API — typed helpers, per-call headers, `connect`/`close` — is documented in [RPC Controllers](/docs/microservices/rpc-controllers#rpcclient).
 
 ## Available transports
 
@@ -106,3 +106,5 @@ Each transport ships as its own crate with a server adapter and a client transpo
 | [Kafka](/docs/microservices/kafka-adapter) | `toni-kafka` | topic | `toni-reply-to` / `toni-correlation-id` headers |
 
 TCP and UDP are broker-less — the adapter is the server. The other five require the respective broker to be reachable from both sides.
+
+Instead of binding their own socket, the TCP and UDP adapters can adopt one the caller already bound — `TcpAdapter::from_listener` / `UdpAdapter::from_socket` — for socket activation and zero-downtime restarts; see [Bind targets](/docs/techniques/bind-targets).

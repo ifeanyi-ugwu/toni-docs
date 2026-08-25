@@ -23,7 +23,7 @@ use toni_tcp::TcpAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000))?;
     app.start().await?;
     Ok(())
@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 The socket is bound synchronously during startup, so a port conflict surfaces as an `Err` from `app.start()` (or `app.bind()`) rather than a panic in a background task. Binding port `0` picks a free port; the bound address is available from `app.bind()`'s `BoundAdapters`.
+
+`TcpAdapter::from_listener(std::net::TcpListener)` serves on a socket the caller already bound and put into listening state instead of binding one — the route to systemd socket activation and zero-downtime restarts; see [Bind targets](/docs/techniques/bind-targets).
 
 ### Adapter options
 
@@ -54,7 +56,7 @@ All frames are newline-terminated JSON objects (`\n` delimiter). Inbound:
 ```
 
 - `id` — optional correlation id. Present means the caller expects a reply; absent means fire-and-forget.
-- `metadata` — optional object of string values, surfaced as `ctx.metadata()`. Non-string values are skipped.
+- `metadata` — optional object of string values, surfaced as `ctx.headers()`. Non-string values are skipped.
 
 One response frame per request:
 
@@ -176,12 +178,12 @@ impl OrdersController {
     }
 }
 
-#[module(providers: [OrdersService, OrdersController])]
+#[module(controllers: [OrdersController], providers: [OrdersService])]
 struct AppModule;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(toni_tcp::TcpAdapter::new("0.0.0.0", 4000))?;
     app.start().await?;
     Ok(())

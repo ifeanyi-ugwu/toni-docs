@@ -23,7 +23,7 @@ use toni_rabbitmq::RabbitMqAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(RabbitMqAdapter::new("amqp://127.0.0.1:5672/%2f"))?;
     app.start().await?;
     Ok(())
@@ -43,7 +43,7 @@ Multiple server instances consuming the same queues share the work — AMQP dist
 - **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
 - **Request-response** — a delivery carrying `reply_to` gets the framed response published to that queue with the same `correlation_id`. A `reply_to` addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
 - **Fire-and-forget** — no `reply_to`; the delivery is acked with nothing sent back.
-- **Metadata** — per-call metadata rides in the AMQP headers table. Inbound, string headers pass through verbatim and scalar numbers/booleans are stringified; structured values (arrays, nested tables) are skipped.
+- **Headers** — per-call headers ride in the AMQP headers table, surfacing as `ctx.headers()`. Inbound, string headers pass through verbatim and scalar numbers/booleans are stringified; structured values (arrays, nested tables) are skipped.
 
 Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
 

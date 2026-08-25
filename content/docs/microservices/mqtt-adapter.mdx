@@ -23,7 +23,7 @@ use toni_mqtt::MqttAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(MqttAdapter::new("127.0.0.1", 1883))?;
     app.start().await?;
     Ok(())
@@ -41,7 +41,7 @@ Each pattern subscribes to a topic with the pattern string as its name — exact
 - **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
 - **Request-response** — a PUBLISH carrying a `response_topic` gets the framed response published there with the request's `correlation_data` echoed back. A `response_topic` addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
 - **Fire-and-forget** — no `response_topic`; nothing is published back.
-- **Metadata** — per-call metadata rides in the v5 `user_properties`. MQTT permits repeated property keys; the metadata map is flat, so the last value wins.
+- **Headers** — per-call headers ride in the v5 `user_properties`, surfacing as `ctx.headers()`. MQTT permits repeated property keys; the headers map is flat, so the last value wins.
 
 Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
 

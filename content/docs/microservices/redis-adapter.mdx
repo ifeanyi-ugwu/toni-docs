@@ -25,7 +25,7 @@ use toni_redis_rpc::RedisAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(RedisAdapter::new("redis://127.0.0.1:6379"))?;
     app.start().await?;
     Ok(())
@@ -52,7 +52,7 @@ Both halves are Toni, so calls travel in a JSON request envelope:
 
 - `data` — the externally-tagged `RpcData` (`{"Json": ...}` / `{"Text": ...}` / `{"Binary": [...]}`), keeping all three payload variants lossless across the hop.
 - `reply_to` — present for request-response (`send`); absent for fire-and-forget (`emit`).
-- `metadata` — per-call metadata; Redis Pub/Sub frames have no headers, so it rides in the envelope.
+- `metadata` — the per-call headers (`ctx.headers()` on the server); Redis Pub/Sub frames have no header slot of their own, so they ride in the envelope under this key.
 
 Responses published to the reply channel use the same framing as the other transports: `{"response": ...}` on success (handler errors ride inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, `{"response": null}` as the event-handler ack, and raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
 

@@ -23,7 +23,7 @@ use toni_udp::UdpAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(UdpAdapter::new("0.0.0.0", 4000))?;
     app.start().await?;
     Ok(())
@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 The socket is bound synchronously during startup — a port conflict surfaces as an `Err` from `app.start()` (or `app.bind()`).
+
+`UdpAdapter::from_socket(std::net::UdpSocket)` receives on a socket the caller already bound instead of binding one — datagram sockets are what systemd hands over for a `ListenDatagram=` unit; see [Bind targets](/docs/techniques/bind-targets).
 
 ### Adapter options
 

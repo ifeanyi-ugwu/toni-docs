@@ -16,7 +16,7 @@ NatsAdapter::new(servers: impl IntoNatsServers) -> NatsAdapter
 Register after `ToniFactory::create`:
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await.unwrap();
 app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222")).unwrap();
 app.start().await.unwrap();
 ```
@@ -45,18 +45,18 @@ provider_value!(
 
 `close()` (via `RpcClient::close`) flushes pending publishes before returning — call it at shutdown so in-flight data is not lost.
 
-### Per-call metadata
+### Per-call headers
 
-Attach metadata (auth tokens, trace ids, tenant) via the request builder:
+Attach headers (auth tokens, trace ids, tenant) via the request builder:
 
 ```rust
 client.request("inventory.restock")
-    .metadata("trace-id", trace_id)
+    .header("trace-id", trace_id)
     .send(RpcData::json(payload))
     .await?;
 ```
 
-Metadata is sent as NATS headers. On the server side, inbound NATS headers surface as handler metadata (`ctx.metadata()` / `ctx.get_metadata(key)`).
+Headers are sent as NATS headers. On the server side, inbound NATS headers surface as handler headers (`ctx.headers()` / `ctx.header(key)`).
 
 ---
 

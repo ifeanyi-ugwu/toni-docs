@@ -23,14 +23,14 @@ use toni_nats::NatsAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222"))?;
     app.start().await?;
     Ok(())
 }
 ```
 
-The initial connection retries until the server is reachable (`retry_on_initial_connect`), so a slow-starting NATS container does not kill the process. If the connection or a subject subscription ultimately fails, the serve task panics. Connection state changes (connected, disconnected, server errors) are logged.
+The initial connection retries until the server is reachable (`retry_on_initial_connect`), so a slow-starting NATS container does not kill the process. If the connection or a subject subscription ultimately fails, the failure surfaces from `app.bind()` (or `app.start()`) as `StartupError::Adapter { transport: "rpc", .. }`. Connection state changes (connected, disconnected, server errors) are logged.
 
 ## Multiple servers
 
@@ -49,7 +49,7 @@ Each `#[message_pattern("x.y")]` or `#[event_pattern("x.y")]` subscribes to subj
 ## Wire behavior
 
 - **Inbound payload** — parsed as JSON into `RpcData::Json`; anything that is not valid JSON becomes `RpcData::Binary`.
-- **Metadata** — NATS headers on the inbound message become `ctx.metadata()`; per-call metadata from `RpcClient::request(...).metadata(...)` travels as NATS headers.
+- **Headers** — NATS headers on the inbound message become `ctx.headers()`; per-call headers from `RpcClient::request(...).header(...)` travel as NATS headers.
 - **Request-response** — a message with a reply-to inbox gets its reply published there. A reply-to that addresses an `#[event_pattern]` handler gets a `{"response": null}` ack.
 - **Fire-and-forget** — no reply-to, nothing published back.
 
@@ -107,7 +107,7 @@ Unlike the TCP/UDP adapters, the NATS adapter has no drain timeout, no `with_max
 use toni_axum::AxumAdapter;
 use toni_nats::NatsAdapter;
 
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await?;
 app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000))?;
 app.use_rpc_adapter(NatsAdapter::new("nats://127.0.0.1:4222"))?;
 app.start().await?;

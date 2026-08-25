@@ -25,7 +25,7 @@ use toni_kafka::KafkaAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_rpc_adapter(KafkaAdapter::new("127.0.0.1:9092"))?;
     app.start().await?;
     Ok(())
@@ -51,7 +51,7 @@ Each pattern is one topic; routing matches the received record's topic against t
 - **Body** — raw `RpcData` bytes. Inbound bodies that parse as JSON become `RpcData::Json`, anything else `RpcData::Binary`.
 - **Request-response** — a record carrying a `toni-reply-to` header gets the framed response produced to that topic, with `toni-correlation-id` echoed back. A reply-to addressing an `#[event_pattern]` handler gets a `{"response": null}` ack.
 - **Fire-and-forget** — no `toni-reply-to` header; nothing is produced back.
-- **Metadata** — every header other than the two reserved keys becomes `ctx.metadata()`; per-call metadata from the client travels the same way.
+- **Headers** — every record header other than the two reserved keys becomes `ctx.headers()`; per-call headers from the client travel the same way.
 
 Reply framing matches the other transports: `{"response": ...}` on success (handler errors inside as the canonical envelope), `{"err": {"message": ..., "status": ...}}` for dispatch failures, raw bytes for `RpcData::Binary` replies. See [Errors on the wire](/docs/microservices/rpc-controllers#errors-on-the-wire).
 

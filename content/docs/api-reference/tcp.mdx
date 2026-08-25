@@ -11,17 +11,19 @@ Server-side RPC transport. Accepts inbound connections on a TCP port and dispatc
 use toni_tcp::TcpAdapter;
 
 TcpAdapter::new(host: impl Into<String>, port: u16) -> TcpAdapter
+TcpAdapter::from_listener(listener: std::net::TcpListener) -> TcpAdapter
 TcpAdapter::new(...).with_drain_timeout(impl Into<Option<Duration>>) -> TcpAdapter  // default: 10 s
 TcpAdapter::new(...).with_max_inflight(max: usize) -> TcpAdapter                    // default: unbounded
 ```
 
+- `from_listener` — serve on a socket the caller already bound and put into listening state instead of binding one (systemd socket activation, inherited descriptors via `listenfd`); see [Bind targets](/docs/techniques/bind-targets).
 - `with_drain_timeout` — how long `close()` waits for in-flight requests before aborting them; `None` waits without bound.
 - `with_max_inflight` — caps concurrently running handler tasks across all connections. Over-cap request-response messages are rejected with an `"overloaded"` error frame; fire-and-forget messages are dropped with a log line.
 
 Register after `ToniFactory::create`:
 
 ```rust
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await.unwrap();
 app.use_rpc_adapter(TcpAdapter::new("0.0.0.0", 4000)).unwrap();
 app.start().await.unwrap();
 ```
@@ -52,11 +54,11 @@ provider_value!(
 
 After a fatal transport error (reader-loop exit, write failure) the cached connection is dropped and the next call reconnects. Requests pending at the moment of failure fail with `RpcClientError::Transport("connection closed")`.
 
-Attach per-call metadata via the request builder; it travels as the `metadata` field on the wire frame:
+Attach per-call headers via the request builder; they travel as the `metadata` field on the wire frame:
 
 ```rust
 client.request("order.create")
-    .metadata("trace-id", trace_id)
+    .header("trace-id", trace_id)
     .send(RpcData::json(payload))
     .await?;
 ```
@@ -65,7 +67,7 @@ client.request("order.create")
 
 Newline-delimited JSON (`\n` terminated). Binary payloads are not supported on the TCP wire — use base64 or another encoding inside a JSON string.
 
-**Request-response inbound** (`metadata` optional; string values surface as handler metadata via `ctx.metadata()`):
+**Request-response inbound** (`metadata` optional; string values surface as handler headers via `ctx.headers()`):
 ```json
 {"pattern": "order.create", "data": {...}, "id": "1", "metadata": {"trace-id": "abc"}}
 ```

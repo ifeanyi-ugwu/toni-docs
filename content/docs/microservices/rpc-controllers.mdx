@@ -3,7 +3,7 @@ title: RPC Controllers
 description: Defining message handlers with #[rpc_controller], #[patterns], #[message_pattern], and #[event_pattern].
 ---
 
-RPC controllers are the microservice equivalent of HTTP controllers. They group pattern-matched message handlers and live in the DI container like any other provider.
+RPC controllers are the microservice equivalent of HTTP controllers. They group pattern-matched message handlers. Like HTTP controllers, they are dispatch targets, not providers — the framework builds them to route messages, and nothing injects one.
 
 <Bridge>
 
@@ -11,7 +11,7 @@ RPC controllers are the microservice equivalent of HTTP controllers. They group 
 |--------|------|
 | `@Controller()` class with `@MessagePattern()` | `#[rpc_controller]` struct with a `#[patterns]` impl |
 | `@EventPattern()` method | `#[event_pattern]` method |
-| `@Payload()` typed payload | typed first parameter (auto-parsed) |
+| `@Payload()` typed payload | typed payload parameter (auto-parsed) |
 | `RpcException` | `RpcError` |
 
 </Bridge>
@@ -40,18 +40,20 @@ impl OrdersController {
 }
 ```
 
-Register it in a module's `providers` list:
+Register it in a module's `controllers` list — its dependencies stay in `providers`:
 
 ```rust
-#[module(providers: [OrdersService, OrdersController])]
+#[module(controllers: [OrdersController], providers: [OrdersService])]
 pub struct OrdersModule;
 ```
 
-A bare `#[rpc_controller]` with no `#[patterns]` impl is valid — it registers as a provider and routes nothing.
+Listing an RPC controller under `providers` is a compile error — no provider factory exists for it. When a dependency is request-scoped, the controller auto-elevates and is built per call, exactly as HTTP controllers do.
+
+A bare `#[rpc_controller]` with no `#[patterns]` impl is valid — it registers as a dispatch target and routes nothing.
 
 ## Typed payloads and returns
 
-Handlers take the payload as their first parameter and `&RpcContext` as the second. The payload parameter can be any `Deserialize` type — the macro parses the inbound data into it before invoking the handler. Likewise the `Ok` side of the return can be any `Serialize` type — the macro serializes it into the reply:
+Handler parameters are free-form. `RpcData`, `Extensions`, and `Payload<T>` are extractors the framework fills from the call; `&RpcContext` passes through in any position; a parameter of **any other type** is the call's payload — the macro deserializes the inbound data into it before invoking the handler. So the conventional shape, payload first and `&RpcContext` second, works, as does a handler with no parameters at all. The `Ok` side of the return can be any `Serialize` type — the macro serializes it into the reply:
 
 ```rust
 #[derive(serde::Deserialize)]
@@ -111,6 +113,23 @@ async fn create_order(
 }
 ```
 
+`Payload<T>` performs the same deserialization with the extraction spelled out, and `Extensions` hands the handler the per-call typed bag an enhancer may have filled:
+
+```rust
+use toni::context::Extensions;
+use toni::extractors::Payload;
+
+#[message_pattern("order.create")]
+async fn create_order(
+    &self,
+    Payload(payload): Payload<CreateOrderDto>,
+    ext: Extensions,
+) -> Result<OrderDto, toni::RpcError> {
+    let caller = ext.get::<AuthenticatedUser>(); // attached by a guard
+    Ok(self.service.create_order(&payload.item, payload.qty))
+}
+```
+
 ## Request-response vs fire-and-forget
 
 `#[message_pattern]` marks a handler whose result is sent back to the caller.
@@ -162,18 +181,21 @@ let reply = RpcData::from_serialize(&order)?;
 
 ## RpcContext
 
-Handlers receive `&RpcContext`. Its fields are private — read through methods:
+Handlers can take `&RpcContext` in any position. Its fields are private — read through methods:
 
 ```rust
-ctx.pattern()            // &str — the matched pattern
-ctx.metadata()           // &HashMap<String, String> — transport headers / envelope metadata
-ctx.get_metadata("key")  // Option<&str>
-ctx.data()               // &RpcData — the raw inbound payload
+ctx.pattern()        // &str — the matched pattern
+ctx.headers()        // &HashMap<String, String> — the wire fields the call arrived with
+ctx.header("key")    // Option<&str>
+ctx.data()           // &RpcData — the raw inbound payload
+ctx.metadata()       // Option<&Metadata> — what #[set_metadata] declared on the handler
 ```
 
-Enhancers that run before the handler get `&mut RpcContext` and can also use `metadata_mut()`. `RpcContext` implements `HandlerContext`, so `extensions()` / `extensions_mut()` (cross-cutting per-request data), `cancellation()`, and `abort()` are available as on every context type.
+Headers and metadata are distinct: `headers()` is what the caller sent with this call; `metadata()` is what the handler declared about itself. `#[set_metadata]` goes on the `#[patterns]` impl (every handler) or on an individual handler, and reads back through `ctx.metadata()` — typically from a guard.
 
-Where metadata travels on the wire is transport-specific: NATS headers, AMQP headers, MQTT v5 user properties, Kafka headers, a `metadata` field in the TCP/UDP frame, or the Redis request envelope. Each transport page states its mapping.
+Enhancers share the same `&RpcContext`. `RpcContext` implements `HandlerContext`, so `extensions()` (the per-call typed bag — it mutates through `&self`, so a guard can `ctx.extensions().insert(v)` for a later stage to read), `cache()`, and `cancellation()` are available as on every context type.
+
+Where headers travel on the wire is transport-specific: NATS headers, AMQP headers, MQTT v5 user properties, Kafka headers, a `metadata` field in the TCP/UDP frame, or the Redis request envelope. Each transport page states its mapping.
 
 ## RpcError
 
@@ -243,7 +265,7 @@ On the client, error frames surface as `RpcClientError::Remote { message, status
 
 ## Guards, interceptors, pipes
 
-Enhancers are plain `#[injectable]` providers implementing the typed traits — `Guard<RpcContext>`, `Interceptor<RpcContext>`, `Pipe<RpcContext>`, `ErrorHandler<RpcContext, RpcData>`:
+Enhancers are plain `#[injectable]` providers implementing the typed traits — `Guard<RpcContext>`, `Interceptor<RpcContext, RpcHandlerResult>`, `Pipe<RpcContext, RpcHandlerResult>`, `ErrorHandler<RpcContext, RpcData>` — where `RpcHandlerResult = Result<Option<RpcData>, RpcError>` is what the transport answers with:
 
 ```rust
 use toni::traits_helpers::Guard;
@@ -255,8 +277,8 @@ impl ApiKeyGuard {}
 
 #[async_trait]
 impl Guard<RpcContext> for ApiKeyGuard {
-    async fn can_activate(&self, ctx: &mut RpcContext) -> bool {
-        ctx.get_metadata("api-key") == Some("secret")
+    async fn can_activate(&self, ctx: &RpcContext) -> bool {
+        ctx.header("api-key") == Some("secret")
     }
 }
 ```
@@ -284,14 +306,14 @@ impl OrdersRpcController {
 }
 ```
 
-The enhancer providers must be listed in a module's `providers` alongside the controller. A guard rejection produces the `forbidden` error frame — guards return `bool` and cannot attach a custom error.
+Enhancers are ordinary providers, so they go in the module's `providers` list — the controller they attach to stays in `controllers`. A guard rejection produces the `forbidden` error frame — guards return `bool` and cannot attach a custom error.
 
 Global RPC enhancers register on the factory before the app is created:
 
 ```rust
 let mut factory = ToniFactory::new();
 factory.use_global_rpc_guards(Arc::new(ApiKeyGuard {}));
-let mut app = factory.create_with(AppModule).await;
+let mut app = factory.create_with(AppModule).await?;
 ```
 
 `use_global_rpc_interceptors`, `use_global_rpc_pipes`, and `use_global_rpc_error_handler` follow the same shape.
@@ -355,20 +377,20 @@ self.inventory
     .await?;
 ```
 
-### Per-call metadata
+### Per-call headers
 
-`request(pattern)` opens a builder that attaches metadata entries (auth tokens, trace ids, tenant) before dispatch. Finish with `send` / `emit` or their `_json` variants:
+`request(pattern)` opens a builder that attaches header entries (auth tokens, trace ids, tenant) before dispatch. Finish with `send` / `emit` or their `_json` variants:
 
 ```rust
 self.inventory
     .request("inventory.restock")
-    .metadata("trace-id", trace_id)
-    .metadata("tenant", tenant)
+    .header("trace-id", trace_id)
+    .header("tenant", tenant)
     .send(RpcData::json(payload))
     .await?;
 ```
 
-The server reads these through `ctx.metadata()` / `ctx.get_metadata(key)`.
+The server reads these through `ctx.headers()` / `ctx.header(key)`. Only the builder carries headers — the plain `send` / `emit` shorthands send none. On the JSON-envelope transports (TCP, UDP, Redis) the wire key for these entries remains `metadata`.
 
 ### Connection lifecycle
 

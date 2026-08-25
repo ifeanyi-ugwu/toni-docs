@@ -5,7 +5,7 @@ description: Group WebSocket clients into named rooms and broadcast to specific 
 
 Rooms let you group clients by a logical name and broadcast to a specific group. Common use cases: chat channels, game lobbies, collaboration sessions, topic subscriptions.
 
-Use `BroadcastService` (from `BroadcastModule`) to manage room membership and send targeted messages. Rooms are created implicitly — joining a room that doesn't exist creates it, and membership is cleaned up automatically when a client disconnects.
+Use `BroadcastService` (from `BroadcastModule`) to manage room membership and send targeted messages. Rooms are created implicitly — joining a room that doesn't exist creates it, and membership is cleaned up automatically when a client disconnects. Membership answers who is in a group; per-connection state — a nickname, an authenticated user — belongs in that connection's [`Session`](/docs/websocket/gateways#session) rather than in a map of your own keyed by client id.
 
 ## Basic room gateway
 

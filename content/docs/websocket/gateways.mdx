@@ -19,7 +19,7 @@ use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 8080)).unwrap();
     app.start().await?;
     Ok(())
@@ -58,7 +58,7 @@ impl EchoGateway {
     }
 
     #[subscribe_message("ping")]
-    async fn handle_ping(&self, _client: WsClient, _message: WsMessage) -> WsHandlerResult {
+    async fn handle_ping(&self) -> WsHandlerResult {
         Ok(WsMessage::text("pong").into())
     }
 }
@@ -78,7 +78,7 @@ Incoming text frames must be JSON with an `event` field. The value routes the me
 {"event": "ping"}
 ```
 
-The handler receives the **entire frame** as its `WsMessage` argument — `message.as_text()` returns the full JSON string, and extracting `data` fields is up to the handler (see [Rooms](/docs/websocket/rooms) for `serde_json` parsing patterns).
+A handler that takes `WsMessage` receives the **entire frame** — `message.as_text()` returns the full JSON string. A handler that wants the frame parsed takes `Payload<T>` instead (see [Handler parameters](#handler-parameters)).
 
 Routing edge cases:
 
@@ -89,15 +89,38 @@ Routing edge cases:
 
 The routing field name comes from `GatewayTrait::event_field()`, which defaults to `"event"`. Overriding it (e.g. to `"type"` for graphql-ws protocol compatibility) requires implementing `GatewayTrait` by hand instead of using the macro.
 
-## Handler results
+## Handler parameters
 
-Every `#[subscribe_message]` handler has the signature:
+A `#[subscribe_message]` handler takes whatever parameters it needs — each one is extracted from the message through `FromContext<WsContext>`, in any order, in any subset, including none:
+
+| Parameter | Extracts |
+|---|---|
+| `WsClient` | the sending client — id, handshake, session |
+| `WsMessage` | the raw inbound frame |
+| `Payload<T>` | the frame deserialized into `T: DeserializeOwned` |
+| `Session` | the connection's store (see [Session](#session)) |
+| `Extensions` | the per-message bag guards and interceptors write to |
+| `&WsContext` | the full context |
+
+The `(client: WsClient, message: WsMessage)` pair used above is the common case, not a required shape. `Payload<T>` (from `toni::extractors`) parses text frames with `serde_json::from_str` and binary frames with `from_slice`, replacing hand-extraction of `data` fields:
 
 ```rust
-async fn(&self, client: WsClient, message: WsMessage) -> WsHandlerResult
+#[derive(serde::Deserialize)]
+struct ChatInput {
+    data: String,
+}
+
+#[subscribe_message("message")]
+async fn handle_message(&self, Payload(input): Payload<ChatInput>) -> WsHandlerResult {
+    Ok(WsMessage::text(format!("Echo: {}", input.data)).into())
+}
 ```
 
-where `WsHandlerResult = Result<WsHandlerOutput, WsError>`:
+A frame with no payload to parse — ping, pong, close — fails `Payload<T>` extraction with `PayloadError::NotData`; take `WsMessage` to handle such frames yourself. Any failed extraction answers the sender with a `WsError::Internal` error frame; the handler never runs.
+
+## Handler results
+
+Every handler returns `WsHandlerResult = Result<WsHandlerOutput, WsError>`:
 
 ```rust
 Ok(WsHandlerOutput::Empty)           // no reply
@@ -115,10 +138,10 @@ Handlers that push through [broadcasting](/docs/websocket/broadcasting) instead 
 
 ```rust
 use futures::stream;
-use toni::websocket::{WsClient, WsHandlerOutput, WsHandlerResult, WsMessage};
+use toni::websocket::{WsHandlerOutput, WsHandlerResult, WsMessage};
 
 #[subscribe_message("count")]
-async fn on_count(&self, _client: WsClient, _msg: WsMessage) -> WsHandlerResult {
+async fn on_count(&self) -> WsHandlerResult {
     let items = stream::iter(
         ["one", "two", "three"]
             .into_iter()
@@ -160,9 +183,11 @@ impl PresenceGateway {
 }
 ```
 
-- `#[on_connect]` — `async fn(&self, client: &WsClient) -> Result<(), WsError>`. Returning `Err` rejects the connection.
-- `#[on_disconnect]` — `async fn(&self, client: &WsClient)`. Runs when the client disconnects.
+- `#[on_connect]` — `async fn(&self)`, `async fn(&self, client: &WsClient)`, or `async fn(&self, client: &WsClient, ctx: &WsContext)`, each returning `Result<(), WsError>`. Returning `Err` rejects the connection.
+- `#[on_disconnect]` — the same three shapes without the `Result`. Runs when the client disconnects; no guards or other enhancers run on disconnect.
 - `#[after_init]` — `async fn(&self)`. Runs once after the gateway path is registered with the adapter, before any connections.
+
+The optional trailing `&WsContext` is how a hook reaches the connection's [session](#session) — a disconnect hook that needs what a connect guard stored declares it as a second parameter.
 
 A gateway with no `#[subscriptions]` impl at all is valid: it accepts connections (and can broadcast to them) without routing any messages. `#[websocket_gateway]` alone is a complete connection-only gateway.
 
@@ -175,10 +200,56 @@ client.id                     // String — unique per connection
 client.handshake.headers      // HashMap<String, String> — upgrade request headers
 client.handshake.query        // HashMap<String, String> — query params from the handshake URL
 client.handshake.remote_addr  // Option<String>
-client.extensions             // Extensions — per-connection storage (auth data, user info)
+client.session()              // &Session — the connection's store (see below)
 ```
 
 Header keys are stored lowercase, so look up `"x-auth-token"` regardless of how the client sent it.
+
+## Session
+
+`Session` (`toni::websocket::Session`, also at the crate root) is the store scoped to a connection. It is created with the client before connect guards run and dropped when the client is removed — a value written at connect is readable by every later message on that connection, and a reconnect starts empty. It is a store, not a context: values and a lifetime, nothing more.
+
+```rust
+session.insert(value)          // store T for the rest of the connection; returns what it replaced
+session.get::<T>()             // Option<T> — a clone of the stored value (T: Clone)
+session.with(|v: &T| ...)      // read in place, for a value that doesn't clone
+session.with_mut(|v: &mut T| ...)  // read and mutate in place
+session.remove::<T>()
+session.contains::<T>()
+```
+
+Reach it as `ctx.session()` in enhancers and hooks, as `client.session()` on any `WsClient`, or take it directly as a handler parameter. The idiomatic use: a connect guard authenticates once and writes the principal, and every later handler reads it instead of re-deriving it:
+
+```rust
+#[derive(Clone)]
+pub struct Principal(String);
+
+#[async_trait]
+impl Guard<WsContext> for AuthenticateOnce {
+    async fn can_activate(&self, ctx: &WsContext) -> bool {
+        if ctx.event() == "connect" {
+            let Some(principal) = self.authenticate(ctx.client()) else {
+                return false;
+            };
+            ctx.session().insert(principal);
+        }
+        true
+    }
+}
+
+#[subscribe_message("whoami")]
+async fn whoami(&self, session: Session) -> WsHandlerResult {
+    let who = session
+        .get::<Principal>()
+        .map(|p| p.0)
+        .ok_or_else(|| WsError::AuthFailed("no principal".into()))?;
+    Ok(WsMessage::text(who).into())
+}
+```
+
+Guards run at connect (before `#[on_connect]`) and again per message; the session already exists when the connect guard runs, so its write is there for every message that follows.
+
+Two stores, two lifetimes: the session lives as long as the connection; `ctx.extensions()` (or an `Extensions` handler parameter) empties with each execution — one message, or the connect. Request scope on WebSocket is per **message**, so what an enhancer stashes in extensions is gone when the next message arrives. Connection state goes in the session, per-message state in extensions.
 
 ## WsMessage
 
@@ -213,7 +284,7 @@ Domain error types implementing `toni::Error` (via `#[derive(toni::Error)]` + `#
 
 ```rust
 #[subscribe_message("create")]
-async fn create(&self, _client: WsClient, msg: WsMessage) -> WsHandlerResult {
+async fn create(&self, msg: WsMessage) -> WsHandlerResult {
     let text = msg
         .as_text()
         .ok_or_else(|| WsError::InvalidMessage("Expected text payload".into()))?;

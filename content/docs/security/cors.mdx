@@ -20,7 +20,7 @@ async fn main() {
     let mut factory = ToniFactory::new();
     factory.use_global_middleware(Arc::new(CorsMiddleware::permissive()));
 
-    let mut app = factory.create_with(AppModule).await;
+    let mut app = factory.create_with(AppModule).await.unwrap();
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await.unwrap();
 }
@@ -82,7 +82,7 @@ pub struct OriginGuard;
 
 #[async_trait]
 impl Guard<WsContext> for OriginGuard {
-    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
+    async fn can_activate(&self, ctx: &WsContext) -> bool {
         ctx.client()
             .handshake
             .headers
@@ -92,6 +92,8 @@ impl Guard<WsContext> for OriginGuard {
     }
 }
 ```
+
+The connection's session already exists while the guard runs, so a guard that derives something worth keeping — the validated origin, a tenant — can stash it with `ctx.session().insert(...)` for every later message to read.
 
 Apply it with `#[use_guards]` on the gateway's `#[subscriptions]` impl, and register both in the module:
 
@@ -136,7 +138,7 @@ pub struct OriginGuard {
 
 #[async_trait]
 impl Guard<WsContext> for OriginGuard {
-    async fn can_activate(&self, ctx: &mut WsContext) -> bool {
+    async fn can_activate(&self, ctx: &WsContext) -> bool {
         let allowed = &self.config.get_ref().allowed_origins;
         ctx.client()
             .handshake

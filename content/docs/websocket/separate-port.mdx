@@ -40,7 +40,7 @@ Port semantics:
 - **`port = N` equal to the HTTP port** (non-zero) — treated as same-port; the HTTP adapter serves it.
 - **`port = 0`** — always a separate listener with an OS-assigned port, even when HTTP also requested `0`. Read the assigned address from `BoundAdapters`.
 
-The listener binds on the HTTP adapter's hostname (or `0.0.0.0` when no HTTP adapter is registered).
+The listener binds on the HTTP adapter's hostname (or `0.0.0.0` when no HTTP adapter is registered). A pre-bound HTTP `Listener` target carries no hostname, so the WebSocket side falls back to `0.0.0.0` then too.
 
 ## Registering a WebSocket adapter
 
@@ -58,7 +58,7 @@ use toni_tungstenite::TungsteniteAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(PingModule).await;
+    let mut app = ToniFactory::create(PingModule).await?;
 
     app.use_http_adapter(toni_axum::AxumAdapter::new(), ("127.0.0.1", 3000))
         .unwrap();
@@ -77,7 +77,7 @@ Multiple gateways on different ports each get their own listener from the same a
 With `port = 0`, read the assigned address from the `BoundAdapters` returned by `app.bind()`. `BoundAdapters.websocket` holds one `SocketAddr` per separate-port listener:
 
 ```rust
-let mut app = ToniFactory::create(PingModule).await;
+let mut app = ToniFactory::create(PingModule).await?;
 app.use_http_adapter(toni_axum::AxumAdapter::new(), ("127.0.0.1", 0)).unwrap();
 app.use_websocket_adapter(TungsteniteAdapter::new()).unwrap();
 
@@ -90,11 +90,24 @@ app.run().await;
 
 `bind()` returns with sockets live; `run()` blocks until shutdown. `start()` is the combination of both when you don't need the addresses.
 
+## Supplying the listener
+
+`app.use_websocket_listener(declared_port, listener)` hands a socket you already bound to the gateways declared with `port = declared_port`, instead of letting the adapter bind one:
+
+```rust
+let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+app.use_websocket_listener(4000, listener)?;
+```
+
+The declared port is a key, not an address: it selects which gateway the socket serves, and the socket may listen on a different port entirely — `BoundAdapters.websocket` reports the address it actually listens on. A listener supplied for a port no gateway declares fails `bind()`, since nothing would ever accept on it.
+
+Same-port gateways ride the HTTP listener; hand their socket to `use_http_adapter` instead. See [Bind Targets](/docs/techniques/bind-targets) for the pre-bound-listener workflow — systemd socket activation, `listenfd`, zero-downtime restarts.
+
 ## TungsteniteAdapter characteristics
 
 The adapter accepts raw TCP connections and performs the WebSocket handshake itself, without an HTTP server in front. That brings three quirks:
 
-- **No handshake data.** The upgrade request is not surfaced to the framework — `client.handshake.headers` and `client.handshake.query` are empty. Guards that read handshake headers always see none; authenticate separate-port clients through a first-message protocol instead.
+- **No handshake data.** The upgrade request is not surfaced to the framework — `client.handshake.headers` and `client.handshake.query` are empty. Guards that read handshake headers always see none; authenticate separate-port clients through a first-message protocol instead. The result of that first-message auth belongs in `ctx.session()`, where every later message on the connection can read it — see [Session](/docs/websocket/gateways#session).
 - **One gateway per port.** Raw TCP routing has no path concept — all connections on a port go to the first registered path binding, regardless of the URL path the client used. Give each gateway its own `port` value.
 - **Ping/pong frames are ignored.** The read loop drops them; they are never routed to handlers (the same is true of same-port gateways — control frames stay in the adapter layer).
 
@@ -115,4 +128,4 @@ Choose this over `TungsteniteAdapter` when separate-port clients need header-bas
 
 Separate-port listeners participate in graceful shutdown like every other adapter: `app.shutdown_handle().shutdown()` stops the WebSocket servers along with HTTP.
 
-A failed WebSocket bind (e.g. the port is already in use) is logged at `bind()` time and leaves no entry in `BoundAdapters.websocket` — check the vector when the listener is critical.
+A failed WebSocket bind (e.g. the port is already in use) fails `bind()` with `StartupError::Adapter { transport: "websocket", .. }` — every transport the application declares must come up. Sockets acquired before the failure are closed on the way out.

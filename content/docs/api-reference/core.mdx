@@ -50,7 +50,7 @@ factory.use_global_ws_pipes(Arc<dyn Pipe<WsContext, WsHandlerResult>>)
 factory.use_global_ws_error_handler(Arc<dyn ErrorHandler<WsContext, WsMessage>>)
 ```
 
-Global error handlers stack with controller- and method-level handlers; the most specific is consulted first. Error observers are fire-and-forget — they see framework-generated errors (guard rejections, panics, missing routes) but do not shape responses.
+Global error handlers stack with controller- and method-level handlers; the most specific is consulted first. Error observers are fire-and-forget — they see every error entering the pipeline, user-handler errors and framework events alike, but do not shape responses.
 
 ```rust
 let mut factory = ToniFactory::new();
@@ -401,7 +401,7 @@ pub trait ErrorObserver: Send + Sync {
 }
 ```
 
-Fire-and-forget tap on framework-generated errors (guard rejections, panics, missing routes) across all transports. User-handler errors render directly through the transport and do not reach observers; log those in a `#[catch(MyError)]` handler.
+Fire-and-forget tap on every error entering the pipeline, across all transports — user-handler errors and framework events (guard rejections, panics, missing routes) alike. A wrapped domain error is exposed directly, so `error.downcast_ref::<MyError>()` works the way `#[catch(MyError)]` expects. Observers run before the error-handler chain, so they also see errors a handler later claims.
 
 ## Error system
 

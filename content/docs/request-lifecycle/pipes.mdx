@@ -3,7 +3,7 @@ title: Pipes
 description: Pipes transform and validate the request context right before the route handler runs.
 ---
 
-A pipe is a synchronous hook that runs after guards and interceptors, immediately before the handler. It receives the per-request context mutably and can attach data for the handler (via extensions) or stop the request by setting a response and aborting.
+A pipe is a synchronous hook that runs after guards and interceptors, immediately before the handler. It inspects the per-request context and may answer the request by returning `Some(response)`; `None` passes the request through. A pipe can also attach data for the handler via extensions.
 
 For parsing and validating request data, pipes are rarely the right tool in Toni — extractors and `Validated<T>` cover those cases at the type level. Pipes exist for genuinely cross-cutting transformations applied to many routes regardless of their body types.
 
@@ -16,12 +16,12 @@ This is the slot NestJS fills with `PipeTransform`. The big difference: NestJS l
 ```rust
 use toni::context::HandlerContext;
 
-pub trait Pipe<C: ?Sized + HandlerContext>: Send + Sync {
-    fn process(&self, data: &mut C);
+pub trait Pipe<C: ?Sized + HandlerContext, R>: Send + Sync {
+    fn process(&self, data: &C) -> Option<R>;
 }
 ```
 
-Import it from `toni::traits_helpers::Pipe`. `process` is **sync** — no async work inside a pipe. Like the other enhancer traits it is generic over the context: `Pipe<HttpContext>`, `Pipe<RpcContext>`, `Pipe<WsContext>`. gRPC methods run guards, interceptors, and error handlers, but not pipes.
+Import it from `toni::traits_helpers::Pipe`. `process` is **sync** — no async work inside a pipe. Like the other enhancer traits it is generic over the context and the transport's answer type `R`: `Pipe<HttpContext, HttpResponse>`, `Pipe<RpcContext, RpcHandlerResult>`, `Pipe<WsContext, WsHandlerResult>`. gRPC methods run guards, interceptors, and error handlers, but not pipes.
 
 ## Validation belongs to extractors
 
@@ -61,7 +61,7 @@ Type parsing works the same way: `Path<i32>` parses `"42"` into `42` and rejects
 
 ## A rejecting pipe
 
-A pipe stops a request by setting a response and calling `abort()`. Remaining pipes and the handler are skipped, and the response on the context is sent:
+A pipe stops a request by returning `Some(response)`. Remaining pipes and the handler are skipped, and the returned response is sent:
 
 ```rust
 use toni::context::{HandlerContext, HttpContext};
@@ -70,8 +70,8 @@ use toni::traits_helpers::Pipe;
 
 pub struct RequireValidHeaderPipe;
 
-impl Pipe<HttpContext> for RequireValidHeaderPipe {
-    fn process(&self, context: &mut HttpContext) {
+impl Pipe<HttpContext, HttpResponse> for RequireValidHeaderPipe {
+    fn process(&self, context: &HttpContext) -> Option<HttpResponse> {
         let is_invalid = context
             .request()
             .headers
@@ -84,9 +84,9 @@ impl Pipe<HttpContext> for RequireValidHeaderPipe {
             let mut response = HttpResponse::new();
             response.status = 400;
             response.body = Some(Body::text("Validation failed".to_string()));
-            context.set_response(response);
-            context.abort();
+            return Some(response);
         }
+        None
     }
 }
 ```
@@ -101,8 +101,8 @@ pub struct ClientRegion(pub String);
 
 pub struct RegionPipe;
 
-impl Pipe<HttpContext> for RegionPipe {
-    fn process(&self, context: &mut HttpContext) {
+impl Pipe<HttpContext, HttpResponse> for RegionPipe {
+    fn process(&self, context: &HttpContext) -> Option<HttpResponse> {
         let region = context
             .request()
             .headers
@@ -110,7 +110,8 @@ impl Pipe<HttpContext> for RegionPipe {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        context.extensions_mut().insert(ClientRegion(region));
+        context.extensions().insert(ClientRegion(region));
+        None
     }
 }
 ```
@@ -136,9 +137,10 @@ impl SanitizationPipe {
     }
 }
 
-impl Pipe<HttpContext> for SanitizationPipe {
-    fn process(&self, context: &mut HttpContext) {
+impl Pipe<HttpContext, HttpResponse> for SanitizationPipe {
+    fn process(&self, context: &HttpContext) -> Option<HttpResponse> {
         self.sanitizer.clean(context);
+        None
     }
 }
 ```
@@ -177,7 +179,7 @@ factory.use_global_http_pipes(Arc::new(RegionPipe));
 
 `use_global_rpc_pipes` and `use_global_ws_pipes` register for the other transports.
 
-Pipes run in scope order — global, controller, method — and within each scope in the order listed. An `abort()` in any pipe skips the rest. A panic inside a pipe is caught and routed through the error pipeline as a `PanicRecovered` event (see [Error Handling](/docs/request-lifecycle/error-handling)).
+Pipes run in scope order — global, controller, method — and within each scope in the order listed. A pipe that returns `Some` answers the request; later pipes and the handler are skipped. A panic inside a pipe is caught and routed through the error pipeline as a `PanicRecovered` event (see [Error Handling](/docs/request-lifecycle/error-handling)).
 
 ## Extractors vs pipes
 

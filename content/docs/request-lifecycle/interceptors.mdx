@@ -3,12 +3,12 @@ title: Interceptors
 description: Interceptors wrap route handlers — they run before and after, and can transform or short-circuit.
 ---
 
-An interceptor wraps a route handler. Code before `next.run(context).await` runs before the handler; code after it runs once the handler (and any inner interceptors) has set the response. Skipping the `next.run` call short-circuits the chain entirely — useful for caching, circuit breakers, and canned responses.
+An interceptor wraps a route handler and returns the answer. `next.run(context).await` yields whatever the handler (and any inner interceptors) produced; the interceptor's own return value is what goes out. Transform the returned value, replace it, or return one without calling `next.run` at all — the short-circuit for caching, circuit breakers, and canned responses.
 
-Like guards and pipes, interceptors are generic over the per-request context: `Interceptor<HttpContext>` runs on HTTP routes, `Interceptor<RpcContext>` on RPC patterns, `Interceptor<WsContext>` on WebSocket messages, `Interceptor<GrpcContext>` on gRPC methods.
+Like guards and pipes, interceptors are generic over the per-request context and the transport's answer type `R`: `Interceptor<HttpContext, HttpResponse>` runs on HTTP routes, `Interceptor<RpcContext, RpcHandlerResult>` on RPC patterns (`Result<Option<RpcData>, RpcError>`), `Interceptor<WsContext, WsHandlerResult>` on WebSocket messages (`Result<WsHandlerOutput, WsError>`), `Interceptor<GrpcContext, GrpcHandlerResult>` on gRPC methods (`Result<(), GrpcStatus>`).
 
 <Bridge>
-Toni interceptors map to NestJS's `NestInterceptor`. `intercept` receives the context and a `next`; calling `next.run(context).await` proceeds to the handler. Instead of RxJS operators on an observable, code placed after the `next.run` call is the response side.
+Toni interceptors map to NestJS's `NestInterceptor`. `intercept` receives the context and a `next`; calling `next.run(context).await` proceeds to the handler. Instead of RxJS operators on an observable, the value `next.run` returns is the response side — transform it and return it.
 </Bridge>
 
 ## The Interceptor trait
@@ -18,13 +18,13 @@ use toni::async_trait;
 use toni::context::HandlerContext;
 
 #[async_trait]
-pub trait InterceptorNext<C: ?Sized + HandlerContext>: Send {
-    async fn run(self: Box<Self>, context: &mut C);
+pub trait InterceptorNext<C: ?Sized + HandlerContext, R>: Send {
+    async fn run(self: Box<Self>, context: &C) -> R;
 }
 
 #[async_trait]
-pub trait Interceptor<C: ?Sized + HandlerContext>: Send + Sync {
-    async fn intercept(&self, context: &mut C, next: Box<dyn InterceptorNext<C>>);
+pub trait Interceptor<C: ?Sized + HandlerContext, R>: Send + Sync {
+    async fn intercept(&self, context: &C, next: Box<dyn InterceptorNext<C, R>>) -> R;
 }
 ```
 
@@ -37,36 +37,45 @@ use std::time::Instant;
 use toni::async_trait;
 use toni::context::HttpContext;
 use toni::traits_helpers::{Interceptor, InterceptorNext};
+use toni::HttpResponse;
 
 pub struct TimingInterceptor;
 
 #[async_trait]
-impl Interceptor<HttpContext> for TimingInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+impl Interceptor<HttpContext, HttpResponse> for TimingInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
         let start = Instant::now();
-        next.run(ctx).await;
+        let response = next.run(ctx).await;
         println!("request took {:?}", start.elapsed());
+        response
     }
 }
 ```
 
 ## Reading the request, inspecting the response
 
-On `HttpContext`, the request is available before `next.run` via `ctx.request()` (`&RequestPart` — method, URI, headers). After `next.run`, the response set by the handler is available via `ctx.response()`:
+On `HttpContext`, the request is available before `next.run` via `ctx.request()` (`&RequestPart` — method, URI, headers). The response the handler produced is what `next.run` returns:
 
 ```rust
 pub struct AuditInterceptor;
 
 #[async_trait]
-impl Interceptor<HttpContext> for AuditInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+impl Interceptor<HttpContext, HttpResponse> for AuditInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
         let method = ctx.request().method.clone();
         let uri = ctx.request().uri.clone();
 
-        next.run(ctx).await;
-
-        let status = ctx.response().map(|r| r.status).unwrap_or(0);
-        println!("{method} {uri} -> {status}");
+        let response = next.run(ctx).await;
+        println!("{method} {uri} -> {}", response.status);
+        response
     }
 }
 ```
@@ -75,7 +84,7 @@ impl Interceptor<HttpContext> for AuditInterceptor {
 
 ## Transforming the response
 
-`ctx.response_mut()` gives mutable access to the response after the handler ran; `ctx.set_response(...)` replaces it wholesale:
+The returned response is owned — mutate it or replace it before returning:
 
 ```rust
 use toni::HttpResponse;
@@ -83,24 +92,26 @@ use toni::HttpResponse;
 pub struct CacheHeaderInterceptor;
 
 #[async_trait]
-impl Interceptor<HttpContext> for CacheHeaderInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
-        next.run(ctx).await;
-
-        if let Some(response) = ctx.response_mut() {
-            if response.status == 200 {
-                response
-                    .headers
-                    .push(("Cache-Control".into(), "max-age=60".into()));
-            }
+impl Interceptor<HttpContext, HttpResponse> for CacheHeaderInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
+        let mut response = next.run(ctx).await;
+        if response.status == 200 {
+            response
+                .headers
+                .push(("Cache-Control".into(), "max-age=60".into()));
         }
+        response
     }
 }
 ```
 
 ## Short-circuiting
 
-Not calling `next.run` skips everything downstream — inner interceptors, pipes, and the handler. Set a response before returning so the client gets a reply:
+Returning without calling `next.run` skips everything downstream — inner interceptors, pipes, and the handler — and the interceptor's own value is the answer:
 
 ```rust
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,18 +123,20 @@ pub struct MaintenanceInterceptor {
 }
 
 #[async_trait]
-impl Interceptor<HttpContext> for MaintenanceInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+impl Interceptor<HttpContext, HttpResponse> for MaintenanceInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
         if self.enabled.load(Ordering::Relaxed) {
-            ctx.set_response(
-                HttpResponse::builder()
-                    .status(503)
-                    .json(json!({ "message": "Down for maintenance" }))
-                    .build(),
-            );
-            return; // handler is skipped
+            // handler is skipped
+            return HttpResponse::builder()
+                .status(503)
+                .json(json!({ "message": "Down for maintenance" }))
+                .build();
         }
-        next.run(ctx).await;
+        next.run(ctx).await
     }
 }
 ```
@@ -137,10 +150,14 @@ The context's typed extensions bag carries values between enhancers and handlers
 pub struct RequestId(pub String);
 
 #[async_trait]
-impl Interceptor<HttpContext> for RequestIdInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
-        ctx.extensions_mut().insert(RequestId(new_id()));
-        next.run(ctx).await;
+impl Interceptor<HttpContext, HttpResponse> for RequestIdInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
+        ctx.extensions().insert(RequestId(new_id()));
+        next.run(ctx).await
     }
 }
 ```
@@ -158,11 +175,16 @@ use toni::injectable;
 pub struct WsLoggingInterceptor;
 
 #[async_trait]
-impl Interceptor<WsContext> for WsLoggingInterceptor {
-    async fn intercept(&self, ctx: &mut WsContext, next: Box<dyn InterceptorNext<WsContext>>) {
+impl Interceptor<WsContext, WsHandlerResult> for WsLoggingInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &WsContext,
+        next: Box<dyn InterceptorNext<WsContext, WsHandlerResult>>,
+    ) -> WsHandlerResult {
         println!("client={} event={}", ctx.client().id, ctx.event());
-        next.run(ctx).await;
+        let result = next.run(ctx).await;
         println!("message processed");
+        result
     }
 }
 ```
@@ -200,7 +222,7 @@ impl UsersController {
 #[routes]
 impl ItemsController {
     #[use_interceptors(TimingInterceptor {})]  // only this route is timed
-    #[get("/:id")]
+    #[get("/{id}")]
     fn find_one(&self) -> Body { /* ... */ }
 }
 ```
@@ -216,7 +238,7 @@ let mut factory = ToniFactory::new();
 factory.use_global_http_interceptors(Arc::new(TimingInterceptor));
 ```
 
-`use_global_rpc_interceptors` and `use_global_ws_interceptors` register for the other transports.
+`use_global_rpc_interceptors` and `use_global_ws_interceptors` register for the other transports; each takes an `Arc<dyn Interceptor<C, R>>` for the matching context and answer type.
 
 ## Execution order
 

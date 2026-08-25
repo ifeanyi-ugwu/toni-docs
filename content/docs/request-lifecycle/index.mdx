@@ -26,7 +26,7 @@ Guards (authorization check — false blocks with 403)
 Interceptors, before next.run (can short-circuit)
     │
     ▼
-Pipes (sync — transform context, or abort with a response)
+Pipes (sync — attach data, or answer with `Some(response)`)
     │
     ▼
 Route handler (your fn)
@@ -48,7 +48,7 @@ Response sent
 | Middleware | Global: before routing. Route-scoped: after routing | Yes (return a response or `Err`) | Yes (after `next.run()`) |
 | Guards | Before interceptors and handler | Yes (return `false` → 403) | No |
 | Interceptors | Around handler | Yes (skip calling `next.run`) | Yes (both sides) |
-| Pipes | After interceptors, before handler | Yes (`set_response` + `abort`) | Only what they set |
+| Pipes | After interceptors, before handler | Yes (return `Some(response)`) | Only what they return |
 | Error handlers | On errors and framework events | — | Produce the response |
 
 ## Contexts and transports

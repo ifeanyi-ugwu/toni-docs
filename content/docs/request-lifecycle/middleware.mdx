@@ -112,7 +112,7 @@ use toni::ToniFactory;
 let mut factory = ToniFactory::new();
 factory.use_global_middleware(Arc::new(LoggerMiddleware));
 
-let mut app = factory.create_with(AppModule).await;
+let mut app = factory.create_with(AppModule).await?;
 app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))?;
 app.start().await?;
 ```
@@ -147,6 +147,8 @@ Route patterns support globs and HTTP-method filtering:
 | `"/api/*"` | Everything under `/api/`, all methods |
 | `("/users", "POST")` | Only POST to `/users` |
 | `("/api/*", ["GET", "POST"])` | Only GET and POST under `/api/` |
+
+Patterns are trailing-slash-normalized to match registered routes, which never carry one — `for_route("/app/")` matches `/app`.
 
 `apply` starts a configuration; `for_routes(vec![...])` finalizes it. `apply_also` groups several middleware onto the same routes; `for_route` / `exclude_route` add single patterns and chain, ending with `.done()` or a `for_routes` call.
 

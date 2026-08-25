@@ -1,53 +1,42 @@
 ---
 title: Custom Extractors
-description: Implement FromRequestParts or FromRequest to extract any data from incoming requests with full type safety.
+description: Implement FromContext to extract any data from incoming requests with full type safety.
 ---
 
-When the built-in extractors don't cover your case, implement one of the two extraction traits on your own type. The framework calls it automatically whenever the type appears in a handler signature.
+When the built-in extractors don't cover your case, implement the extraction trait on your own type. The framework calls it automatically whenever the type appears in a handler signature.
 
 <Bridge>
-Custom extractors are Toni's equivalent of NestJS's `createParamDecorator()`. Where NestJS resolves `@CurrentUser()` at runtime through reflection, Toni resolves `user: CurrentUser` at compile time through a trait impl — same ergonomics, no hidden magic.
+Custom extractors are Toni's equivalent of NestJS's `createParamDecorator()`. Where NestJS resolves `@CurrentUser()` at runtime through reflection, Toni resolves `user: CurrentUser` through a trait impl — same ergonomics, no hidden magic.
 </Bridge>
 
-## Two traits
+## One trait
+
+Every extractor — built-in or custom, on any transport — implements `FromContext`:
 
 ```rust
-/// Sync, reads metadata only (headers, URI, extensions, path/query params).
-/// Safe to use several per handler.
-pub trait FromRequestParts: Sized {
-    type Error: std::fmt::Display;
+pub trait FromContext<C: HandlerContext>: Sized {
+    type Error: fmt::Display;
 
-    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error>;
-}
-
-/// Async, consumes the owned request (and potentially its body).
-/// At most one body-consuming extractor per handler.
-pub trait FromRequest: Sized {
-    type Error: std::fmt::Display + Send + Sync + 'static;
-
-    fn from_request(
-        req: HttpRequest,
-    ) -> impl std::future::Future<Output = Result<Self, Self::Error>> + Send;
+    fn extract(ctx: &C) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 ```
 
-Pick by what you read:
+`C` is the context the extractor reads from — `HttpContext` for HTTP handlers. An extractor names the contexts it is valid for by which impls it carries, so reaching for an HTTP extractor in a WebSocket handler is a trait-bound error, not a runtime surprise.
 
-- **Headers, cookies, path params, query params, extensions** → `FromRequestParts`. It receives `&RequestPart` (a borrow of the request metadata) and never touches the body.
-- **The request body** → `FromRequest`. It receives the owned `HttpRequest` and may drain the body — which is why only one such extractor fits per handler.
+On HTTP there are two shapes, and which one you write decides whether the extractor touches the body:
 
-Every `FromRequestParts` type gets `FromRequest` for free via a blanket impl that discards the body, so both kinds mix freely in handler signatures.
+- **Metadata** — headers, path params, query params, extensions. Borrow the request parts with `ctx.request()`, which returns `&RequestPart` and leaves the body alone. Any number of these can run on one handler.
+- **The body** — call `take_body::<Self>(ctx)?`, which yields the owned `HttpRequest` exactly once. A second body read fails with `BodyAlreadyRead`.
 
 When an extractor returns `Err`, the handler never runs and the client receives an inline 400: `{"error": "Extraction failed", "details": "<your Error's Display output>"}`. Wrapping the parameter in `Option<T>` turns that failure into `None` instead.
 
 ## Example: Bearer token
 
-A header extractor — metadata only, so `FromRequestParts`:
+A header extractor — metadata only, so it borrows `ctx.request()`:
 
 ```rust
 use std::fmt;
-use toni::FromRequestParts;
-use toni::http_helpers::RequestPart;
+use toni::{FromContext, HttpContext};
 
 #[derive(Debug, Clone)]
 pub struct BearerToken(pub String);
@@ -67,11 +56,12 @@ impl fmt::Display for TokenError {
     }
 }
 
-impl FromRequestParts for BearerToken {
+impl FromContext<HttpContext> for BearerToken {
     type Error = TokenError;
 
-    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
-        let auth_header = parts
+    async fn extract(ctx: &HttpContext) -> Result<Self, Self::Error> {
+        let auth_header = ctx
+            .request()
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
@@ -93,48 +83,18 @@ fn get_token(&self, BearerToken(token): BearerToken) -> Body {
 }
 ```
 
-`parts.headers` is an `http::HeaderMap` — values are `HeaderValue`, so read them with `.get(name).and_then(|v| v.to_str().ok())`.
+`ctx.request().headers` is an `http::HeaderMap` — values are `HeaderValue`, so read them with `.get(name).and_then(|v| v.to_str().ok())`.
 
-## Example: Client IP
-
-Same pattern, different headers — respects proxies via `X-Forwarded-For`:
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ClientIp(pub String);
-
-impl FromRequestParts for ClientIp {
-    type Error = String;
-
-    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
-        if let Some(forwarded) = parts
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(ip) = forwarded.split(',').next() {
-                return Ok(ClientIp(ip.trim().to_string()));
-            }
-        }
-
-        if let Some(real_ip) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            return Ok(ClientIp(real_ip.to_string()));
-        }
-
-        Err("No IP address headers found".to_string())
-    }
-}
-```
+A metadata extractor's `extract` is `async` with nothing to await — the trait has one shape for every extractor, and only body extractors actually await anything.
 
 ## Composing extractors
 
-A custom extractor can call other extractors. Built-ins like `Query` implement `FromRequestParts`, so a wrapper stays sync and body-free:
+A custom extractor can call other extractors on the same context. Built-ins like `Query` are metadata extractors, so a wrapper around them stays body-free:
 
 ```rust
 use serde::Deserialize;
-use toni::FromRequestParts;
+use toni::{FromContext, HttpContext};
 use toni::extractors::Query;
-use toni::http_helpers::RequestPart;
 
 pub struct Pagination {
     pub page: u32,
@@ -142,17 +102,18 @@ pub struct Pagination {
     pub offset: u32,
 }
 
-impl FromRequestParts for Pagination {
+impl FromContext<HttpContext> for Pagination {
     type Error = String;
 
-    fn from_request_parts(parts: &RequestPart) -> Result<Self, Self::Error> {
+    async fn extract(ctx: &HttpContext) -> Result<Self, Self::Error> {
         #[derive(Deserialize, Default)]
         struct RawPagination {
             page: Option<u32>,
             per_page: Option<u32>,
         }
 
-        let Query(raw) = Query::<RawPagination>::from_request_parts(parts)
+        let Query(raw) = Query::<RawPagination>::extract(ctx)
+            .await
             .map_err(|e| e.to_string())?;
 
         let page = raw.page.unwrap_or(1).max(1);
@@ -174,39 +135,62 @@ fn list(&self, pagination: Pagination) -> Body {
 }
 ```
 
-The same composition builds aggregate extractors — an `AuthContext` that combines a `CurrentUser`, `ClientIp`, and user agent into one parameter is three `from_request_parts` calls on the same `parts`.
+The same composition builds aggregate extractors — an `AuthContext` combining a `BearerToken`, a client IP, and a user agent into one parameter is three `extract` calls on the same context.
 
-## Body-consuming extractors
+## Body extractors
 
-Implement `FromRequest` when you need the body. Decompose the request with `into_parts()`, then collect or stream the body:
+An extractor that reads the body starts with `take_body`, and its error type wraps your own in `BodyExtractionError` so the already-read case has somewhere to go:
 
 ```rust
-use toni::FromRequest;
-use toni::http_helpers::HttpRequest;
+use std::fmt;
+use serde::de::DeserializeOwned;
+use toni::{FromContext, HttpContext, take_body};
+use toni::extractors::BodyExtractionError;
 
 /// Deserializes the body as YAML (via the `serde_yaml` crate).
 pub struct Yaml<T>(pub T);
 
-impl<T: serde::de::DeserializeOwned + Send> FromRequest for Yaml<T> {
-    type Error = String;
+#[derive(Debug)]
+pub struct YamlError(String);
 
-    async fn from_request(req: HttpRequest) -> Result<Self, Self::Error> {
+impl fmt::Display for YamlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<T: DeserializeOwned + Send> FromContext<HttpContext> for Yaml<T> {
+    type Error = BodyExtractionError<YamlError>;
+
+    async fn extract(ctx: &HttpContext) -> Result<Self, Self::Error> {
+        let req = take_body::<Self>(ctx)?;
+
         let (_parts, body) = req.into_parts();
-        let bytes = body
-            .collect()
-            .await
-            .map_err(|e| format!("Failed to read body: {e}"))?;
-        let value = serde_yaml::from_slice(&bytes).map_err(|e| format!("Invalid YAML: {e}"))?;
+        let bytes = body.collect().await.map_err(|e| {
+            BodyExtractionError::Extract(YamlError(format!("Failed to read body: {e}")))
+        })?;
+        let value = serde_yaml::from_slice(&bytes).map_err(|e| {
+            BodyExtractionError::Extract(YamlError(format!("Invalid YAML: {e}")))
+        })?;
+
         Ok(Yaml(value))
     }
 }
 ```
 
-A `FromRequest` extractor that reads the body counts as the handler's single body consumer, exactly like `Json` or `Bytes`.
+`take_body::<Self>(ctx)?` yields the owned `HttpRequest` — parts plus body — exactly once per request. When something earlier in the handler already took it, `take_body` returns a `BodyAlreadyRead` naming your extractor, which `?` lifts into `BodyExtractionError::AlreadyRead`. Your own failures go through `BodyExtractionError::Extract`.
+
+### The one-body rule is a runtime check here
+
+For the built-in body extractors, a handler with two body readers is a compile error — the controller macro recognizes them by type name and rejects the signature. It cannot recognize your types: custom extractors are exempt from that check, several of them may share a handler, and nothing at compile time records whether one of them reads the body.
+
+So for custom extractors the rule holds at runtime instead. A custom body extractor beside `Json<T>` — or beside another custom body extractor — compiles, and the second one to run gets `BodyAlreadyRead`: the client receives the standard 400, and the error is also logged at `error` level naming the extractor, because the request was well-formed and the fault is the handler's signature.
+
+By the same token, a metadata extractor's body-freedom is a convention, not a compile-time guarantee — nothing stops an impl from calling `take_body` while presenting as a header reader. Keep body reads out of extractors that claim to be metadata.
 
 ## Validation support
 
-`Validated<E>` works with any extractor that implements `ValidatableExtractor`, which exposes the inner value for the `validator` crate:
+`Validated<E>` works with any extractor `E: FromContext<HttpContext> + ValidatableExtractor`. The second trait exposes the inner value for the `validator` crate:
 
 ```rust
 pub trait ValidatableExtractor {
@@ -234,3 +218,7 @@ impl<T: validator::Validate> ValidatableExtractor for Yaml<T> {
 ```
 
 On failure, `Validated` produces `ValidationError` (exported alongside `ValidatableExtractor` from `toni::extractors`): `ExtractionError` when the inner extractor failed, `ValidationFailed` carrying the `validator::ValidationErrors` when a rule was violated. Both surface as the standard 400 extraction response.
+
+## Other transports
+
+`FromContext` is not HTTP-specific. A WebSocket or RPC extractor is the same trait implemented against `WsContext` or `RpcContext`, and an impl against one context makes the type a valid parameter for that transport's handlers only — using it anywhere else is a trait-bound error.

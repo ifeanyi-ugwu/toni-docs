@@ -3,14 +3,16 @@ title: Built-in Extractors
 description: Type-safe request data extraction — path params, query strings, JSON body, raw bytes, streams, and validated inputs.
 ---
 
-Extractors pull typed data out of the HTTP request. They appear as handler parameters, and misuse is a compile-time error.
+Extractors pull typed data out of the HTTP request. They appear as handler parameters, and every one of them is read through a single trait — [`FromContext`](/docs/extractors/custom) — against the handler's context.
 
-Two traits back them:
+Extractors come in two shapes:
 
-- **`FromRequestParts`** — sync, reads request metadata only (headers, path params, query params). `Path` and `Query` implement it. Safe to use several per handler.
-- **`FromRequest`** — async, consumes the owned request. `Json`, `Body`, `Bytes`, `BodyStream`, and `Multipart` implement it.
+- **Metadata extractors** borrow the request parts (headers, path params, query params, extensions) and leave the body alone. `Path`, `Query`, `Request`, and `Extensions` work this way. Any number of them can sit on one handler.
+- **Body extractors** take the request body, which is single-use — it may be a stream. `Json`, `Body`, `Bytes`, `BodyStream`, and `Multipart` work this way.
 
-**Only one body-consuming extractor may appear per handler** — the body is a single-use stream. Any number of `FromRequestParts` extractors can sit alongside it.
+**Only one body extractor may appear per handler.** The rule is enforced twice: the controller macro rejects a second recognized body extractor at compile time, naming both offending parameters; a custom body extractor the macro cannot recognize fails at runtime instead, with a `BodyAlreadyRead` error naming itself.
+
+Attribute markers (`#[body]`, `#[param]`, `#[query]`) offer a NestJS-style shorthand over these extractors — see [Attribute Markers](/docs/extractors/markers).
 
 <Bridge>
 In NestJS you use parameter decorators: `@Param()`, `@Query()`, `@Body()`. In Toni, extractors are function parameter types that pattern-match in the handler signature. The result is the same — typed access to request data — but the Rust version is checked at compile time.
@@ -159,6 +161,8 @@ async fn upload(&self, stream: BodyStream) -> Body {
 
 `into_stream()` yields `Result<bytes::Bytes, _>` chunks. `collect().await` buffers the whole body into a single `Bytes` instead — use it when a code path turns out not to need streaming.
 
+Extraction itself cannot fail on `BodyStream`'s own terms — its error type is `BodyExtractionError<Infallible>`, so the only possible failure is finding the body already read by another extractor. An adapter that buffers request bodies still yields a `BodyStream`; the buffered bytes are wrapped as a single-chunk stream rather than rejected.
+
 ## Multipart — form-data and file uploads
 
 Parses `multipart/form-data` bodies field by field. See [Multipart / File Upload](/docs/extractors/multipart).
@@ -177,6 +181,40 @@ async fn raw(&self, req: HttpRequest) -> HttpResponse {
 }
 ```
 
+## Request — request metadata without the body
+
+A `Request` parameter is a read-only view of the request metadata: method, URI, headers, path params, query params, and extensions. It never touches the body, so it sits beside any body extractor, and extraction is infallible.
+
+```rust
+use toni::Request;
+
+#[get("/info")]
+fn info(&self, req: Request) -> Body {
+    let ua = req.header("user-agent").unwrap_or("unknown");
+    Body::text(format!("{} {} from {}", req.method(), req.uri(), ua))
+}
+```
+
+`Request` is also a built-in request-scoped provider — a controller can `#[inject]` it as a field instead of taking it per handler.
+
+## Extensions — the per-message bag
+
+`Extensions` is the typed key-value bag shared by everything handling the current message — a guard inserts a value, the handler reads it back by type. Extraction is infallible: a message with nothing attached yields an empty bag.
+
+```rust
+use toni::context::Extensions;
+
+#[get("/me")]
+fn me(&self, ext: Extensions) -> Body {
+    match ext.get::<AuthUser>() {
+        Some(user) => Body::text(format!("Hello, {}", user.name)),
+        None => Body::text("anonymous"),
+    }
+}
+```
+
+Unlike the other extractors on this page, `Extensions` is not HTTP-specific — its one impl is generic over every handler context, so the same parameter means the same thing in a WebSocket or RPC handler.
+
 ## Option — optional extraction
 
 Wrapping any extractor in `Option<T>` turns extraction failure into `None` instead of a 400 response:
@@ -192,6 +230,8 @@ fn feed(&self, user: Option<CurrentUser>) -> Body {
 ```
 
 `CurrentUser` here is a [custom extractor](/docs/extractors/custom); `Option` wraps built-ins the same way. Several `Option`-wrapped extractors can coexist — useful for endpoints that accept JWT, API key, or anonymous access.
+
+An `Option`-wrapped body extractor still reads the body, so it counts as the handler's body reader — `Option<Json<T>>` beside `Bytes` is rejected at compile time like any other pair.
 
 ## Validated — extraction + validation
 
@@ -233,6 +273,20 @@ Validated<Query<Dto>>   // validate query params
 Validated<Body<Dto>>    // validate content-type-aware body
 ```
 
+`Validated<E>` reads exactly what `E` reads. `Validated<Query<T>>` is a metadata extractor and leaves the body alone, so it can sit beside a body extractor on the same handler; `Validated<Json<T>>` counts as that handler's body reader:
+
+```rust
+#[post("/search")]
+fn search(
+    &self,
+    Validated(Query(params)): Validated<Query<SearchQuery>>,
+    Json(dto): Json<CreateUserDto>,
+) -> Body {
+    // the query is validated; Json still finds the body
+    Body::text(format!("q={} name={}", params.q, dto.name))
+}
+```
+
 A validation failure returns the same 400 shape as any other extraction failure, with the rule violations in `details`. To make a custom extractor validatable, see [Custom Extractors](/docs/extractors/custom#validation-support).
 
 ## Extraction failures
@@ -272,4 +326,4 @@ fn update(
 
 ## Custom extractors
 
-Implement `FromRequestParts` (metadata) or `FromRequest` (body) to create your own. See [Custom Extractors](/docs/extractors/custom).
+Implement `FromContext` to create your own — a metadata extractor borrows `ctx.request()`, a body extractor calls `take_body`. See [Custom Extractors](/docs/extractors/custom).

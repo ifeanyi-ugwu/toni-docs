@@ -5,7 +5,7 @@ description: Handle multipart/form-data requests and file uploads with the Multi
 
 The `Multipart` extractor parses `multipart/form-data` request bodies. It yields fields one at a time — each field can be a plain text value or a file upload.
 
-`Multipart` is a body-consuming extractor. Only one body-consuming extractor may appear per handler.
+`Multipart` is a body-consuming extractor. Only one body-consuming extractor may appear per handler. Its extraction error is `BodyExtractionError<MultipartError>`, so a body already consumed by another extractor surfaces as the `AlreadyRead` variant rather than a `MultipartError`.
 
 ## Basic usage
 

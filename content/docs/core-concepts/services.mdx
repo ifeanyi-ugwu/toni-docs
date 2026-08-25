@@ -122,15 +122,17 @@ Providers are singletons by default — one instance per module scope. `#[inject
 
 ```rust
 #[injectable]                          // singleton (default): one shared instance
-#[injectable(scope = "request")]       // one instance per HTTP request
+#[injectable(scope = "request")]       // one instance per execution
 #[injectable(scope = "transient")]     // fresh instance per resolution
 ```
 
-A singleton controller that depends on a request-scoped provider is elevated to request scope automatically. See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
+An execution is one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution built with `ProviderContext::standalone()`. Within an execution the instance is shared by clone — one construction, cloned into every injection site — so mutable state that must be visible across sites belongs behind an `Arc<Mutex<_>>`. Request-scoped providers cannot carry lifecycle hooks; declaring one is a compile error.
+
+A singleton dispatch target — an HTTP controller, an RPC controller, or a gRPC service — that depends on a request-scoped provider is elevated to request scope automatically, and a warning is logged when it happens. See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
 
 ## Implementing enhancer traits
 
-An enhancer is a provider that implements the role trait — the trait impl *is* the declaration. There are no marker attributes: declare `#[injectable]`, implement `Guard<HttpContext>` (or `Interceptor`, `Pipe`, `ErrorHandler`, `Middleware`), register in `providers`, and apply with `#[use_guards]`:
+An enhancer is a provider that implements the role trait — the trait impl *is* the declaration. There are no marker attributes: declare `#[injectable]`, implement `Guard<HttpContext>` (or `Interceptor`, `Pipe`, `ErrorHandler`, `Middleware`), register in `providers`, and apply with `#[use_guards]`. `Interceptor` and `ErrorHandler` also carry the transport's answer type — `Interceptor<HttpContext, HttpResponse>` for HTTP:
 
 ```rust
 use toni::{async_trait, injectable, context::HttpContext, traits_helpers::Guard};
@@ -143,7 +145,7 @@ pub struct AdminGuard {
 
 #[async_trait]
 impl Guard<HttpContext> for AdminGuard {
-    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
         ctx.request().headers.get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))

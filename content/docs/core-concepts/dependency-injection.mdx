@@ -21,7 +21,7 @@ When `ToniFactory::create` runs:
 4. The graph is topologically sorted — providers with no dependencies are instantiated first
 5. Each subsequent provider receives already-instantiated dependencies
 
-Any failure in this phase — a missing provider, a circular dependency — is logged as a critical initialization error and the process exits with status 1. There's no runtime failure.
+Any failure in this phase — a missing provider, a circular dependency — comes back as `Err(StartupError::Setup)` from `create`. There's no runtime failure.
 
 ## Provider tokens
 
@@ -65,7 +65,7 @@ This scoping is enforced at startup. Attempting to inject a provider that isn't 
 After the application is created, you can pull instances directly from the container. This is useful for scripting, CLI tools, and testing.
 
 ```rust
-let app = ToniFactory::create(AppModule).await;
+let app = ToniFactory::create(AppModule).await?;
 
 // Get by type, searching all modules
 let users_service = app.get::<UsersService>().await?;
@@ -89,7 +89,7 @@ use toni::ToniFactory;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut ctx = ToniFactory::create_application_context(AppModule).await;
+    let mut ctx = ToniFactory::create_application_context(AppModule).await?;
 
     // Resolve services normally
     let users_service = ctx.get::<UsersService>().await?;
@@ -105,15 +105,55 @@ async fn main() -> anyhow::Result<()> {
 
 `create_application_context` initializes the full DI container and runs all lifecycle hooks, but doesn't start an HTTP server. `close()` returns `()` — it runs the shutdown hooks unconditionally.
 
-`get` refuses request-scoped providers, since there is no active request. To exercise a request-scoped or transient provider outside a handler, `resolve` builds it against a synthetic request:
+### Resolving request-scoped providers in an execution
+
+`get` refuses request-scoped providers, since there is no active execution — the error names the provider and points at `resolve` and `ProviderContext::standalone()`. To exercise one outside a handler, build a transportless execution and resolve against it:
 
 ```rust
-let parts = http::Request::builder().body(()).unwrap().into_parts().0;
-let service = ctx.resolve::<RequestScopedService>(&parts).await?;
+use toni::ProviderContext;
+
+let execution = ProviderContext::standalone();
+let service = ctx.resolve::<RequestScopedService>(&execution).await?;
 
 // or by custom token
-let service = ctx.resolve_by_token::<RequestScopedService>("TOKEN", &parts).await?;
+let service = ctx.resolve_by_token::<RequestScopedService>("TOKEN", &execution).await?;
 ```
+
+Two resolutions against the same execution share one instance; two executions build two. The execution lasts as long as the handle — dropping it ends the execution, and with it the instances built into it.
+
+## Executions
+
+Request scope is measured in **executions**: one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution built with `ProviderContext::standalone()`. Within an execution, the `ExecutionCache` guarantees one *construction* per request-scoped provider — every injection site receives a clone of that one build, so state that must be visible across sites has to live behind a shared handle (`Arc<Mutex<_>>`); mutating a plain field mutates only that site's copy. `resolve` takes the execution on `ToniApplication`, `ToniApplicationContext`, and `ModuleRef` alike, so a service holding a `ModuleRef` can reach request-scoped providers too.
+
+## Request data in the DI graph
+
+`Extension<T>` is how a request's data enters the injection tree. A guard attaches a value; a request-scoped provider anywhere below the controller declares it, instead of having it threaded down through every signature:
+
+```rust
+#[injectable(scope = "request")]
+pub struct AuditLog {
+    #[inject]
+    user: Extension<CurrentUser>,
+}
+
+impl AuditLog {
+    pub fn who(&self) -> Option<String> {
+        self.user.get().map(|u| u.name)
+    }
+}
+```
+
+Register one `Extension` view per payload type, alongside any other provider:
+
+```rust
+#[module(
+    controllers: [OrderController],
+    providers: [Extension::<CurrentUser>, AuthGuard, AuditLog],
+)]
+impl OrderModule {}
+```
+
+The guard writes through the same view (`self.user.set(CurrentUser { ... })`) or through `ctx.extensions().insert(...)`. `Extensions` itself — the whole bag — injects with no registration. Both are request-scoped and refuse resolution outside an execution.
 
 ## How instances are built
 
@@ -135,7 +175,7 @@ Tagging a constructor with `#[new]` switches to constructor injection: the conta
 
 ## Circular dependencies
 
-Providers resolve by topological sort, one module at a time. A cycle within a single module — `ServiceA` injects `ServiceB`, `ServiceB` injects `ServiceA`, both declared in the same module — is caught during the sort and aborts startup with status 1:
+Providers resolve by topological sort, one module at a time. A cycle within a single module — `ServiceA` injects `ServiceB`, `ServiceB` injects `ServiceA`, both declared in the same module — is caught during the sort and returned as `Err(StartupError::Setup)` from `create`:
 
 ```
 Circular dependency detected for provider: my_app::services::ServiceA

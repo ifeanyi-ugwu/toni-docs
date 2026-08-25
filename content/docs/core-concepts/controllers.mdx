@@ -31,7 +31,14 @@ The declaration has two halves:
 - `#[controller("/prefix")]` goes on the **struct**. It handles dependency injection (`#[inject]` fields), the route prefix, and scope. It is complete on its own — a controller with no `#[routes]` impl is valid and registers zero routes.
 - `#[routes]` goes on the **impl**. It scans the `#[get]`/`#[post]`/… methods and turns them into routes, joined with the struct's prefix.
 
-All method paths are relative to the prefix: `#[get("/")]` matches `GET /cats`, `#[get("/:id")]` matches `GET /cats/:id`.
+All method paths are relative to the prefix: `#[get("/")]` matches `GET /cats`, `#[get("/{id}")]` matches `GET /cats/{id}`.
+
+Path syntax, in brief:
+
+- `{param}` is the canonical parameter syntax on every adapter.
+- Express-style `:param` is a compile error: ``route path segment `:id` uses `:param` syntax; toni's parameter syntax is `{id}` ``.
+- A colon later in a segment is a legal literal character: `/users/{id}:activate` works.
+- Trailing slashes are insignificant — `#[get("/x/")]` declares the same route as `#[get("/x")]`, and two routes differing only by a trailing slash are refused as duplicates at bind.
 
 ## Route handlers
 
@@ -47,16 +54,16 @@ impl ItemsController {
     #[get("/")]          // GET    /items
     fn find_all(&self) -> Body { /* ... */ }
 
-    #[get("/:id")]       // GET    /items/:id
+    #[get("/{id}")]      // GET    /items/{id}
     fn find_one(&self) -> Body { /* ... */ }
 
     #[post("/")]         // POST   /items
     fn create(&self) -> Body { /* ... */ }
 
-    #[put("/:id")]       // PUT    /items/:id
+    #[put("/{id}")]      // PUT    /items/{id}
     fn update(&self) -> Body { /* ... */ }
 
-    #[delete("/:id")]    // DELETE /items/:id
+    #[delete("/{id}")]   // DELETE /items/{id}
     fn remove(&self) -> Body { /* ... */ }
 }
 ```
@@ -86,7 +93,7 @@ struct CreateItemDto {
 
 #[routes]
 impl ItemsController {
-    #[get("/:id")]
+    #[get("/{id}")]
     fn find_one(&self, Path(id): Path<u32>) -> Result<Body, HttpError> {
         // id is a u32, parsed from the URL
         let item = self.service.find(id)
@@ -194,7 +201,7 @@ pub struct AuthGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
         ctx.request().headers.contains_key("x-auth-token")
     }
 }
@@ -202,7 +209,7 @@ impl Guard<HttpContext> for AuthGuard {
 
 Controller-level guards run for every route; method-level guards run in addition, after them. See [Guards](/docs/request-lifecycle/guards) for the full model. The same placement rules apply to `#[use_interceptors]`, `#[use_pipes]`, and `#[use_error_handlers]`.
 
-## Route metadata
+## Metadata
 
 Attach metadata to routes with `#[set_metadata(...)]`; guards and interceptors read it back:
 
@@ -217,21 +224,21 @@ impl PostsController {
     #[set_metadata(Roles(&["user", "admin"]))]
     fn find_all(&self) -> Body { /* ... */ }
 
-    #[delete("/:id")]
+    #[delete("/{id}")]
     #[set_metadata(Roles(&["admin"]))]
     fn remove(&self) -> Body { /* ... */ }
 }
 ```
 
-Inside a guard, metadata comes from the context's `route_metadata()`:
+Inside a guard, metadata comes from the context's `metadata()`:
 
 ```rust
 use toni::{async_trait, context::{HandlerContext, HttpContext}, traits_helpers::Guard};
 
 #[async_trait]
 impl Guard<HttpContext> for RolesGuard {
-    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
-        let Some(Roles(required)) = ctx.route_metadata().and_then(|m| m.get::<Roles>()) else {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
+        let Some(Roles(required)) = ctx.metadata().and_then(|m| m.get::<Roles>()) else {
             return true; // no roles required
         };
         let role = ctx.request().headers.get("x-user-role")
@@ -243,6 +250,8 @@ impl Guard<HttpContext> for RolesGuard {
 ```
 
 Any `Clone + Send + Sync + 'static` type works as metadata, and multiple `#[set_metadata]` attributes can stack on one route.
+
+`#[set_metadata]` also sits on the `#[routes]` impl block, where its entries apply to every handler below. A handler declaring the same type as its impl block overrides that entry and keeps the rest — a block-level `Roles(&["user"])` with a handler-level `Roles(&["admin"])` means the handler requires `admin`, while a block-level `RateLimit` it never mentions still applies. `get::<T>()` returns the winning (most specific) declaration; `get_all::<T>() -> &[T]` returns every declaration of `T`, least-specific first, for types whose declarations accumulate rather than replace.
 
 ## Controller scope
 

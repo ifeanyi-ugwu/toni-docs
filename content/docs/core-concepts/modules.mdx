@@ -5,7 +5,7 @@ description: The organizational unit of a Toni application — how modules group
 
 Modules are the primary organizational unit in Toni. Each module is a struct annotated with `#[module]` that declares:
 
-- **`controllers`** — the HTTP route handlers owned by this module
+- **`controllers`** — the dispatch targets owned by this module: HTTP controllers, RPC controllers, gRPC services
 - **`providers`** — the services and values managed by this module's DI scope
 - **`imports`** — other modules whose exported providers this module needs
 - **`exports`** — the providers this module makes available to importing modules
@@ -35,6 +35,16 @@ pub struct UsersModule;
 ```
 
 The `#[module]` macro transforms this struct into a full module definition. You don't write methods on the struct — the macro generates everything needed for the DI scanner.
+
+`controllers:` takes every dispatch target, not just HTTP: `#[rpc_controller]` and `#[grpc_service]` types are declared there the same way, while WebSocket gateways stay in `providers:`.
+
+```rust
+#[module(
+    controllers: [UsersController, UsersRpcController, UsersGrpcService],
+    providers: [UsersService, ChatGateway],
+)]
+pub struct UsersModule;
+```
 
 ## Imports and exports
 
@@ -77,7 +87,7 @@ pub struct AppModule;
 // main.rs
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await?;
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))?;
     app.start().await?;
     Ok(())

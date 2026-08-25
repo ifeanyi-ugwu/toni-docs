@@ -53,7 +53,7 @@ mod app;
 async fn main() {
     let mut app = ToniFactory::new()
         .create_with(AppModule)
-        .await;
+        .await.unwrap();
 
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000))
         .unwrap();
@@ -197,7 +197,7 @@ Run the application and restart it whenever a source file changes.
 toni dev
 ```
 
-Run it from the project root. On start it runs `cargo run`; on every save of a `.rs` or `.toml` file it rebuilds and restarts the process. Paths in `.gitignore` (and `target/`) are excluded from watching. Ctrl-C stops the watcher and the application.
+Run it from the project root. On start it runs `cargo run`; on every save of a `.rs` or `.toml` file it rebuilds and restarts the process. Paths in `.gitignore` (plus `target/` and `.git/`) are excluded from watching. Ctrl-C stops the watcher and the application.
 
 ```
 [toni dev] watching /path/to/my_api — running `cargo run` (Ctrl-C to stop)
@@ -242,6 +242,8 @@ Flags outside that list go through `--cargo-arg`, one argument per occurrence:
 ```bash
 toni dev --cargo-arg --offline --cargo-arg --timings
 ```
+
+The cargo command is assembled in a fixed order — `run`, `--release`, the target selector (`--package`/`--bin`/`--example`), `--features`, `--all-features`, `--no-default-features`, the `--cargo-arg` values in the order given, then `--` and the application arguments — so the command printed at startup is predictable.
 
 ### Surviving the rebuild gap
 

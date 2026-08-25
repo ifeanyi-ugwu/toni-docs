@@ -103,6 +103,7 @@ Infrastructure that spans features — guards, interceptors, pipes, common types
 
 ```rust
 // common/logging_interceptor.rs
+use toni::HttpResponse;
 use toni::async_trait;
 use toni::context::HttpContext;
 use toni::traits_helpers::{Interceptor, InterceptorNext};
@@ -110,11 +111,15 @@ use toni::traits_helpers::{Interceptor, InterceptorNext};
 pub struct LoggingInterceptor;
 
 #[async_trait]
-impl Interceptor<HttpContext> for LoggingInterceptor {
-    async fn intercept(&self, ctx: &mut HttpContext, next: Box<dyn InterceptorNext<HttpContext>>) {
+impl Interceptor<HttpContext, HttpResponse> for LoggingInterceptor {
+    async fn intercept(
+        &self,
+        ctx: &HttpContext,
+        next: Box<dyn InterceptorNext<HttpContext, HttpResponse>>,
+    ) -> HttpResponse {
         let req = ctx.request();
         println!("-> {} {}", req.method, req.uri);
-        next.run(ctx).await;
+        next.run(ctx).await
     }
 }
 ```
@@ -127,7 +132,7 @@ use std::sync::Arc;
 let mut factory = ToniFactory::new();
 factory.use_global_http_interceptors(Arc::new(LoggingInterceptor));
 
-let mut app = factory.create_with(AppModule).await;
+let mut app = factory.create_with(AppModule).await.unwrap();
 app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await.unwrap();
 ```

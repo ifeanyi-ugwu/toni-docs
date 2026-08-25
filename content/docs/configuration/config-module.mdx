@@ -65,11 +65,11 @@ let module = ConfigModule::<AppConfig>::from_file(".env")?;
 // From an environment-specific file: .env.development, .env.production, .env.test
 let module = ConfigModule::<AppConfig>::from_env_file(Environment::current())?;
 
-// Fail-fast variant: logs the error and exits the process on failure
+// Fail-fast variant: panics on failure
 let module = ConfigModule::<AppConfig>::new();
 ```
 
-`from_env`, `from_file`, and `from_env_file` return `Result<ConfigModule<T>, ConfigError>`. `new()` terminates the process on a load or validation failure, so a bad configuration never reaches request handling.
+`from_env`, `from_file`, and `from_env_file` return `Result<ConfigModule<T>, ConfigError>`. `new()` panics on a load or validation failure — the message names the config type — so a bad configuration never reaches request handling; an embedding process or a test can catch the unwind.
 
 ## Registering and injecting
 

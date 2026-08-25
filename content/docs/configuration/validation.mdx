@@ -50,7 +50,7 @@ The generated `Validate` impl delegates to `validator::Validate::validate`, so e
 Validation runs inside the `ConfigModule` constructors, after every field has been read and parsed, before the application starts:
 
 - `ConfigModule::<AppConfig>::from_env()` / `from_file(path)` / `from_env_file(env)` return `Err(ConfigError::ValidationError(...))` when a constraint fails.
-- `ConfigModule::<AppConfig>::new()` logs the error and exits the process.
+- `ConfigModule::<AppConfig>::new()` panics, with a message naming the config type; an embedding process or a test can catch the unwind.
 
 There is no separate `load_and_validate()` call — loading and validating are one step.
 

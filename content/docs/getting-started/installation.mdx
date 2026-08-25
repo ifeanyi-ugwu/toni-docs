@@ -62,7 +62,7 @@ use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() {
-    let mut app = ToniFactory::create(AppModule).await;
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await.unwrap();
 }
@@ -81,10 +81,10 @@ await app.listen(3000);
 
 ```rust
 // Toni
-let mut app = ToniFactory::create(AppModule).await;
+let mut app = ToniFactory::create(AppModule).await.unwrap();
 app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await.unwrap();
 ```
 
-`ToniFactory::create` takes the root module directly, like `NestFactory.create`. The adapter is wired separately via `use_http_adapter`, which registers all routes from the module tree. No `app.init()` call is needed — the DI container is built during `create`; `start()` binds the socket and serves until shutdown.
+`ToniFactory::create` takes the root module directly, like `NestFactory.create`. The adapter is wired separately via `use_http_adapter`, which registers all routes from the module tree. No `app.init()` call is needed. Startup is three phases: `create` resolves the dependency graph, `bind` acquires the sockets, and `run` serves — `start()` is `bind` plus `run`.
 </Bridge>

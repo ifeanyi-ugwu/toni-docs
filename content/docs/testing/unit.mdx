@@ -92,7 +92,7 @@ pub struct AuthGuard;
 
 #[async_trait]
 impl Guard<HttpContext> for AuthGuard {
-    async fn can_activate(&self, ctx: &mut HttpContext) -> bool {
+    async fn can_activate(&self, ctx: &HttpContext) -> bool {
         ctx.request()
             .headers
             .get("authorization")
@@ -119,8 +119,8 @@ mod tests {
     #[tokio::test]
     async fn allows_valid_token() {
         let guard = AuthGuard;
-        let mut ctx = context_with_token("valid-token-123");
-        assert!(guard.can_activate(&mut ctx).await);
+        let ctx = context_with_token("valid-token-123");
+        assert!(guard.can_activate(&ctx).await);
     }
 
     #[tokio::test]
@@ -130,13 +130,28 @@ mod tests {
             .uri("/protected")
             .body(RequestBody::empty())
             .unwrap();
-        let mut ctx = HttpContext::from_request(req);
-        assert!(!guard.can_activate(&mut ctx).await);
+        let ctx = HttpContext::from_request(req);
+        assert!(!guard.can_activate(&ctx).await);
     }
 }
 ```
 
 `HttpRequest::builder()` is the `http` crate's request builder — chain `.method(...)`, `.uri(...)`, and `.header(...)` as needed, then finish with `.body(RequestBody::empty())` (or `RequestBody::Buffered(bytes)` for a request with a body). `HttpContext::from_request` accepts the result directly.
+
+## Request-scoped providers
+
+A request-scoped provider only exists inside an execution, so tests resolve it against one. `ProviderContext::standalone()` builds a transportless execution:
+
+```rust
+use toni::{ProviderContext, ToniFactory};
+
+let app = ToniFactory::create(TestModule).await.unwrap();
+let execution = ProviderContext::standalone();
+
+let service = app.resolve::<RequestScopedService>(&execution).await.unwrap();
+```
+
+Everything resolved against the same execution shares one instance cache — a request-scoped type is built once and handed to each of them — and dropping the handle ends the execution. Resolving a request-scoped provider outside an execution is refused with an error, not a panic.
 
 ## Testing async services
 

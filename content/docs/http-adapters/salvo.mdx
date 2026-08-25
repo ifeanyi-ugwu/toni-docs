@@ -22,14 +22,14 @@ use toni_salvo::SalvoAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(SalvoAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
 ```
 
-Route paths use Toni's `:param` syntax; the adapter rewrites them to Salvo's `{param}` form at bind time. A catch-all at `{**rest}` returns Toni's standard 404 envelope for unmatched paths, with the global middleware chain applied.
+Toni and Salvo share `{param}` path syntax, so routes mount unchanged. A catch-all at `{**rest}` returns Toni's standard 404 envelope for unmatched paths, with the global middleware chain applied.
 
 ## WebSocket support
 

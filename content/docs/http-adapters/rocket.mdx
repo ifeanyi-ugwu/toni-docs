@@ -22,14 +22,14 @@ use toni_rocket::RocketAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(RocketAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
 ```
 
-Toni's `:param` and `*tail` path syntaxes are rewritten to Rocket's `<param>` / `<tail..>` form at bind time. Every standard method maps directly to a Rocket `Method` variant, so dispatch is exact-match. A low-rank `<__toni_fallback..>` catch-all returns Toni's standard 404 envelope through the global middleware chain.
+Routes are not translated into Rocket's `<param>` syntax. The adapter mounts one catch-all Rocket route per method at `/<__toni_chain..>` and dispatches through an internal matcher that understands Toni's `{param}` syntax itself, along with `:param` and `*tail` for callers of the raw adapter SPI. Unmatched paths get Toni's standard 404 envelope, and the global middleware chain observes every request.
 
 ## WebSocket support
 

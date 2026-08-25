@@ -41,7 +41,7 @@ pub trait RequestHandler: Send + Sync + 'static {
 **`into_lifecycle`** consumes the adapter and does three things:
 
 1. **Builds the native router** from the stored routes and anchors the global middleware chain around it (see below).
-2. **Acquires the listener synchronously**, before returning — port conflicts then surface as a `BindError` from `app.bind()` instead of failing inside a spawned task. `BindTarget::into_std_listener` handles both target forms: it binds an address, and passes through a listener the caller supplied. If the underlying server cannot serve on an existing listener, match on the target and return an error for `BindTarget::Listener` instead.
+2. **Acquires the listener synchronously**, before returning — port conflicts then surface as `StartupError::Adapter { transport: "http", .. }` from `app.bind()` instead of failing inside a spawned task. `BindTarget::into_std_listener` handles both target forms: it binds an address, and passes through a listener the caller supplied. If the underlying server cannot serve on an existing listener, match on the target and return an error for `BindTarget::Listener` instead.
 3. **Returns a handle** built from the bound address, the long-running serve future, and a closure that triggers graceful shutdown:
 
 ```rust
@@ -105,7 +105,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::watch;
 use toni::{
-    AdapterContext, HttpAdapter, HttpLifecycleHandle, HttpMethod,
+    AdapterContext, BindTarget, HttpAdapter, HttpLifecycleHandle, HttpMethod,
     HttpRequest, HttpResponse, RequestHandler,
     http_helpers::{PathParams, RequestBody},
 };
@@ -136,8 +136,7 @@ impl HttpAdapter for MyAdapter {
 
     async fn into_lifecycle(
         mut self: Box<Self>,
-        port: u16,
-        hostname: &str,
+        target: BindTarget,
         ctx: AdapterContext,
     ) -> Result<HttpLifecycleHandle> {
         let routes = std::mem::take(&mut self.routes);
@@ -182,7 +181,7 @@ impl HttpAdapter for MyAdapter {
 Register it like any official adapter:
 
 ```rust
-let mut app = ToniFactory::new().create_with(AppModule).await;
+let mut app = ToniFactory::new().create_with(AppModule).await?;
 app.use_http_adapter(MyAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await?;
 ```
@@ -195,7 +194,7 @@ For same-port upgrades, implement `register_ws_route` and perform the upgrade in
 - `callbacks.message(client_id, msg).await` for each decoded frame — returns a `MessageCallbackResult` (`Continue`, `Stop`, or `Stream(stream)` to spawn a forwarding task).
 - `callbacks.disconnect(client_id).await` when the read loop ends.
 
-For separate-port gateways (`#[websocket_gateway(port = N)]`), implement the `WebSocketAdapter` trait on the same type — `register_gateway(port, path, callbacks)` plus `into_lifecycle_handles(ports)` returning one `WsLifecycleHandle` per port.
+For separate-port gateways (`#[websocket_gateway(port = N)]`), implement the `WebSocketAdapter` trait on the same type — `register_gateway(port, path, callbacks)` plus `into_lifecycle_handles(targets: Vec<(u16, BindTarget)>)` returning one `WsLifecycleHandle` per entry. The `u16` in each pair is the declared `port = N` — the key the callbacks were stored under in `register_gateway`, not where to listen. Where to listen is the `BindTarget`, whose socket may sit on a different port; report the socket's actual address through the handle.
 
 ## Reference implementations
 

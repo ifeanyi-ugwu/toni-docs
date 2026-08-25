@@ -22,14 +22,14 @@ use toni_actix::ActixAdapter;
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(ActixAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
 }
 ```
 
-The Toni API surface is identical to the other adapters — controllers, guards, interceptors, pipes, extractors, and global middleware all work the same. Route paths use Toni's `:param` syntax; the adapter rewrites them to Actix's `{param}` form at bind time.
+The Toni API surface is identical to the other adapters — controllers, guards, interceptors, pipes, extractors, and global middleware all work the same. Toni and Actix share `{param}` path syntax, so routes mount unchanged.
 
 ## Graceful shutdown
 

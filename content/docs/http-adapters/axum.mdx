@@ -22,7 +22,7 @@ use toni_axum::AxumAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = ToniFactory::new().create_with(AppModule).await;
+    let mut app = ToniFactory::new().create_with(AppModule).await?;
     app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
     app.start().await?;
     Ok(())
@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 
 `use_http_adapter` registers all routes from the module tree onto the adapter. `start()` binds the socket and serves until shutdown; bind failures (port in use) surface as the returned error.
 
-Route paths use Toni's `:param` syntax; the adapter rewrites them to Axum's `{param}` form at bind time. Unmatched paths and method mismatches hit a fallback that returns Toni's standard 404/405 envelope — the global middleware chain runs on those requests too.
+Toni's `{param}` path syntax matches Axum's, so routes mount unchanged. Unmatched paths and method mismatches hit a fallback that returns Toni's standard 404/405 envelope — the global middleware chain runs on those requests too.
 
 ## Global enhancers
 
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .use_global_http_guards(Arc::new(ThrottleGuard::default()))
         .use_global_http_error_handler(Arc::new(GlobalErrorHandler));
 
-    let mut app = factory.create_with(AppModule).await;
+    let mut app = factory.create_with(AppModule).await?;
     app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000)).unwrap();
     app.start().await?;
     Ok(())
@@ -71,7 +71,7 @@ Both directions stream:
 Same-port gateways (`#[websocket_gateway("/path")]`) are wired onto the HTTP listener automatically — registering the HTTP adapter is enough:
 
 ```rust
-let mut app = ToniFactory::new().create_with(AppModule).await;
+let mut app = ToniFactory::new().create_with(AppModule).await?;
 app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
 app.start().await?;
 ```
@@ -89,7 +89,7 @@ Sub-protocols are negotiated by echoing the first protocol the client offers in 
 
 The adapter forwards Toni's shutdown signal to Axum's `with_graceful_shutdown`, so in-flight requests drain before the serve loop exits. Trigger it via the application's [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) — the framework installs no signal handlers of its own.
 
-If the serve loop fails after a successful bind, the adapter logs the error and exits the process with status 1.
+If the serve loop fails after a successful bind, the adapter logs the error and the serve future returns — which the framework treats as a shutdown signal, closing the whole application through the same graceful drain. No process exit is involved.
 
 ## Tower layers
 
@@ -132,7 +132,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async {
-            let mut app = ToniFactory::new().create_with(AppModule).await;
+            let mut app = ToniFactory::new().create_with(AppModule).await?;
             app.use_http_adapter(AxumAdapter::new(), ("0.0.0.0", 3000)).unwrap();
             app.start().await
         })

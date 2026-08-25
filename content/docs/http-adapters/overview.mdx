@@ -62,8 +62,8 @@ pub trait HttpAdapter: Send + Sync + 'static {
 The lifecycle:
 
 1. `app.use_http_adapter(adapter, ("127.0.0.1", 3000))` boxes the adapter (`ToniApplication` holds it as `Box<dyn HttpAdapter>`) and calls `register_route` for every resolved route.
-2. `app.bind()` calls `into_lifecycle`, which acquires the socket synchronously — port conflicts surface here as a `BindError`, not inside a background task. The returned [`BoundAdapters`](/docs/api-reference/core) carries the bound addresses, so passing port `0` and reading the OS-assigned port works.
-3. `app.run()` drives the serve loop until [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) is triggered. `app.start()` is `bind()` + `run()` in one step.
+2. `app.bind()` calls `into_lifecycle`, which acquires the socket synchronously — port conflicts surface here as `StartupError::Adapter { transport: "http", .. }`, not inside a background task. Registration completes for every transport the application declares before any socket is acquired, so a declaration that cannot work fails with nothing bound. The returned [`BoundAdapters`](/docs/api-reference/core) carries the bound addresses, so passing port `0` and reading the OS-assigned port works.
+3. `app.run()` drives the serve loop until [`shutdown_handle()`](/docs/deployment/production#graceful-shutdown) is triggered; a serve loop that returns on its own also shuts down the whole application. `app.start()` is `bind()` + `run()` in one step.
 
 The `AdapterContext` passed to `into_lifecycle` carries the global middleware chain; every adapter runs it *before* its own routing, so global middleware observes every request — including 404s, 405s, and same-port WebSocket upgrades — and a request rewritten in the chain changes which route matches.
 
@@ -93,7 +93,7 @@ let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
 app.use_http_adapter(AxumAdapter::new(), target)?;
 ```
 
-Toni reads no environment protocol itself — it accepts a listener and asks nothing about where it came from, so any supervisor works. `toni-rocket` is the exception: Rocket binds inside `launch()` from its own configuration, so passing it a listener fails at `app.bind()` with an error naming the limitation. See [Development Workflow](/docs/getting-started/development-workflow) for the watch-restart loop.
+Toni reads no environment protocol itself — it accepts a listener and asks nothing about where it came from, so any supervisor works. `toni-rocket` is the exception: Rocket binds inside `launch()` from its own configuration, so passing it a listener fails at `app.bind()` with an error naming the limitation. See [Development Workflow](/docs/getting-started/development-workflow) for the watch-restart loop, and [Bind Targets](/docs/techniques/bind-targets) for the full surface — including listener adoption on the WebSocket, TCP, UDP, and gRPC transports.
 
 ## Bounded in-flight requests
 

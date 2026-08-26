@@ -65,10 +65,6 @@ Guards, interceptors, and pipes apply at three scopes, in execution order:
 
 All levels run, in that order. Method-level runs *in addition to* controller-level and global, not instead. Error handlers run in the opposite direction — most specific first (method → controller → global), with the first claim winning.
 
-<Bridge>
-This is the same execution order as NestJS, and the scope levels — global, controller, method — are identical. Differences: attribute macros instead of class decorators, global registration is per transport, and error handlers replace exception filters (consulted most-specific-first, same as NestJS filter precedence).
-</Bridge>
-
 ## Sections in this chapter
 
 - [Middleware](/docs/request-lifecycle/middleware) — request/response interception, route patterns, Tower layers

@@ -70,21 +70,10 @@ async fn main() {
 
 That's it. Everything else — modules, controllers, services — lives in your application code and gets wired together by the DI container at startup.
 
-<Bridge>
-Coming from NestJS? The rough translation is:
-
-```ts
-// NestJS
-const app = await NestFactory.create(AppModule);
-await app.listen(3000);
-```
-
-```rust
-// Toni
-let mut app = ToniFactory::create(AppModule).await.unwrap();
-app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
-app.start().await.unwrap();
-```
-
-`ToniFactory::create` takes the root module directly, like `NestFactory.create`. The adapter is wired separately via `use_http_adapter`, which registers all routes from the module tree. No `app.init()` call is needed. Startup is three phases: `create` resolves the dependency graph, `bind` acquires the sockets, and `run` serves — `start()` is `bind` plus `run`.
-</Bridge>
+<FromNest>
+`ToniFactory::create(AppModule)` takes the root module like `NestFactory.create`,
+but there is no `app.listen(3000)` and no `app.init()`. The HTTP server is chosen
+separately, by `use_http_adapter` — that call is also what registers the routes.
+Startup is three phases: `create` resolves the dependency graph, `bind` acquires
+the sockets, `run` serves. `start()` is `bind` plus `run`.
+</FromNest>

@@ -14,22 +14,6 @@ Extractors come in two shapes:
 
 Attribute markers (`#[body]`, `#[param]`, `#[query]`) offer a NestJS-style shorthand over these extractors — see [Attribute Markers](/docs/extractors/markers).
 
-<Bridge>
-In NestJS you use parameter decorators: `@Param()`, `@Query()`, `@Body()`. In Toni, extractors are function parameter types that pattern-match in the handler signature. The result is the same — typed access to request data — but the Rust version is checked at compile time.
-
-```ts
-// NestJS
-@Get(':id')
-findOne(@Param('id') id: string, @Query() query: SearchDto) { }
-```
-
-```rust
-// Toni
-#[get("/{id}")]
-fn find_one(&self, Path(id): Path<String>, Query(query): Query<SearchDto>) -> HttpResponse { }
-```
-</Bridge>
-
 ## Path — route parameters
 
 Extracts typed values from URL path segments. Scalars parse from the raw segment (`Path<i32>`, `Path<bool>`, `Path<String>`); structs deserialize with each field typed:
@@ -59,6 +43,13 @@ fn find_post(&self, Path(params): Path<PostParams>) -> HttpResponse {
 ```
 
 A segment that fails to parse (e.g. `abc` for `Path<i32>`) returns a 400 — see [Extraction failures](#extraction-failures).
+
+<FromNest>
+`@Param('id')` becomes a `Path<T>` parameter destructured in the handler
+signature, and the route spells the parameter `{id}` — `:id` is a compile error.
+The type is what parses: `Path<u32>` rejects a non-numeric segment before the
+handler runs, so there is no `ParseIntPipe` to add.
+</FromNest>
 
 ## Query — query string parameters
 

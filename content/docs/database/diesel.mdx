@@ -5,9 +5,7 @@ description: Integrating Diesel async with Toni's module system for type-safe SQ
 
 `toni-diesel` provides a `DieselModule` with database-specific constructors that set up an async connection pool (via `deadpool`) at startup and make it available application-wide.
 
-<Bridge>
-Diesel is Rust's most type-safe ORM — queries are validated against your schema at compile time. `toni-diesel` uses `diesel-async` under the hood, so all database calls are non-blocking.
-</Bridge>
+Queries are validated against your schema at compile time, and `diesel-async` runs them without blocking the executor.
 
 ## Setup
 

@@ -5,10 +5,6 @@ description: The default tracing subscriber, RUST_LOG control, and bringing your
 
 Toni applications log out of the box. `ToniFactory::create` — and `create_application_context` for CLI tools and workers — installs a default `tracing` subscriber before anything else runs: a fmt writer to **stderr**, filtered by `RUST_LOG`, defaulting to `info`.
 
-<Bridge>
-NestJS prints through its built-in `Logger` from the first `NestFactory.create` call. The default subscriber gives Toni the same out-of-the-box behavior, with `RUST_LOG` in the role of the `logger: [...]` level array.
-</Bridge>
-
 ## Controlling the level
 
 `RUST_LOG` takes a [tracing `EnvFilter` directive](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html):
@@ -20,6 +16,13 @@ RUST_LOG=off ./my_api                      # runtime silence
 ```
 
 Unset, the filter is `info`.
+
+<FromNest>
+There is no injectable `Logger` and no `logger: [...]` option. `create` installs a
+`tracing` subscriber, the `tracing` macros are the print calls, and `RUST_LOG`
+sets the levels. A subscriber installed before `create` wins, which is how you
+replace the default rather than configure it.
+</FromNest>
 
 ## Bringing your own subscriber
 

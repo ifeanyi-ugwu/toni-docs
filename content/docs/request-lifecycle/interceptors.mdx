@@ -7,10 +7,6 @@ An interceptor wraps a route handler and returns the answer. `next.run(context).
 
 Like guards and pipes, interceptors are generic over the per-request context and the transport's answer type `R`: `Interceptor<HttpContext, HttpResponse>` runs on HTTP routes, `Interceptor<RpcContext, RpcHandlerResult>` on RPC patterns (`Result<Option<RpcData>, RpcError>`), `Interceptor<WsContext, WsHandlerResult>` on WebSocket messages (`Result<WsHandlerOutput, WsError>`), `Interceptor<GrpcContext, GrpcHandlerResult>` on gRPC methods (`Result<(), GrpcStatus>`).
 
-<Bridge>
-Toni interceptors map to NestJS's `NestInterceptor`. `intercept` receives the context and a `next`; calling `next.run(context).await` proceeds to the handler. Instead of RxJS operators on an observable, the value `next.run` returns is the response side — transform it and return it.
-</Bridge>
-
 ## The Interceptor trait
 
 ```rust
@@ -29,6 +25,14 @@ pub trait Interceptor<C: ?Sized + HandlerContext, R>: Send + Sync {
 ```
 
 Both live at `toni::traits_helpers::{Interceptor, InterceptorNext}`. `run` consumes `Box<Self>`, so the downstream chain can be invoked at most once — the type system rules out calling the handler twice.
+
+<FromNest>
+`intercept` receives the context and a `next`, as `NestInterceptor` does — but
+there is no observable and no `pipe(map(...))`. `next.run(ctx).await` returns the
+response value; transform it and return it. `next` is boxed and `run` consumes
+it, so it can be called at most once, and returning without calling it
+short-circuits the handler.
+</FromNest>
 
 ## Timing interceptor
 

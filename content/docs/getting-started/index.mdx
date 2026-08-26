@@ -5,11 +5,7 @@ description: What Toni is, why it exists, and when to reach for it.
 
 Toni is a Rust framework for building server-side applications. It brings a structured, modular approach to Rust web development: your application is organized into **modules**, each containing **controllers** that handle HTTP routes and **services** that hold business logic. Dependencies flow between them through a built-in injection container.
 
-<Bridge>
-If you've built applications with NestJS, almost everything in Toni has a direct counterpart. The module hierarchy, the decorator-driven syntax, the guards/interceptors/pipes execution chain — all of it maps cleanly. The main difference is that instead of TypeScript decorators, Toni uses Rust procedural macros, and instead of classes you have structs.
-
-The goal isn't to recreate NestJS in Rust. It's to give you the same ergonomics and structural clarity in a language that gives you performance, memory safety, and no garbage collector.
-</Bridge>
+If you have built applications with NestJS, most of Toni has a direct counterpart — modules, controllers, injectable providers, and the guard/interceptor/pipe chain. [Coming from NestJS](/docs/coming-from-nestjs) maps the two, ports a small application line by line, and lists the places where Toni deliberately differs.
 
 ## Why Toni exists
 

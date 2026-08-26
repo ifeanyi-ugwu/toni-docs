@@ -5,18 +5,6 @@ description: Value providers, factory providers, alias providers, and token prov
 
 Beyond plain injectable services, Toni supports several provider patterns for registering non-struct values, computed results, async-initialized resources, and alternate names for existing providers.
 
-<Bridge>
-These map directly to NestJS's custom provider syntax:
-
-| NestJS | Toni |
-|--------|------|
-| `{ provide: 'TOKEN', useValue: value }` | `provider_value!("TOKEN", value)` |
-| `{ provide: 'TOKEN', useFactory: () => fn() }` | `provider_factory!("TOKEN", \|\| fn())` |
-| `{ provide: 'TOKEN', useFactory: async (dep) => fn(dep), inject: [Dep] }` | `provider_factory!("TOKEN", async \|dep: Dep\| fn(dep))` |
-| `{ provide: 'TOKEN', useExisting: ExistingService }` | `provider_alias!("TOKEN", ExistingService)` |
-| `{ provide: TOKEN, useClass: ServiceClass }` | `provider_token!("TOKEN", ServiceClass)` |
-</Bridge>
-
 ## Service providers (the default)
 
 The most common pattern — list the struct name:

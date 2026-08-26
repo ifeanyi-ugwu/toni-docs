@@ -5,10 +5,6 @@ description: Injectable services are the building blocks of Toni's business logi
 
 A **provider** is anything the DI container manages: a service struct, a configuration value, a database connection, a factory-created object. The most common form is a **service** — a struct that holds business logic and can be injected into controllers and other services.
 
-<Bridge>
-In NestJS, `@Injectable()` marks a class as a provider. In Toni, `#[injectable]` does the same for a struct. The concept is identical: declare it, register it in a module's `providers`, and the framework injects it wherever it's referenced.
-</Bridge>
-
 ## Defining a service
 
 ```rust
@@ -79,6 +75,13 @@ impl Banner {
 ```
 
 Each `#[new]` parameter is resolved from the container by type (or by token with `#[inject("TOKEN")]` on the parameter). A bare `new()` without the attribute is not picked up as a DI constructor.
+
+<FromNest>
+`#[injectable]` replaces `@Injectable()`, but there is no constructor to inject
+into. Dependencies are `#[inject]` fields on the struct, and ordinary methods
+stay in a plain `impl` block. Use `#[new]` only when construction has to run
+code — a bare `new()` is not detected.
+</FromNest>
 
 ## Registering in a module
 

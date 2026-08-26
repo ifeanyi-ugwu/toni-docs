@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "getting-started",
+    "coming-from-nestjs",
     "core-concepts",
     "request-lifecycle",
     "extractors",

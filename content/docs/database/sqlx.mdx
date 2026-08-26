@@ -5,9 +5,7 @@ description: Integrating SQLx with Toni's module system for compile-time checked
 
 `toni-sqlx` provides a `SqlxModule` with database-specific constructors that connect a connection pool at startup and make it available application-wide.
 
-<Bridge>
-Similar to NestJS's `TypeOrmModule.forRoot()`, but you get direct access to SQLx's connection pool — no ORM abstraction. SQL queries stay as strings and are checked at compile time with SQLx's `query!` macros.
-</Bridge>
+There is no ORM layer over the pool: queries stay SQL strings, and SQLx's `query!` macros check them against a live database at compile time.
 
 ## Setup
 

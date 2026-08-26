@@ -10,10 +10,6 @@ Toni's error story has four layers, from most common to most specialized:
 3. **The error handler chain** — `#[catch(T)]` functions and `ErrorHandler` implementations that reshape specific errors into custom responses.
 4. **Observers and panic recovery** — a fire-and-forget tap for logging/metrics, and `catch_unwind` around every pipeline segment so a panic never tears down the server.
 
-<Bridge>
-This replaces what NestJS calls exception filters. `HttpException` maps to `HttpError`; a `@Catch(EntityNotFoundError)` filter maps to a `#[catch(EntityNotFoundError)]` function; `useGlobalFilters` maps to `use_global_http_error_handler`. The biggest difference: in Toni the primary path is a typed domain error (`#[derive(toni::Error)]`) that renders itself — filters are the override, not the default.
-</Bridge>
-
 ## Domain errors with `toni::Error`
 
 The `toni::Error` trait is `std::error::Error` plus the metadata the pipeline needs:
@@ -263,6 +259,15 @@ factory.use_global_http_error_handler(Arc::new(StatusPageErrorHandler));
 ```
 
 The chain dispatches on handler-returned errors and framework events alike. For lifted domain errors, the chain sees the *underlying* error — `#[catch(UserError)]` matches a `UserError` returned through `?` even though the wire type wrapped it in `HttpError::AppError`.
+
+<FromNest>
+`#[catch(T)]` is the exception filter and `use_global_http_error_handler` is
+`useGlobalFilters`, but the two sit at opposite ends of the workflow. In NestJS a
+filter is where an error becomes a response, so most projects have one. In Toni a
+`#[derive(toni::Error)]` type already renders itself through its `ErrorKind`, and
+a handler is the override for the cases where that rendering is wrong. Reach for
+a typed error first.
+</FromNest>
 
 ## Framework events
 

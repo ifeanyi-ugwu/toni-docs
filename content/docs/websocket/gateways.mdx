@@ -5,10 +5,6 @@ description: Building real-time WebSocket handlers with Toni's gateway system.
 
 WebSocket connections in Toni are handled through **gateways** — structs annotated with `#[websocket_gateway]` that handle connection lifecycle events and messages. Gateways live in the DI container like any other provider, so they have full access to injected services.
 
-<Bridge>
-Toni gateways map directly to NestJS `@WebSocketGateway()`. Instead of `@SubscribeMessage()` decorators you use `#[subscribe_message("event")]` on async methods. The runtime concepts — broadcasting, rooms, guards — are identical.
-</Bridge>
-
 ## Enabling WebSocket support
 
 WebSocket routes share the same port as HTTP by default. Register your HTTP adapter and Toni wires WebSocket upgrade routes onto it automatically:

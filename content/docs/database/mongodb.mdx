@@ -5,9 +5,7 @@ description: Integrating MongoDB with Toni's module system via the managed Datab
 
 `toni-mongodb` provides a `MongoModule` that connects to MongoDB at startup and makes `mongodb::Database` available application-wide via the global DI scope.
 
-<Bridge>
-This follows the same pattern as NestJS's `MongooseModule.forRoot()` — one call in the root module, then inject the database handle anywhere without importing the database module into each feature module.
-</Bridge>
+`for_root` is called once, in the root module. Feature modules inject `Database` without importing `MongoModule` themselves.
 
 ## Setup
 

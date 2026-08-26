@@ -5,17 +5,6 @@ description: Defining message handlers with #[rpc_controller], #[patterns], #[me
 
 RPC controllers are the microservice equivalent of HTTP controllers. They group pattern-matched message handlers. Like HTTP controllers, they are dispatch targets, not providers — the framework builds them to route messages, and nothing injects one.
 
-<Bridge>
-
-| NestJS | Toni |
-|--------|------|
-| `@Controller()` class with `@MessagePattern()` | `#[rpc_controller]` struct with a `#[patterns]` impl |
-| `@EventPattern()` method | `#[event_pattern]` method |
-| `@Payload()` typed payload | typed payload parameter (auto-parsed) |
-| `RpcException` | `RpcError` |
-
-</Bridge>
-
 ## Defining a controller
 
 `#[rpc_controller]` goes on the struct — dependencies are `#[inject]` fields, exactly as with `#[injectable]`. A separate `#[patterns]` attribute on the impl block scans the handlers. The DI constructor is marked `#[new]`:

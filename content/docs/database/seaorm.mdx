@@ -5,9 +5,7 @@ description: Integrating SeaORM with Toni's module system for managed database c
 
 `toni-seaorm` provides a `SeaOrmModule` that connects to a database at startup and makes `DatabaseConnection` available to any provider in the application via the global DI scope.
 
-<Bridge>
-This follows the same pattern as NestJS's `TypeOrmModule.forRoot()` — one call in the root module, then inject the connection handle anywhere without needing to import the database module into each feature module.
-</Bridge>
+`for_root` is called once, in the root module. Feature modules inject `DatabaseConnection` without importing `SeaOrmModule` themselves.
 
 ## Setup
 

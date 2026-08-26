@@ -7,10 +7,6 @@ A guard is a type that implements the `Guard<C>` trait. It has a single method, 
 
 `C` is the per-request context type — `HttpContext`, `RpcContext`, `WsContext`, or `GrpcContext`. A guard implemented for `Guard<HttpContext>` runs on HTTP routes; the same struct can implement the trait for other contexts to run on those transports too.
 
-<Bridge>
-Guards in Toni are the equivalent of NestJS's `CanActivate` guards. `can_activate` is **async** — JWT verification, database lookups, or any async work runs directly inside the guard. Returning `true` allows the request; `false` blocks it with a 403. One difference: Toni guards cannot throw. To send anything other than the default 403, register a `#[catch(GuardRejection)]` error handler (see [Error Handling](/docs/request-lifecycle/error-handling)).
-</Bridge>
-
 ## The Guard trait
 
 ```rust
@@ -365,3 +361,12 @@ impl AdminController { /* ... */ }
 ```
 
 `GuardRejection` carries `guard_index` (the position of the rejecting guard in the resolved chain) and an optional `reason`. See [Error Handling](/docs/request-lifecycle/error-handling) for the full error pipeline.
+
+<FromNest>
+`can_activate` is `CanActivate.canActivate` with one difference that changes how
+you write it: a Toni guard cannot throw. There is no `UnauthorizedException` to
+raise from inside it — the guard returns `bool`, and `false` produces the default
+403. To answer with anything else, register a `#[catch(GuardRejection)]` handler.
+`can_activate` is async, so JWT verification and database lookups run inline
+without a separate strategy object.
+</FromNest>

@@ -282,6 +282,7 @@ A validation failure returns the same 400 shape as any other extraction failure,
 
 ## Extraction failures
 
+<Callout type="info" title="Extraction failures bypass the error-handler chain">
 When an extractor fails (and is not `Option`-wrapped), the handler never runs and the client receives an inline **400** response:
 
 ```json
@@ -290,6 +291,7 @@ When an extractor fails (and is not `Option`-wrapped), the handler never runs an
   "details": "Failed to deserialize JSON body: missing field `email` at line 1 column 15"
 }
 ```
+</Callout>
 
 This response is produced directly at the extraction site — it does not pass through the error-handler chain.
 

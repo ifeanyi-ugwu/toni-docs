@@ -38,8 +38,7 @@ pub struct UsersModule;
 
 Modules can import providers from other modules. The exporting module must explicitly list what it shares.
 
-```rust
-// database/database_module.rs
+```rust title="database/database_module.rs"
 #[module(
     providers: [DatabaseService],
     exports: [DatabaseService],   // available to any module that imports DatabaseModule
@@ -61,8 +60,7 @@ pub struct UsersModule;
 
 Every application has a root module. `ToniFactory::create` starts scanning from there, recursively resolving the full module graph.
 
-```rust
-// app_module.rs
+```rust title="app_module.rs"
 #[module(
     imports: [
         DatabaseModule,
@@ -90,8 +88,7 @@ The root module itself typically has no controllers or providers — it composes
 
 Marking a module `global: true` makes its exports available to every module in the tree without importing it:
 
-```rust
-// infrastructure/infrastructure_module.rs
+```rust title="infrastructure/infrastructure_module.rs"
 #[module(
     global: true,
     providers: [LoggerService, ConfigService, MetricsService],

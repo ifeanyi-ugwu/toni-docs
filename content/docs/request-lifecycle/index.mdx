@@ -7,39 +7,9 @@ Every request travels through a predictable sequence of processing layers before
 
 ## The sequence
 
-```
-Incoming request
-    │
-    ▼
-Global middleware (wraps routing — runs on every request, including 404s and 405s)
-    │
-    ▼
-Route resolution
-    │
-    ▼
-Route-scoped middleware (matched by path pattern)
-    │
-    ▼
-Guards (authorization check — false blocks with 403)
-    │
-    ▼
-Interceptors, before next.run (can short-circuit)
-    │
-    ▼
-Pipes (sync — attach data, or answer with `Some(response)`)
-    │
-    ▼
-Route handler (your fn)
-    │
-    ▼
-Interceptors, after next.run (can transform the response)
-    │
-    ▼
-Error handlers (only when a step produced an error or event)
-    │
-    ▼
-Response sent
-```
+<RequestPipeline />
+
+Middleware and interceptors wrap what is inside them and see the response on the way out. Guards and pipes run on the way in only.
 
 ## Layer responsibilities
 

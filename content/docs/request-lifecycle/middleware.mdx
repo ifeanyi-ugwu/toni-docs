@@ -262,7 +262,7 @@ Returning `Err` from route-scoped middleware emits a `MiddlewareFailure` event t
 
 With the `tower-compat` feature enabled on `toni`, `tower::Layer` middleware plugs into the consumer directly:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = { version = "0.2", features = ["tower-compat"] }
 ```

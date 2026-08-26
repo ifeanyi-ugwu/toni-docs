@@ -11,7 +11,7 @@ There is no ORM layer over the pool: queries stay SQL strings, and SQLx's `query
 
 Add the dependency with the appropriate features for your database and TLS runtime:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-sqlx = { version = "0.1", features = ["postgres", "runtime-tokio-rustls"] }

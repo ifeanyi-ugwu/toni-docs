@@ -7,7 +7,7 @@ The `toni-config` crate provides structured, type-safe configuration backed by e
 
 ## Installation
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-config = "0.1"
@@ -69,7 +69,9 @@ let module = ConfigModule::<AppConfig>::from_env_file(Environment::current())?;
 let module = ConfigModule::<AppConfig>::new();
 ```
 
+<Callout type="warn" title="new() panics; the fallible constructors do not">
 `from_env`, `from_file`, and `from_env_file` return `Result<ConfigModule<T>, ConfigError>`. `new()` panics on a load or validation failure — the message names the config type — so a bad configuration never reaches request handling; an embedding process or a test can catch the unwind.
+</Callout>
 
 ## Registering and injecting
 
@@ -154,7 +156,7 @@ pub struct AppConfig {
 
 Add the `validator` crate, derive `Validate` alongside `Config`, and mark fields with `#[validate(...)]`. Validation runs inside the `ConfigModule` constructors, after parsing and before the application starts:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni-config = "0.1"
 validator = { version = "0.20", features = ["derive"] }

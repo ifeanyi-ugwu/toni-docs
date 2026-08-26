@@ -7,7 +7,7 @@ description: Application health endpoints with toni-terminus — liveness, readi
 
 ## Installation
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni-terminus = { version = "0.1", features = ["http", "memory", "disk", "timeout"] }
 ```
@@ -174,7 +174,7 @@ self.health
 
 Each database crate provides a health indicator behind a `health` feature flag. Enable it alongside the rest of your database setup:
 
-```toml
+```toml title="Cargo.toml"
 toni-redis  = { version = "0.1", features = ["health"] }
 toni-seaorm = { version = "0.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "health"] }
 toni-mongodb = { version = "0.1", features = ["health"] }

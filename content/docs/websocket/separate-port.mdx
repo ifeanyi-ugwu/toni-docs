@@ -46,7 +46,7 @@ The listener binds on the HTTP adapter's hostname (or `0.0.0.0` when no HTTP ada
 
 `toni-tungstenite` provides `TungsteniteAdapter`, a raw-TCP WebSocket server built on tokio-tungstenite — purpose-built for separate-port deployment:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-tungstenite = "0.1"

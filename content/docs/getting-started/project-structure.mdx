@@ -19,8 +19,7 @@ my_app/
 
 The dotted file names (`app.module.rs`, NestJS-style) aren't valid Rust module names on their own, so `mod.rs` maps each file to a module with a `#[path]` attribute:
 
-```rust
-// src/app/mod.rs
+```rust title="src/app/mod.rs"
 #[path = "app.module.rs"]
 pub mod app_module;
 
@@ -103,8 +102,7 @@ indirection. `forRoot()` carries over as `for_root`: integration crates return a
 
 Infrastructure that spans features — guards, interceptors, pipes, common types — belongs in a shared location (`common/` or `shared/`). Enhancers are plain structs implementing the relevant trait; the traits are generic over the transport context (`HttpContext`, `RpcContext`, `WsContext`).
 
-```rust
-// common/logging_interceptor.rs
+```rust title="common/logging_interceptor.rs"
 use toni::HttpResponse;
 use toni::async_trait;
 use toni::context::HttpContext;

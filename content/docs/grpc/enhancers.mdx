@@ -23,7 +23,7 @@ The pipeline per call: guards → interceptors → handler → error handlers (o
 
 ## GrpcContext
 
-gRPC payloads are method-typed protobuf messages and can't sit in a non-generic struct, so `GrpcContext` deliberately holds only what every enhancer can name without a type parameter — there is no request body on it:
+gRPC payloads are method-typed protobuf messages and can't sit in a non-generic struct, so `GrpcContext` holds only what every enhancer can name without a type parameter — there is no request body on it:
 
 | Accessor | Returns |
 |---|---|
@@ -32,7 +32,7 @@ gRPC payloads are method-typed protobuf messages and can't sit in a non-generic 
 | `header(key)` | `Option<&str>` |
 | `peer()` | `Option<SocketAddr>` |
 
-Only ASCII metadata is captured into `headers()`; binary (`-bin`) entries are skipped. `GrpcContext` also implements `HandlerContext`, so `metadata()`, `extensions()`, `cache()`, and `cancellation()` work as on the other transports.
+Only ASCII metadata is captured into `headers()`; binary (`-bin`) entries are skipped. `GrpcContext` also implements `HandlerContext`, and `metadata()`, `extensions()`, `cache()`, and `cancellation()` work as on the other transports.
 
 `metadata()` is not the wire metadata — that is `headers()`. It returns what `#[set_metadata]` declared: the attribute goes on the `#[grpc_methods]` impl (every method) or on an individual method, and guards, interceptors, and error handlers read it back through `ctx.metadata()`. The handler never sees it.
 

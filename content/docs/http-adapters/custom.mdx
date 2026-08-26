@@ -72,7 +72,7 @@ let http_res = ctx
     .await;
 ```
 
-Anchored this way, the chain observes every request — matched routes, unknown paths (404), method mismatches (405), and same-port WebSocket upgrades — and a middleware can short-circuit by returning a response without invoking the closure, which is how CORS preflight is answered. The closure receives the request the chain forwards: a middleware that rewrites the URI changes which route matches. Wrapping individual matched-route handlers instead breaks all of this — 405s and preflight would be answered by the native router before the chain ever runs.
+Anchored this way, the chain observes every request: matched routes, unknown paths (404), method mismatches (405), and same-port WebSocket upgrades. A middleware can short-circuit by returning a response without invoking the closure, which is how CORS preflight is answered. The closure receives the request the chain forwards: a middleware that rewrites the URI changes which route matches. Wrapping individual matched-route handlers instead breaks all of this — 405s and preflight would be answered by the native router before the chain ever runs.
 
 The router's catch-all for unmatched paths produces Toni's standard 404 envelope (`{"statusCode": 404, "message": "Cannot GET /x", "error": "Not Found"}`) — the official adapters all do.
 

@@ -130,7 +130,7 @@ pub struct ReportsService {
 }
 ```
 
-Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed constructor calls with different URLs are refused at startup (one would silently shadow the other), so every pool past the first needs a name. A named pool registers the pool only; the `health` feature's indicator stays on the default constructor's pool.
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed constructor calls with different URLs are refused at startup (one would shadow the other with no error), so every pool past the first needs a name. A named pool registers the pool only; the `health` feature's indicator stays on the default constructor's pool.
 
 ## Using env vars
 

@@ -79,9 +79,9 @@ fn get_token(&self, BearerToken(token): BearerToken) -> Body {
 }
 ```
 
-`ctx.request().headers` is an `http::HeaderMap` — values are `HeaderValue`, so read them with `.get(name).and_then(|v| v.to_str().ok())`.
+`ctx.request().headers` is an `http::HeaderMap` whose values are `HeaderValue` — read them with `.get(name).and_then(|v| v.to_str().ok())`.
 
-A metadata extractor's `extract` is `async` with nothing to await — the trait has one shape for every extractor, and only body extractors actually await anything.
+A metadata extractor's `extract` is `async` with nothing to await — the trait has one shape for every extractor, and only body extractors await anything.
 
 ## Composing extractors
 
@@ -182,7 +182,7 @@ impl<T: DeserializeOwned + Send> FromContext<HttpContext> for Yaml<T> {
 For the built-in body extractors, a handler with two body readers is a compile error — the controller macro recognizes them by type name and rejects the signature. It cannot recognize your types: custom extractors are exempt from that check, several of them may share a handler, and nothing at compile time records whether one of them reads the body.
 </Callout>
 
-So for custom extractors the rule holds at runtime instead. A custom body extractor beside `Json<T>` — or beside another custom body extractor — compiles, and the second one to run gets `BodyAlreadyRead`: the client receives the standard 400, and the error is also logged at `error` level naming the extractor, because the request was well-formed and the fault is the handler's signature.
+A custom body extractor beside `Json<T>` — or beside another custom body extractor — compiles, and the second one to run gets `BodyAlreadyRead`: the client receives the standard 400, and the error is also logged at `error` level naming the extractor, because the request was well-formed and the fault is the handler's signature.
 
 By the same token, a metadata extractor's body-freedom is a convention, not a compile-time guarantee — nothing stops an impl from calling `take_body` while presenting as a header reader. Keep body reads out of extractors that claim to be metadata.
 

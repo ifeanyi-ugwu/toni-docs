@@ -182,7 +182,7 @@ toni-sqlx   = { version = "0.1", features = ["postgres", "runtime-tokio-rustls",
 toni-diesel = { version = "0.1", features = ["postgres", "health"] }
 ```
 
-When `health` is enabled, `for_root()` automatically registers the indicator alongside the connection — inject it directly. The indicator shares the registered connection — no second pool per database — and resolves it lazily on each check:
+When `health` is enabled, `for_root()` also registers the indicator alongside the connection; inject it directly. The indicator shares the registered connection and resolves it lazily on each check, so there is no second pool per database:
 
 | Crate         | Indicator type                  | Method            |
 |---------------|---------------------------------|-------------------|

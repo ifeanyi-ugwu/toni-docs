@@ -37,7 +37,7 @@ pub struct AppModule;
 
 `for_root` returns a **global** `CheckedModule` — a `DynamicModule` carrying a configurable startup check. It works anywhere a module does: as an import or as the root module.
 
-The client itself is constructed lazily, without dialing. What verifies the server is the [startup check](#startup-check): it probes MongoDB in `on_module_init`, so an unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the URI redacted (`mongodb://user:***@host:27017`) — rather than on the first query. This is a behavioral change: earlier versions never dialed at startup, so an application could come up against an absent database and only find out on first use.
+The client itself is constructed lazily, without dialing. What verifies the server is the [startup check](#startup-check): it probes MongoDB in `on_module_init`, so an unreachable host surfaces as `Err(StartupError::HookFailed)` from `ToniFactory::create` — naming the module, with any password in the URI redacted (`mongodb://user:***@host:27017`) — rather than on the first query.
 
 ## Startup check
 
@@ -52,7 +52,7 @@ MongoModule::for_root(uri, "mydb")
 
 `StartupCheck` builders: `.attempts(u32)`, `.delay(Duration)`, `.timeout(Duration)`.
 
-Opt out with `.without_startup_check()` — the application then starts without contacting MongoDB, restoring the old first-use failure mode. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
+Opt out with `.without_startup_check()` — the application then starts without contacting MongoDB, and failures surface where the database handle is first used. Worth taking when a readiness probe already reports the database and the application should stay up while it recovers.
 
 A named connection (see below) runs the same check and reports failures under its name.
 
@@ -123,7 +123,7 @@ pub struct ReportsService {
 }
 ```
 
-Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different config are refused at startup (one would silently shadow the other), so every connection past the first needs a name. A named connection registers the database handle only; the `health` feature's indicator stays on the default `for_root` connection.
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different config are refused at startup (one would shadow the other with no error), so every connection past the first needs a name. A named connection registers the database handle only; the `health` feature's indicator stays on the default `for_root` connection.
 
 ## Using env vars
 

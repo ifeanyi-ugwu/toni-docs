@@ -24,7 +24,7 @@ pub struct UsersModule;
 
 The `#[module]` macro transforms this struct into a full module definition. You don't write methods on the struct — the macro generates everything needed for the DI scanner.
 
-`controllers:` takes every dispatch target, not just HTTP: `#[rpc_controller]` and `#[grpc_service]` types are declared there the same way, while WebSocket gateways stay in `providers:`.
+`controllers:` takes every dispatch target, not only HTTP: `#[rpc_controller]` and `#[grpc_service]` types are declared there the same way, while WebSocket gateways stay in `providers:`.
 
 ```rust
 #[module(
@@ -103,7 +103,7 @@ pub struct InfrastructureModule;
 pub struct AppModule;
 ```
 
-Every module in the application can now inject `LoggerService`, `ConfigService`, or `MetricsService` without listing `InfrastructureModule` in its own `imports`. Reserve this for genuinely cross-cutting infrastructure — explicit imports keep dependencies visible.
+Every module in the application can now inject `LoggerService`, `ConfigService`, or `MetricsService` without listing `InfrastructureModule` in its own `imports`. Reserve this for cross-cutting infrastructure — explicit imports keep dependencies visible.
 
 ## Lifecycle hooks on modules
 
@@ -187,4 +187,4 @@ The builder's `export::<T>()` exports by type, `export_token("NAME")` exports a 
 
 A dynamic module's identity is its builder name plus the configuration of its providers. Importing the same module twice — say two feature modules each list `SeaOrmModule::for_root("postgres://localhost/app")` — registers it once; the second import dedups.
 
-Two calls with **different** configuration are different modules. If both export the same token (two unnamed `for_root` calls of one integration), startup is refused with an error naming both modules — one would silently shadow the other. Integrations expose named constructors (`for_root_named`) for this; a custom multi-instance module opts into the same identity machinery by implementing `identity_hint()` on its `ProviderFactory`, returning a string that distinguishes one configuration from another.
+Two calls with **different** configuration are different modules. If both export the same token (two unnamed `for_root` calls of one integration), startup is refused with an error naming both modules; one would shadow the other and nothing would report it. Integrations expose named constructors (`for_root_named`) for this; a custom multi-instance module opts into the same identity machinery by implementing `identity_hint()` on its `ProviderFactory`, returning a string that distinguishes one configuration from another.

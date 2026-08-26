@@ -184,7 +184,7 @@ ctx.metadata()       // Option<&Metadata> — what #[set_metadata] declared on t
 
 Headers and metadata are distinct: `headers()` is what the caller sent with this call; `metadata()` is what the handler declared about itself. `#[set_metadata]` goes on the `#[patterns]` impl (every handler) or on an individual handler, and reads back through `ctx.metadata()` — typically from a guard.
 
-Enhancers share the same `&RpcContext`. `RpcContext` implements `HandlerContext`, so `extensions()` (the per-call typed bag — it mutates through `&self`, so a guard can `ctx.extensions().insert(v)` for a later stage to read), `cache()`, and `cancellation()` are available as on every context type.
+Enhancers share the same `&RpcContext`. `RpcContext` implements `HandlerContext`, and `extensions()`, `cache()`, and `cancellation()` work as on every context type. `extensions()` is the per-call typed bag; it mutates through `&self`, so a guard can `ctx.extensions().insert(v)` for a later stage to read.
 
 Where headers travel on the wire is transport-specific: NATS headers, AMQP headers, MQTT v5 user properties, Kafka headers, a `metadata` field in the TCP/UDP frame, or the Redis request envelope. Each transport page states its mapping.
 

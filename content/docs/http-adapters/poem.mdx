@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Toni's `{param}` path syntax is rewritten to Poem's `:param` form at mount time. Every standard method has a direct mapping (`GET` through `TRACE` and `CONNECT`), so dispatch is exact-match. The adapter mounts no catch-all — a `/*` route would shadow an exact route at `/` in Poem's router — so unmatched paths surface as the router's `NotFoundError`, which the global-chain wrapper maps to Toni's standard 404 envelope.
+Toni's `{param}` path syntax is rewritten to Poem's `:param` form at mount time. Every standard method has a direct mapping (`GET` through `TRACE` and `CONNECT`), and dispatch is exact-match. The adapter mounts no catch-all: a `/*` route would shadow an exact route at `/` in Poem's router. Unmatched paths therefore surface as the router's `NotFoundError`, which the global-chain wrapper maps to Toni's standard 404 envelope.
 
 ## WebSocket support
 

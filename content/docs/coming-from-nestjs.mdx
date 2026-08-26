@@ -1,6 +1,6 @@
 ---
 title: Coming from NestJS
-description: The decorator-to-macro map, a small NestJS application ported line by line, and the places where Toni deliberately differs.
+description: The decorator-to-macro map, a small NestJS application ported line by line, and the places where Toni diverges.
 ---
 
 Toni takes its architecture from NestJS: modules own controllers and providers, dependencies arrive through a container, and every request passes through guards, interceptors, and pipes on its way to a handler. If you know that model, you already know how a Toni application is laid out.
@@ -221,7 +221,7 @@ app.start().await.unwrap();
 
 `create` takes the root module the way `NestFactory.create` does. There is no `app.listen`: the HTTP server is a separate choice, and `use_http_adapter` is the call that registers every route from the module tree with it.
 
-## Where Toni deliberately differs
+## Where Toni diverges
 
 These are the places the map above does not reach — where a NestJS habit produces code that is wrong rather than merely spelled differently.
 

@@ -245,7 +245,7 @@ async fn whoami(&self, session: Session) -> WsHandlerResult {
 
 Guards run at connect (before `#[on_connect]`) and again per message; the session already exists when the connect guard runs, so its write is there for every message that follows.
 
-Two stores, two lifetimes: the session lives as long as the connection; `ctx.extensions()` (or an `Extensions` handler parameter) empties with each execution — one message, or the connect. Request scope on WebSocket is per **message**, so what an enhancer stashes in extensions is gone when the next message arrives. Connection state goes in the session, per-message state in extensions.
+Two stores, two lifetimes: the session lives as long as the connection; `ctx.extensions()` (or an `Extensions` handler parameter) empties with each execution — one message, or the connect. Request scope on WebSocket is per **message**, so what an enhancer stashes in extensions is gone when the next message arrives.
 
 ## WsMessage
 

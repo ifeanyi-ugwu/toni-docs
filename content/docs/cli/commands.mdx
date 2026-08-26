@@ -243,7 +243,7 @@ Flags outside that list go through `--cargo-arg`, one argument per occurrence:
 toni dev --cargo-arg --offline --cargo-arg --timings
 ```
 
-The cargo command is assembled in a fixed order — `run`, `--release`, the target selector (`--package`/`--bin`/`--example`), `--features`, `--all-features`, `--no-default-features`, the `--cargo-arg` values in the order given, then `--` and the application arguments — so the command printed at startup is predictable.
+The cargo command is assembled in a fixed order: `run`, `--release`, the target selector (`--package`/`--bin`/`--example`), `--features`, `--all-features`, `--no-default-features`, the `--cargo-arg` values in the order given, then `--` and the application arguments.
 
 ### Surviving the rebuild gap
 

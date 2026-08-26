@@ -108,7 +108,7 @@ pub struct ReportsService {
 }
 ```
 
-Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different URLs are refused at startup (one would silently shadow the other), so every connection past the first needs a name. A named connection registers the connection only; the `health` feature's indicator stays on the default `for_root` connection.
+Names are global identifiers — two connections cannot share one, even across different integration crates. Two unnamed `for_root` calls with different URLs are refused at startup (one would shadow the other with no error), so every connection past the first needs a name. A named connection registers the connection only; the `health` feature's indicator stays on the default `for_root` connection.
 
 ## Using env vars
 

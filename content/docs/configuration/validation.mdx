@@ -52,11 +52,11 @@ Validation runs inside the `ConfigModule` constructors, after every field has be
 - `ConfigModule::<AppConfig>::from_env()` / `from_file(path)` / `from_env_file(env)` return `Err(ConfigError::ValidationError(...))` when a constraint fails.
 - `ConfigModule::<AppConfig>::new()` panics, with a message naming the config type; an embedding process or a test can catch the unwind.
 
-There is no separate `load_and_validate()` call — loading and validating are one step.
+Loading and validating are one step — there is no separate `load_and_validate()` call.
 
 ## Failure behavior
 
-A failing constraint prevents the module from being constructed, so the application never starts with an invalid configuration:
+A failing constraint prevents the module from being constructed, and the application never starts with an invalid configuration:
 
 ```rust
 use toni_config::{Config, ConfigModule};

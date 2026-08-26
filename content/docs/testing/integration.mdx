@@ -164,7 +164,7 @@ async fn test_users_controller() {
 
 ## Lifecycle hooks in tests
 
-Lifecycle hooks run normally in integration tests. If `on_module_init` makes real network calls (database, cache), consider using test-specific provider implementations that avoid external systems.
+Lifecycle hooks run normally in integration tests. If `on_module_init` makes real network calls (database, cache), use test-specific provider implementations that avoid external systems.
 
 ## Asserting startup failures
 

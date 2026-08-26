@@ -99,7 +99,7 @@ let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
 app.use_websocket_listener(4000, listener)?;
 ```
 
-The declared port is a key, not an address: it selects which gateway the socket serves, and the socket may listen on a different port entirely — `BoundAdapters.websocket` reports the address it actually listens on. A listener supplied for a port no gateway declares fails `bind()`, since nothing would ever accept on it.
+The declared port is a key, not an address: it selects which gateway the socket serves, and the socket may listen on a different port entirely — `BoundAdapters.websocket` reports the address it listens on. A listener supplied for a port no gateway declares fails `bind()`, since nothing would ever accept on it.
 
 Same-port gateways ride the HTTP listener; hand their socket to `use_http_adapter` instead. See [Bind Targets](/docs/techniques/bind-targets) for the pre-bound-listener workflow — systemd socket activation, `listenfd`, zero-downtime restarts.
 

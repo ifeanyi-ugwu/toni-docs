@@ -28,7 +28,7 @@ impl UsersService {
 }
 ```
 
-`#[injectable]` goes directly on the struct; the `impl` block is standard Rust. `#[default(expr)]` initializes owned state; untagged fields fall back to `Default::default()`. The macro supplies the `Clone` impl the container needs, so the struct carries no derive ceremony.
+`#[injectable]` goes directly on the struct; the `impl` block is standard Rust. `#[default(expr)]` initializes owned state; untagged fields fall back to `Default::default()`. The macro supplies the `Clone` impl the container needs.
 
 ## Injecting into other services
 

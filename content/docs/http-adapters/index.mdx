@@ -80,7 +80,7 @@ let listener = std::net::TcpListener::bind("127.0.0.1:3000")?;
 app.use_http_adapter(AxumAdapter::new(), listener)?;
 ```
 
-The second form matters when something outside the process owns the socket. A supervisor that holds the listener across restarts keeps the port answering while the application is replaced: connections queue in the kernel backlog instead of being refused, which is what turns a rebuild in development into added latency rather than a wall of connection errors, and what makes systemd socket activation and zero-downtime restarts work. Tests use it to bind port `0` themselves and keep the address, with no window for another process to take the port.
+The second form matters when something outside the process owns the socket. A supervisor that holds the listener across restarts keeps the port answering while the application is replaced: connections queue in the kernel backlog instead of being refused. That turns a rebuild in development into added latency rather than a wall of connection errors, and it is what makes systemd socket activation and zero-downtime restarts work. Tests use it to bind port `0` themselves and keep the address, with no window for another process to take the port.
 
 Pair it with [`listenfd`](https://crates.io/crates/listenfd) to pick up a socket passed in by systemd or [`systemfd`](https://crates.io/crates/systemfd):
 
@@ -93,7 +93,11 @@ let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
 app.use_http_adapter(AxumAdapter::new(), target)?;
 ```
 
-Toni reads no environment protocol itself — it accepts a listener and asks nothing about where it came from, so any supervisor works. `toni-rocket` is the exception: Rocket binds inside `launch()` from its own configuration, so passing it a listener fails at `app.bind()` with an error naming the limitation. See [Development Workflow](/docs/getting-started/development-workflow) for the watch-restart loop, and [Bind Targets](/docs/techniques/bind-targets) for the full surface — including listener adoption on the WebSocket, TCP, UDP, and gRPC transports.
+Toni reads no environment protocol itself — it accepts a listener and asks nothing about where it came from, so any supervisor works.
+
+`toni-rocket` is the exception: Rocket binds inside `launch()` from its own configuration, so passing it a listener fails at `app.bind()` with an error naming the limitation.
+
+See [Development Workflow](/docs/getting-started/development-workflow) for the watch-restart loop, and [Bind Targets](/docs/techniques/bind-targets) for the full surface — including listener adoption on the WebSocket, TCP, UDP, and gRPC transports.
 
 ## Bounded in-flight requests
 

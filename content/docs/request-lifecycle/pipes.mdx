@@ -5,7 +5,7 @@ description: Pipes transform and validate the request context right before the r
 
 A pipe is a synchronous hook that runs after guards and interceptors, immediately before the handler. It inspects the per-request context and may answer the request by returning `Some(response)`; `None` passes the request through. A pipe can also attach data for the handler via extensions.
 
-For parsing and validating request data, pipes are rarely the right tool in Toni — extractors and `Validated<T>` cover those cases at the type level. Pipes exist for genuinely cross-cutting transformations applied to many routes regardless of their body types.
+For parsing and validating request data, pipes are rarely the right tool in Toni — extractors and `Validated<T>` cover those cases at the type level. Pipes exist for cross-cutting transformations applied to many routes regardless of their body types.
 
 ## The Pipe trait
 

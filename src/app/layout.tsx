@@ -13,13 +13,35 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const TITLE = "Toni — a modular Rust framework for server applications";
+const DESCRIPTION =
+  "Toni organizes Rust server applications into modules, controllers, and injectable services, with guards, interceptors, and pipes on HTTP, WebSocket, RPC, and gRPC alike. Bring your own HTTP server: Axum, Actix, Salvo, Poem, and Rocket adapters ship with it.";
+
+// Set NEXT_PUBLIC_SITE_URL to the deployed origin so shared links resolve the
+// OG image. Vercel supplies its own production host; localhost is the fallback
+// for a local build.
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    : "http://localhost:3000");
+
 export const metadata: Metadata = {
-  title: {
-    template: "%s | Toni",
-    default: "Toni — a modular Rust framework for server applications",
+  metadataBase: new URL(siteUrl),
+  title: { template: "%s | Toni", default: TITLE },
+  description: DESCRIPTION,
+  openGraph: {
+    type: "website",
+    siteName: "Toni",
+    title: TITLE,
+    description: DESCRIPTION,
+    url: "/",
   },
-  description:
-    "Toni organizes Rust server applications into modules, controllers, and injectable services, with guards, interceptors, and pipes on HTTP, WebSocket, RPC, and gRPC alike. Bring your own HTTP server: Axum, Actix, Salvo, Poem, and Rocket adapters ship with it.",
+  twitter: {
+    card: "summary_large_image",
+    title: TITLE,
+    description: DESCRIPTION,
+  },
 };
 
 export default function RootLayout({

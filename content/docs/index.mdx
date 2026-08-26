@@ -1,6 +1,118 @@
 ---
-title: Toni Documentation
-description: A modular, framework-agnostic Rust web framework inspired by NestJS architecture.
+title: Documentation
+description: A modular Rust framework for server-side applications — modules, dependency injection, and one enhancer chain across every transport.
 ---
 
-Welcome to the Toni documentation. Use the sidebar to navigate.
+Toni organizes a Rust application into **modules**, each holding **controllers** that answer requests and **services** that carry the logic. Dependencies arrive through a container. Every request passes through the same chain of middleware, guards, interceptors, and pipes, whether it arrived over HTTP, a WebSocket, an RPC transport, or gRPC.
+
+Toni is not an HTTP server. Sockets, TLS, and parsing belong to the adapter you pick — five ship with the framework, and the seam is a trait you can implement yourself.
+
+## Start here
+
+<Cards>
+  <Card
+    title="Quick Start"
+    href="/docs/getting-started/quick-start"
+    description="An empty directory to a running API with a controller, a service, and a wired module."
+  />
+  <Card
+    title="Coming from NestJS"
+    href="/docs/coming-from-nestjs"
+    description="The decorator-to-macro map, a small application ported line by line, and where Toni deliberately differs."
+  />
+  <Card
+    title="Installation"
+    href="/docs/getting-started/installation"
+    description="Add Toni to an existing project, or scaffold one with the CLI."
+  />
+  <Card
+    title="Introduction"
+    href="/docs/getting-started"
+    description="What the framework does, what it leaves to you, and when it earns its keep."
+  />
+</Cards>
+
+## The model
+
+<Cards>
+  <Card
+    title="Core Concepts"
+    href="/docs/core-concepts/modules"
+    description="Modules, controllers, services, the container, and the provider forms."
+  />
+  <Card
+    title="Request Lifecycle"
+    href="/docs/request-lifecycle"
+    description="The order every request travels, and what each layer is allowed to do."
+  />
+  <Card
+    title="Extractors"
+    href="/docs/extractors/built-in"
+    description="Typed access to path, query, body, and uploads — checked at compile time."
+  />
+  <Card
+    title="Lifecycle Hooks"
+    href="/docs/lifecycle-hooks"
+    description="Init, bootstrap, and shutdown, and how to trigger a graceful drain."
+  />
+</Cards>
+
+## Transports
+
+<Cards>
+  <Card
+    title="HTTP Adapters"
+    href="/docs/http-adapters/overview"
+    description="Axum, Actix, Salvo, Poem, and Rocket, with the feature matrix and the SPI for a sixth."
+  />
+  <Card
+    title="WebSocket"
+    href="/docs/websocket/gateways"
+    description="Gateways, rooms, broadcasting, and per-connection sessions."
+  />
+  <Card
+    title="Microservices"
+    href="/docs/microservices/overview"
+    description="Pattern-matched RPC over TCP, UDP, NATS, Redis, RabbitMQ, MQTT, or Kafka."
+  />
+  <Card
+    title="gRPC"
+    href="/docs/grpc/overview"
+    description="Contract-first services on tonic, including all four streaming modes."
+  />
+</Cards>
+
+## Around the application
+
+<Cards>
+  <Card
+    title="Database"
+    href="/docs/database/seaorm"
+    description="SeaORM, SQLx, Diesel, MongoDB, Redis, and Prisma, each behind a startup check."
+  />
+  <Card
+    title="Configuration"
+    href="/docs/configuration/config-module"
+    description="Typed configuration from the environment or a file, validated at load."
+  />
+  <Card
+    title="GraphQL"
+    href="/docs/graphql/overview"
+    description="async-graphql or juniper, mounted as a module."
+  />
+  <Card
+    title="Techniques"
+    href="/docs/techniques/sse"
+    description="Server-sent events, health checks, logging, and socket hand-off."
+  />
+  <Card
+    title="Testing"
+    href="/docs/testing/unit"
+    description="Unit tests against plain structs, and integration tests against a bound application."
+  />
+  <Card
+    title="Deployment"
+    href="/docs/deployment/production"
+    description="Production builds, containers, and running behind a reverse proxy."
+  />
+</Cards>

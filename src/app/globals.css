@@ -6,3 +6,17 @@
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
+
+/* The fumadocs neutral preset is pure greyscale. One accent, used on the
+   wordmark, primary actions, and the macro attributes in code samples —
+   nothing else. Redefined under .dark the same way the preset redefines its
+   own tokens. */
+@theme {
+  --color-brand: oklch(45% 0.08 175);
+  --color-brand-foreground: oklch(98% 0 0);
+}
+
+.dark {
+  --color-brand: oklch(79% 0.09 175);
+  --color-brand-foreground: oklch(18% 0.02 175);
+}

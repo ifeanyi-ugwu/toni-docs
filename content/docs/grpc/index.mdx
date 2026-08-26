@@ -7,7 +7,7 @@ description: Contract-first gRPC with tonic — DI-registered services, enhancer
 
 ## Contract-first, not pattern-string
 
-The [RPC adapters](/docs/microservices/overview) (TCP, NATS, and friends) route by pattern strings with JSON payloads resolved at runtime. gRPC is different by design: services and methods are declared in `.proto` files, known at compile time via tonic-generated traits, dispatched with typed protobuf messages, and support four call shapes (unary plus three streaming modes). None of that fits the pattern-string + JSON contract, so gRPC has its own adapter interface (`use_grpc_adapter`) and its own macros instead of `#[rpc_controller]`.
+The [RPC adapters](/docs/microservices) (TCP, NATS, and friends) route by pattern strings with JSON payloads resolved at runtime. gRPC is different by design: services and methods are declared in `.proto` files, known at compile time via tonic-generated traits, dispatched with typed protobuf messages, and support four call shapes (unary plus three streaming modes). None of that fits the pattern-string + JSON contract, so gRPC has its own adapter interface (`use_grpc_adapter`) and its own macros instead of `#[rpc_controller]`.
 
 The `.proto` file is the source of truth. A `build.rs` compiles it to a Rust trait; your service implements that trait; the framework wraps the impl and registers it with tonic at bind time.
 

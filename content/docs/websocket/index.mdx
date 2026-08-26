@@ -1,0 +1,17 @@
+---
+title: WebSocket
+description: Gateways, rooms, and broadcasting — with the same DI container and enhancer chain as HTTP.
+---
+
+A gateway is the WebSocket counterpart of a controller: a struct with message handlers, resolved from the container, wrapped in the same guards and interceptors. Gateways run on the HTTP port by default, or on one of their own.
+
+Two kinds of state matter here and are easy to confuse. Per-connection state belongs in the **session**, which lives as long as the client. Per-message state belongs in the context extensions — WebSocket request scope is one message, not one connection.
+
+<Cards>
+  <Card title="Gateways" href="/docs/websocket/gateways" description="Declaring a gateway, handling messages, and the connection hooks." />
+  <Card title="Broadcasting" href="/docs/websocket/broadcasting" description="Sending to every client, or a subset, from anywhere in the application." />
+  <Card title="Rooms" href="/docs/websocket/rooms" description="Named groups of clients, and addressing messages to them." />
+  <Card title="WebSocket + DI" href="/docs/websocket/with-di" description="Injecting services into gateways, and applying guards and interceptors." />
+  <Card title="Separate-Port Gateways" href="/docs/websocket/separate-port" description="Running a gateway on its own port with a dedicated adapter." />
+  <Card title="Redis Broadcast" href="/docs/websocket/redis-broadcast" description="Broadcasting across processes when one instance is no longer enough." />
+</Cards>

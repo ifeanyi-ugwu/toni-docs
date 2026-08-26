@@ -1,0 +1,12 @@
+---
+title: Configuration
+description: Typed configuration loaded from the environment or a file, and validated before the application starts.
+---
+
+Configuration is a struct you derive `Config` on. Fields map to environment variables or file keys, defaults are declared inline, and the whole thing is injected as `ConfigService<T>` — so a typo in a variable name is a startup failure rather than a `None` discovered in production.
+
+<Cards>
+  <Card title="Config Module" href="/docs/configuration/config-module" description="Declaring a config struct, loading it, and injecting it." />
+  <Card title="Environment Variables" href="/docs/configuration/environment" description="Reading the environment directly, and detecting the current one." />
+  <Card title="Validation" href="/docs/configuration/validation" description="Constraints checked at load, so bad config never reaches a handler." />
+</Cards>

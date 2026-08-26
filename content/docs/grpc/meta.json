@@ -1,4 +1,11 @@
 {
   "title": "gRPC",
-  "pages": ["overview", "quick-start", "streaming", "enhancers", "error-handling", "operations"]
+  "pages": [
+    "index",
+    "quick-start",
+    "streaming",
+    "enhancers",
+    "error-handling",
+    "operations"
+  ]
 }

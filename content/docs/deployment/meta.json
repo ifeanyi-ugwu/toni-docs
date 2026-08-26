@@ -1,4 +1,8 @@
 {
   "title": "Deployment",
-  "pages": ["production", "docker"]
+  "pages": [
+    "index",
+    "production",
+    "docker"
+  ]
 }

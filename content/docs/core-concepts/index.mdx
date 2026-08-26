@@ -1,0 +1,17 @@
+---
+title: Core Concepts
+description: Modules, controllers, services, and the container that wires them together.
+---
+
+Four ideas carry a Toni application. A **module** groups related pieces and decides what leaves it. A **controller** turns requests into calls. A **service** holds the logic. The **container** connects them, so nothing constructs its own dependencies.
+
+Read them in order the first time — each builds on the last. `Modules` is the one to start with, because every other declaration ends up listed in one.
+
+<Cards>
+  <Card title="Modules" href="/docs/core-concepts/modules" description="Grouping controllers and providers, and controlling what a module shares." />
+  <Card title="Controllers" href="/docs/core-concepts/controllers" description="Route declarations, handler signatures, and where the framework scans." />
+  <Card title="Services & Providers" href="/docs/core-concepts/services" description="Injectable types, construction, scope, and async initialization." />
+  <Card title="Dependency Injection" href="/docs/core-concepts/dependency-injection" description="How the container resolves tokens, shares instances, and reports cycles." />
+  <Card title="Provider Patterns" href="/docs/core-concepts/provider-patterns" description="Values, factories, aliases, and custom tokens for everything that is not a plain struct." />
+  <Card title="Lifecycle Hooks" href="/docs/core-concepts/lifecycle-hooks" description="Running code at init, bootstrap, and shutdown — and triggering a graceful drain." />
+</Cards>

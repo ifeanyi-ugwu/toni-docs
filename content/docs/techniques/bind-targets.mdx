@@ -43,7 +43,7 @@ app.use_http_adapter(AxumAdapter::new(), listener)?;
 
 Either way, `app.bind()` returns the actual address in [`BoundAdapters`](/docs/api-reference/core) — which is how port `0` works: pass it, read back what the OS assigned.
 
-`toni-axum`, `toni-actix`, `toni-salvo`, and `toni-poem` all adopt a pre-bound listener. `toni-rocket` cannot — Rocket binds inside `launch()` from its own figment config — so handing it a `Listener` fails at `app.bind()` with an error saying to pass a `(host, port)` address instead. The [adapter capability table](/docs/http-adapters/overview#official-adapters) tracks this.
+`toni-axum`, `toni-actix`, `toni-salvo`, and `toni-poem` all adopt a pre-bound listener. `toni-rocket` cannot — Rocket binds inside `launch()` from its own figment config — so handing it a `Listener` fails at `app.bind()` with an error saying to pass a `(host, port)` address instead. The [adapter capability table](/docs/http-adapters#official-adapters) tracks this.
 
 ## Taking an inherited socket, with a fallback
 

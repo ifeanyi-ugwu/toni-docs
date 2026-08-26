@@ -114,7 +114,7 @@ app.use_http_adapter(AxumAdapter::new(), target)?;
 
 Save a file now and the request you fire during the rebuild is answered by the new process rather than refused.
 
-`toni-rocket` is the one adapter this does not work with — Rocket binds internally from its own configuration and rejects a pre-supplied listener, failing at `app.bind()`. See the [adapter capability table](/docs/http-adapters/overview#official-adapters).
+`toni-rocket` is the one adapter this does not work with — Rocket binds internally from its own configuration and rejects a pre-supplied listener, failing at `app.bind()`. See the [adapter capability table](/docs/http-adapters#official-adapters).
 
 `--listen` needs file-descriptor passing and is therefore Unix-only. [systemfd](https://crates.io/crates/systemfd) is the cross-platform alternative and works with any watcher, including plain `bacon` or `cargo watch`:
 

@@ -82,7 +82,7 @@ app.use_grpc_adapter<A: GrpcAdapter>(adapter: A)
 
 gRPC is registered separately from RPC because it is contract-first (`.proto` services, streaming) rather than pattern-string + JSON.
 
-`BindTarget` is where the HTTP adapter listens: `("127.0.0.1", 3000)` binds an address, a `std::net::TcpListener` serves on a socket already bound — see [Where to listen](/docs/http-adapters/overview#where-to-listen). RPC and gRPC adapters take their address in their own constructors.
+`BindTarget` is where the HTTP adapter listens: `("127.0.0.1", 3000)` binds an address, a `std::net::TcpListener` serves on a socket already bound — see [Where to listen](/docs/http-adapters#where-to-listen). RPC and gRPC adapters take their address in their own constructors.
 
 `use_websocket_listener` hands a pre-bound socket to the separate-port gateways declared with `port = declared_port`; the declared port selects the gateway, `BoundAdapters.websocket` reports where the socket actually listens. A listener supplied for a port no gateway declares fails `bind()`. Same-port gateways ride the HTTP listener — pass their socket to `use_http_adapter` instead.
 
@@ -386,7 +386,7 @@ pub struct CorsOptions {
 }
 ```
 
-Preflight requests are answered directly with 204 before routing. See [CORS](/docs/security/cors).
+Preflight requests are answered directly with 204 before routing. See [CORS](/docs/techniques/cors).
 
 ### ErrorObserver
 

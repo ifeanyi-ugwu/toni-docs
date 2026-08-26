@@ -1,10 +1,12 @@
 {
   "title": "Core Concepts",
   "pages": [
+    "index",
     "modules",
     "controllers",
     "services",
     "dependency-injection",
-    "provider-patterns"
+    "provider-patterns",
+    "lifecycle-hooks"
   ]
 }

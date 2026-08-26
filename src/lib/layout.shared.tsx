@@ -5,7 +5,7 @@ export function baseOptions(): BaseLayoutProps {
     nav: {
       title: (
         <span className="font-semibold tracking-tight">
-          <span className="text-fd-primary">toni</span>
+          <span className="text-brand">toni</span>
         </span>
       ),
     },

@@ -7,20 +7,6 @@ Lifecycle hooks are methods on providers, controllers, and modules that Toni cal
 
 Hooks are only supported on **singleton-scoped** providers. Request- and transient-scoped instances don't exist at application init or shutdown, so declaring a hook on one is a compile error.
 
-<Bridge>
-These are the same lifecycle events as NestJS: `OnModuleInit`, `OnApplicationBootstrap`, `OnModuleDestroy`, `BeforeApplicationShutdown`, `OnApplicationShutdown`. Instead of implementing an interface, you annotate a method with the corresponding attribute.
-
-| NestJS interface | Toni attribute |
-|-----------------|----------------|
-| `OnModuleInit` → `onModuleInit()` | `#[on_module_init]` |
-| `OnApplicationBootstrap` → `onApplicationBootstrap()` | `#[on_application_bootstrap]` |
-| `OnModuleDestroy` → `onModuleDestroy()` | `#[on_module_destroy]` |
-| `BeforeApplicationShutdown` → `beforeApplicationShutdown(signal)` | `#[before_application_shutdown]` |
-| `OnApplicationShutdown` → `onApplicationShutdown(signal)` | `#[on_application_shutdown]` |
-
-One difference: NestJS installs shutdown hooks on SIGTERM via `enableShutdownHooks()`. Toni installs no signal handlers — you wire signals to a `ShutdownHandle` yourself (see below).
-</Bridge>
-
 ## Available hooks
 
 ### `#[on_module_init]`
@@ -191,6 +177,12 @@ app.run().await; // drains in-flight requests, then runs the shutdown hooks
 ```
 
 `ShutdownHandle::shutdown()` lets in-flight requests drain before hooks run. `app.close().await` runs the hooks and closes adapters immediately — it returns `()`, so there is nothing to `?` or `.unwrap()`.
+
+<FromNest>
+NestJS starts running these on SIGTERM once `enableShutdownHooks()` is called.
+Toni installs no signal handlers at all. Nothing triggers the shutdown hooks on
+Ctrl-C unless you wire a signal to a `ShutdownHandle` yourself.
+</FromNest>
 
 ## Standalone context
 

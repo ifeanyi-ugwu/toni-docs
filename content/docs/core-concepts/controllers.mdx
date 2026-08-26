@@ -5,10 +5,6 @@ description: Controllers define HTTP routes and map them to handler functions.
 
 A controller is a struct annotated with `#[controller("/prefix")]` that groups related HTTP route handlers under a base path. The handlers live in a sibling `impl` block marked `#[routes]`, where each method carries the HTTP verb it responds to.
 
-<Bridge>
-Controllers in Toni serve the exact same purpose as controllers in NestJS. Instead of `@Controller('path')` you use `#[controller("/path")]` on the struct, and instead of `@Get()`, `@Post()` etc. you use `#[get]`, `#[post]`, etc. on methods.
-</Bridge>
-
 ## Defining a controller
 
 ```rust
@@ -69,6 +65,16 @@ impl ItemsController {
 ```
 
 Handlers can be sync or `async`. Beyond the four verbs, `#[sse("/path")]` declares a Server-Sent Events handler that returns a stream of events — see [Server-Sent Events](/docs/techniques/sse).
+
+<FromNest>
+`@Controller('users')` becomes `#[controller("/users")]`, but the handlers do not
+move with it. A NestJS controller holds its routes in the class body; a Toni
+controller holds only its injected dependencies, and the handlers live in a
+second `impl` block marked `#[routes]`. A `#[get]` on a plain `impl` is not
+scanned, and the route never registers.
+
+Path parameters are written `{id}`. The `:id` form is a compile error.
+</FromNest>
 
 ## Request data
 

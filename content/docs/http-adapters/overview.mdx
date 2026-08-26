@@ -103,10 +103,6 @@ Unlike the RPC and gRPC adapters, HTTP adapters expose no `with_max_inflight` kn
 2. **Framework-native layers** — `tower::limit::GlobalConcurrencyLimitLayer` on axum/poem (via [`tower-compat`](/docs/http-adapters/axum#tower-layers)), Actix-web middleware, or a Rocket fairing.
 3. **A reverse proxy** (nginx, HAProxy) handling rate-limiting at the network layer.
 
-<Bridge>
-NestJS's platform adapters (`@nestjs/platform-express`, `@nestjs/platform-fastify`) serve the same purpose. Toni works the same way at the seam: the adapter is registered at runtime (`app.use_http_adapter(...)`) and held as a boxed trait object, so application code never mentions the concrete adapter type — exactly like swapping Express for Fastify in Nest.
-</Bridge>
-
 ## Sections in this chapter
 
 - [Axum Adapter](/docs/http-adapters/axum) — the default; full streaming and WebSocket support

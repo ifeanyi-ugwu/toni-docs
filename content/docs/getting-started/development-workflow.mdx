@@ -5,10 +5,6 @@ description: Rebuild and restart the server on save, and keep the port answering
 
 Save a file, the project rebuilds, the server restarts. The CLI ships this loop as `toni dev`; the generic Rust watch tools work just as well.
 
-<Bridge>
-`nest start --watch` is the same loop: recompile and restart the process on save. It feels instantaneous because TypeScript compiles in milliseconds; a Rust incremental rebuild takes seconds, which is why the build-speed adjustments below matter more here than they do in Node.
-</Bridge>
-
 ## toni dev
 
 From the project root:
@@ -47,6 +43,13 @@ bacon run
 ```
 
 `bacon run` rebuilds and restarts the application on save. Plain `bacon` runs `cargo check` on save instead — the fastest way to see errors while editing, when you don't need the server up.
+
+<FromNest>
+`toni dev` is the same loop as `nest start --watch`: recompile, restart. The unit
+is different — TypeScript recompiles in milliseconds, a Rust incremental rebuild
+takes seconds. That is why the settings below are worth applying here and are not
+worth thinking about in Node.
+</FromNest>
 
 ## Faster rebuilds
 

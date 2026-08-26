@@ -5,10 +5,6 @@ description: How Toni handles inter-service communication through pluggable tran
 
 Toni supports microservice communication through an **RPC transport layer** that is completely decoupled from HTTP. The same module and DI system used for HTTP controllers applies to RPC — services share one container, controllers get injected dependencies, lifecycle hooks run the same way.
 
-<Bridge>
-This maps directly to NestJS microservices. Where NestJS uses `@MessagePattern()` and `@EventPattern()` on `@Controller()`-decorated classes, Toni uses `#[message_pattern]` and `#[event_pattern]` handlers inside a `#[patterns]` impl on an `#[rpc_controller]` struct. Transport choice is a single constructor call rather than a factory option object.
-</Bridge>
-
 ## How it works
 
 An RPC application runs alongside (or instead of) an HTTP server. After creating the application, register a transport adapter and start:

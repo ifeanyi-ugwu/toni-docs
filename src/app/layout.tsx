@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { RootProvider } from "fumadocs-ui/provider/next";
-import { DocModeProvider } from "@/context/doc-mode";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -17,10 +16,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: {
     template: "%s | Toni",
-    default: "Toni — NestJS Architecture for Rust",
+    default: "Toni — a modular Rust framework for server applications",
   },
   description:
-    "Toni is a modular, framework-agnostic Rust web framework inspired by NestJS. Build scalable server-side applications with dependency injection, guards, interceptors, and more.",
+    "Toni organizes Rust server applications into modules, controllers, and injectable services, with guards, interceptors, and pipes on HTTP, WebSocket, RPC, and gRPC alike. Bring your own HTTP server: Axum, Actix, Salvo, Poem, and Rocket adapters ship with it.",
 };
 
 export default function RootLayout({
@@ -35,9 +34,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="flex min-h-screen flex-col antialiased">
-        <DocModeProvider>
-          <RootProvider>{children}</RootProvider>
-        </DocModeProvider>
+        <RootProvider>{children}</RootProvider>
       </body>
     </html>
   );

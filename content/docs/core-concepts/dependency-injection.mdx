@@ -5,12 +5,6 @@ description: How Toni's DI container resolves, instantiates, and shares provider
 
 Toni includes a built-in dependency injection (DI) container. It resolves the dependency graph at startup, instantiates providers in the correct order, and wires everything together before the first request arrives.
 
-<Bridge>
-This is the same container-based DI that NestJS uses. In NestJS, the container is managed by the framework's `Injector`. In Toni, the equivalent is `ToniContainer`, which you never interact with directly — `ToniFactory` drives it.
-
-The key concepts (tokens, scopes, the graph resolution) work the same way.
-</Bridge>
-
 ## How resolution works
 
 When `ToniFactory::create` runs:
@@ -199,10 +193,6 @@ Cannot resolve dependencies for modules: ["ModuleA"]. No provider cycle was foun
 
 A cycle message always points to a genuine construction cycle. The fix is to break it.
 
-<Bridge>
-NestJS breaks a cycle with `forwardRef`. Toni has no equivalent and needs none: `forwardRef` defers a class reference that is `undefined` at module-evaluation time, but Toni identifies providers by string token and resolves them at runtime, so a reference is never undefined and there is nothing to defer. A reported cycle is always a real construction cycle, not a language artifact.
-</Bridge>
-
 ### Breaking a cycle
 
 **Extract the shared logic.** Move what both services need into a third provider that each depends on. Neither service then depends on the other, and the cycle disappears. A mutual dependency is usually a sign the two services share a responsibility that wants its own home, so this is the right fix for most cycles.
@@ -233,3 +223,11 @@ impl ServiceB {
 ```
 
 `ServiceB` no longer depends on `ServiceA` at construction, so the container builds `ServiceB` first and the cycle never forms. Both instances exist by the time `notify_a` runs, and `get` returns `ServiceA` from the current module; chain `.global()` before `.await` to widen the search to exported and global providers.
+
+<FromNest>
+There is no `forwardRef`, and none is needed. `forwardRef` defers a class
+reference that is `undefined` at module-evaluation time. Toni identifies
+providers by string token and resolves them at runtime, so a reference is never
+undefined and there is nothing to defer. A reported cycle is a real construction
+cycle — break it rather than look for the escape hatch.
+</FromNest>

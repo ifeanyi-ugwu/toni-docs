@@ -91,11 +91,13 @@ The root module is the entry point for the module graph. In a larger application
 pub struct AppModule;
 ```
 
-<Bridge>
-This maps directly to the NestJS convention of `feature/feature.module.ts`, `feature/feature.controller.ts`, `feature/feature.service.ts` — the CLI reproduces it with `#[path]` attributes. Toni has no mandated file naming convention; hand-rolled layouts with plain snake_case file names (`users_module.rs`) work without the `#[path]` indirection.
-
-Dynamic module configuration also carries over: integration crates expose `for_root` constructors returning a `DynamicModule` (for example `RedisModule::for_root(url)` listed under `imports:`), the counterpart to NestJS `forRoot()`.
-</Bridge>
+<FromNest>
+The CLI reproduces the `feature/feature.module.ts` convention with `#[path]`
+attributes, which is what lets a file called `app.module.rs` resolve at all.
+Nothing requires it — a hand-rolled `users_module.rs` works without the `#[path]`
+indirection. `forRoot()` carries over as `for_root`: integration crates return a
+`DynamicModule` that you list under `imports:`.
+</FromNest>
 
 ## Shared/common code
 

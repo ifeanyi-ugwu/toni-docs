@@ -5,10 +5,6 @@ description: Pass an address to bind, or hand over a socket another process alre
 
 Every server answers "where do I listen" — the sharper question is who owns the socket. When the process binds its own port, the socket dies with the process: a dev-loop restart refuses connections until the rebuild finishes, and a deploy drops whatever arrives during the swap. When something that outlives the process owns the socket — a watcher, systemd, a test harness that bound port `0` itself — connections queue in the kernel's accept backlog and are answered by whichever process accepts next. `BindTarget` makes that ownership a parameter instead of an assumption.
 
-<Bridge>
-NestJS's `app.listen(3000)` always has the process bind its own socket; there is no first-class way to hand Nest a socket another process bound. `BindTarget` is that hand-off made explicit — the same registration call takes either an address or a live listener.
-</Bridge>
-
 ## The type
 
 ```rust

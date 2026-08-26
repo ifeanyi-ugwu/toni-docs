@@ -5,10 +5,6 @@ description: Testing individual services, guards, and interceptors in isolation.
 
 Unit tests in Toni are straightforward Rust unit tests — no special testing framework is needed. Since services are plain structs with methods, you instantiate them directly and call their methods.
 
-<Bridge>
-In NestJS you typically use `@nestjs/testing`'s `Test.createTestingModule()` to create isolated module instances. In Toni, you can do the same with `ToniFactory::create_application_context` for integration-style tests, but for unit tests you just construct your structs directly — no module system needed.
-</Bridge>
-
 ## Testing a service
 
 ```rust
@@ -51,6 +47,13 @@ mod tests {
 ```
 
 `#[new]` marks the DI constructor, and passes the method through unchanged — tests call `MathService::new()` like any constructor.
+
+<FromNest>
+There is no `Test.createTestingModule()` step. A service is a struct: construct
+it, call the method, assert. Reach for `ToniFactory::create_application_context`
+only when a test needs the container itself — resolution through tokens, request
+scope, or lifecycle hooks.
+</FromNest>
 
 ## Testing services with dependencies
 

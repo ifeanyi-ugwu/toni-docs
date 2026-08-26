@@ -7,10 +7,6 @@ A pipe is a synchronous hook that runs after guards and interceptors, immediatel
 
 For parsing and validating request data, pipes are rarely the right tool in Toni — extractors and `Validated<T>` cover those cases at the type level. Pipes exist for genuinely cross-cutting transformations applied to many routes regardless of their body types.
 
-<Bridge>
-This is the slot NestJS fills with `PipeTransform`. The big difference: NestJS leans on a global `ValidationPipe` because TypeScript types vanish at runtime. In Toni, `Path<i32>` already parses, `Validated<Json<T>>` already validates — visible in the handler signature and enforced by the compiler. `#[use_pipes(...)]` and global pipes exist for the cases extractors can't express.
-</Bridge>
-
 ## The Pipe trait
 
 ```rust
@@ -58,6 +54,15 @@ impl ProductsController {
 ```
 
 Type parsing works the same way: `Path<i32>` parses `"42"` into `42` and rejects `"abc"` with a 400 — no `ParseIntPipe` equivalent needed.
+
+<FromNest>
+There is no global `ValidationPipe` to register, and registering an equivalent is
+usually the wrong move. NestJS needs one because TypeScript types are gone at
+runtime. In Toni `Path<i32>` already parses and `Validated<Json<T>>` already
+validates, both visible in the handler signature and enforced by the compiler.
+`Pipe` covers what extractors cannot express — a check that needs a dependency,
+or one that spans several extracted values.
+</FromNest>
 
 ## A rejecting pipe
 

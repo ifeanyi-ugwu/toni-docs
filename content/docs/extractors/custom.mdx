@@ -5,10 +5,6 @@ description: Implement FromContext to extract any data from incoming requests wi
 
 When the built-in extractors don't cover your case, implement the extraction trait on your own type. The framework calls it automatically whenever the type appears in a handler signature.
 
-<Bridge>
-Custom extractors are Toni's equivalent of NestJS's `createParamDecorator()`. Where NestJS resolves `@CurrentUser()` at runtime through reflection, Toni resolves `user: CurrentUser` through a trait impl — same ergonomics, no hidden magic.
-</Bridge>
-
 ## One trait
 
 Every extractor — built-in or custom, on any transport — implements `FromContext`:

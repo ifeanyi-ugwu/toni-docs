@@ -5,10 +5,6 @@ description: Integrating a Prisma-generated client with Toni's module system.
 
 `toni-prisma` provides a `PrismaModule` that wraps any `prisma-client-rust`-generated client and makes it injectable throughout your application.
 
-<Bridge>
-This is the Toni equivalent of NestJS's `PrismaModule` pattern — generate the client from your schema, wrap it with `PrismaModule::for_root`, and inject it anywhere.
-</Bridge>
-
 ## Setup
 
 First, set up `prisma-client-rust` by following its [documentation](https://prisma.brendonovich.dev). Then add `toni-prisma`:

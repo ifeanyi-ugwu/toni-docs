@@ -1,0 +1,272 @@
+---
+title: Coming from NestJS
+description: The decorator-to-macro map, a small NestJS application ported line by line, and the places where Toni deliberately differs.
+---
+
+Toni takes its architecture from NestJS: modules own controllers and providers, dependencies arrive through a container, and every request passes through guards, interceptors, and pipes on its way to a handler. If you know that model, you already know how a Toni application is laid out.
+
+What changes is the language. TypeScript decorators become Rust attribute macros, classes become structs, and a handful of NestJS constructs turn out to be unnecessary once types survive to runtime. This page covers all three: the map, a full port, and the divergences.
+
+## The map
+
+### Declarations
+
+| NestJS | Toni |
+|--------|------|
+| `@Module({ ... })` | `#[module(...)]` on a unit struct or an `impl` block |
+| `imports` / `controllers` / `providers` / `exports` | same four keys, same meaning |
+| `@Global()` | `global: true`, or `.global()` on a `DynamicModule` |
+| `@Injectable()` | `#[injectable]` on the struct |
+| `@Controller('users')` | `#[controller("/users")]` on the struct; handlers in a `#[routes]` impl |
+| `@Get()` `@Post()` `@Put()` `@Delete()` | `#[get]` `#[post]` `#[put]` `#[delete]` |
+| `@Sse()` | `#[sse("/path")]` |
+| `@WebSocketGateway()` | `#[websocket_gateway("/path")]`; handlers in a `#[subscriptions]` impl |
+| `@SubscribeMessage('event')` | `#[subscribe_message("event")]` |
+| `@MessagePattern()` | `#[message_pattern]` in a `#[patterns]` impl on an `#[rpc_controller]` |
+| `@EventPattern()` | `#[event_pattern]` |
+| `@GrpcMethod()` | a method on the `#[grpc_methods]` trait impl |
+| `@SetMetadata()` | `#[set_metadata]` |
+
+### The enhancer chain
+
+| NestJS | Toni |
+|--------|------|
+| `CanActivate` | `Guard<C>` |
+| `NestInterceptor` | `Interceptor<C, R>` |
+| `PipeTransform` | `Pipe<C, R>` |
+| `ExceptionFilter` + `@Catch(T)` | `ErrorHandler<C, R>`, usually written as `#[catch(T)]` |
+| `NestMiddleware` | `Middleware` |
+| `@UseGuards()` `@UseInterceptors()` `@UsePipes()` | `#[use_guards]` `#[use_interceptors]` `#[use_pipes]` |
+| `useGlobalGuards()` | `use_global_http_guards()`, and one per transport |
+| `HttpException` | `HttpError` |
+| `RpcException` | `RpcError` |
+
+Toni auto-detects the role from the trait you implement — there is no marker attribute corresponding to a class implementing `CanActivate`.
+
+### Reading the request
+
+| NestJS | Toni |
+|--------|------|
+| `@Param('id')` | a `Path<T>` parameter; the route spells it `{id}` |
+| `@Query()` | `Query<T>` |
+| `@Body()` | `Json<T>`, or `Body<T>` to accept JSON or form encoding |
+| `@Body()` + `ValidationPipe` | `Validated<Json<T>>` |
+| `@UploadedFile()` / `@UploadedFiles()` | `Multipart` |
+| `@Req()` | `HttpRequest`, or `&HttpContext` as an ordinary parameter |
+| `createParamDecorator()` | an `impl FromContext<C> for YourType` |
+
+Extractors are handler parameters, matched by type. There is also a marker form — `#[param]`, `#[query]`, `#[body]` — that reads more like NestJS but carries [its own gotchas](/docs/extractors/markers).
+
+### Custom providers
+
+| NestJS | Toni |
+|--------|------|
+| `{ provide: 'TOKEN', useValue: value }` | `provider_value!("TOKEN", value)` |
+| `{ provide: 'TOKEN', useFactory: () => fn() }` | `provider_factory!("TOKEN", \|\| fn())` |
+| `{ provide: 'TOKEN', useFactory: async (dep) => fn(dep), inject: [Dep] }` | `provider_factory!("TOKEN", async \|dep: Dep\| fn(dep))` |
+| `{ provide: 'TOKEN', useExisting: ExistingService }` | `provider_alias!("TOKEN", ExistingService)` |
+| `{ provide: TOKEN, useClass: ServiceClass }` | `provider_token!("TOKEN", ServiceClass)` |
+
+The `inject: [...]` array has no counterpart: the factory closure's parameter types are the dependency list.
+
+### Lifecycle hooks
+
+| NestJS interface | Toni attribute |
+|-----------------|----------------|
+| `OnModuleInit` | `#[on_module_init]` |
+| `OnApplicationBootstrap` | `#[on_application_bootstrap]` |
+| `OnModuleDestroy` | `#[on_module_destroy]` |
+| `BeforeApplicationShutdown` | `#[before_application_shutdown]` |
+| `OnApplicationShutdown` | `#[on_application_shutdown]` |
+
+### Platforms and transports
+
+| NestJS | Toni |
+|--------|------|
+| `@nestjs/platform-express`, `-fastify` | `toni-axum`, `toni-actix`, `toni-salvo`, `toni-poem`, `toni-rocket` |
+| `Transport.TCP` | `toni-tcp` |
+| `Transport.NATS` | `toni-nats` |
+| `Transport.REDIS` | `toni-redis-rpc` |
+| `Transport.RMQ` | `toni-rabbitmq` |
+| `Transport.MQTT` | `toni-mqtt` |
+| `Transport.KAFKA` | `toni-kafka` |
+| `Transport.GRPC` | `toni-grpc` |
+
+An adapter is registered at runtime and held as a boxed trait object, so application code never names the concrete adapter type — the same property that makes swapping Express for Fastify a one-line change in NestJS.
+
+### Integrations
+
+| NestJS | Toni |
+|--------|------|
+| `TypeOrmModule.forRoot()` | `SeaOrmModule::for_root()`, or `SqlxModule::postgres()` for raw SQL |
+| `MongooseModule.forRoot()` | `MongoModule::for_root(uri, db)` |
+| `PrismaModule` | `PrismaModule::for_root(client)` |
+| `ConfigModule.forRoot()` | `ConfigModule::<T>::new()` |
+| `@nestjs/terminus` | `toni-terminus` |
+| `@nestjs/graphql` | `toni-async-graphql`, `toni-juniper` |
+| `@nestjs/testing` | construct the struct directly, or `create_application_context` |
+
+`forRoot()` carries over as `for_root`, and returns a `DynamicModule` you list under `imports:`.
+
+## A NestJS application, ported
+
+The same user resource, written twice. This is the whole of it — service, controller, module, bootstrap.
+
+### The service
+
+```ts
+// NestJS
+@Injectable()
+export class UserService {
+  findAll(): User[] { /* ... */ }
+  findOne(id: number): User | undefined { /* ... */ }
+}
+```
+
+```rust
+// Toni
+#[injectable]
+pub struct UserService;
+
+impl UserService {
+    pub fn find_all(&self) -> Vec<User> { /* ... */ }
+    pub fn find_one(&self, id: u32) -> Option<User> { /* ... */ }
+}
+```
+
+`#[injectable]` goes on the struct definition. The `impl` block stays an ordinary Rust `impl` — the framework does not scan it.
+
+### The controller
+
+```ts
+// NestJS
+@Controller('users')
+export class UserController {
+  constructor(private readonly service: UserService) {}
+
+  @Get()
+  findAll() { return this.service.findAll(); }
+
+  @Get(':id')
+  findOne(@Param('id') id: string) { /* ... */ }
+
+  @Post()
+  create(@Body() dto: CreateUserDto) { /* ... */ }
+}
+```
+
+```rust
+// Toni
+#[controller("/users")]
+pub struct UserController {
+    #[inject]
+    service: UserService,
+}
+
+#[routes]
+impl UserController {
+    #[get("/")]
+    fn find_all(&self) -> Body {
+        Body::json(serde_json::json!(self.service.find_all()))
+    }
+
+    #[get("/{id}")]
+    fn find_one(&self, Path(id): Path<u32>) -> HttpResponse { /* ... */ }
+
+    #[post("/")]
+    fn create(&self, Json(dto): Json<CreateUserDto>) -> HttpResponse { /* ... */ }
+}
+```
+
+Three things move. Constructor injection becomes `#[inject]` fields on the struct. The handlers move out of the type declaration and into a second `impl` block marked `#[routes]` — that block is what gets scanned, and a `#[get]` outside it never registers a route. And the path parameter is `{id}`, not `:id`.
+
+### The module
+
+```ts
+// NestJS
+@Module({
+  controllers: [UserController],
+  providers: [UserService],
+})
+export class AppModule {}
+```
+
+```rust
+// Toni
+#[module(
+  imports: [],
+  controllers: [UserController],
+  providers: [UserService],
+  exports: []
+)]
+impl AppModule {}
+```
+
+A direct mapping. `#[module]` sits on an empty `impl` block, as the CLI generates it, or on a unit struct — `#[module(...)] pub struct AppModule;` is the same thing.
+
+### Bootstrap
+
+```ts
+// NestJS
+const app = await NestFactory.create(AppModule);
+await app.listen(3000);
+```
+
+```rust
+// Toni
+let mut app = ToniFactory::create(AppModule).await.unwrap();
+app.use_http_adapter(AxumAdapter::new(), ("127.0.0.1", 3000)).unwrap();
+app.start().await.unwrap();
+```
+
+`create` takes the root module the way `NestFactory.create` does. There is no `app.listen`: the HTTP server is a separate choice, and `use_http_adapter` is the call that registers every route from the module tree with it.
+
+## Where Toni deliberately differs
+
+These are the places the map above does not reach — where a NestJS habit produces code that is wrong rather than merely spelled differently.
+
+### There is no `forwardRef`
+
+`forwardRef` defers a class reference that is `undefined` at module-evaluation time. Toni identifies providers by string token and resolves them at runtime, so a reference is never undefined and there is nothing to defer. A reported cycle is a real construction cycle; break it.
+
+### Guards cannot throw
+
+`can_activate` returns `bool`. There is no `UnauthorizedException` to raise from inside a guard, and `false` produces a 403. To answer with anything else, register a `#[catch(GuardRejection)]` error handler. In exchange, `can_activate` is async — JWT verification and database lookups run inline.
+
+### Pipes are the fallback, not the validation path
+
+NestJS leans on a global `ValidationPipe` because TypeScript types are erased at runtime. In Toni, `Path<i32>` parses and `Validated<Json<T>>` validates, both declared in the handler signature and enforced by the compiler. `Pipe` exists for what extractors cannot express: a check needing a dependency, or one spanning several extracted values.
+
+### Error handlers are the override, not the default
+
+A `#[derive(toni::Error)]` type carries an `ErrorKind` and renders itself — return it with `?` and the response is already correct. `#[catch(T)]` is how you override that rendering for one type, not how errors normally become responses.
+
+### Globals are registered per transport
+
+There is no `useGlobalGuards`. There is `use_global_http_guards`, `use_global_ws_guards`, `use_global_rpc_guards`, and the same split for interceptors, pipes, and error handlers. gRPC has no globals at all, and no pipes.
+
+### The global middleware chain runs before routing
+
+Middleware registered on the factory runs before route resolution on all five HTTP adapters, so it observes 404s, 405s, and same-port WebSocket upgrades, and a URI rewrite inside it changes which route matches. Module-scoped middleware — the `configure_middleware` form that mirrors `NestModule.configure` — stays post-routing, on the matched route only.
+
+### Request scope means one execution, not one HTTP request
+
+A request-scoped provider is built once per *execution*: one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution opened with `ProviderContext::standalone()`. For a WebSocket gateway that means per message, not per connection — per-connection state belongs in the [session](/docs/websocket/gateways).
+
+### Nothing handles signals for you
+
+NestJS starts running shutdown hooks on SIGTERM once `enableShutdownHooks()` is called. Toni installs no signal handlers. Wire SIGTERM and SIGINT to a `ShutdownHandle` yourself, or the hooks never run.
+
+### Startup has three phases, and each can fail
+
+`create` resolves the dependency graph and runs init hooks. `bind` acquires sockets. `run` serves. All four constructors return `Result`, and `bind` is refuse-or-none: every declared transport registers before any socket is acquired, so a misconfiguration reports before a port conflict does. Nothing calls `process::exit`.
+
+### The application is `!Send`
+
+The container is `Rc<RefCell<_>>`, so the app cannot cross threads. Run it under a `LocalSet` on a `current_thread` runtime. Handlers and providers are unaffected; this constrains only how you start the process.
+
+## Next
+
+- [Quick Start](/docs/getting-started/quick-start) — the same user resource, built from scratch in Toni
+- [Core Concepts](/docs/core-concepts/modules) — modules, controllers, services, and the container
+- [Request Lifecycle](/docs/request-lifecycle) — the full order, and what each layer can do

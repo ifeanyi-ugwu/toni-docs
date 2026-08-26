@@ -178,7 +178,9 @@ impl<T: DeserializeOwned + Send> FromContext<HttpContext> for Yaml<T> {
 
 ### The one-body rule is a runtime check here
 
+<Callout type="warn" title="The one-body check does not cover custom extractors">
 For the built-in body extractors, a handler with two body readers is a compile error — the controller macro recognizes them by type name and rejects the signature. It cannot recognize your types: custom extractors are exempt from that check, several of them may share a handler, and nothing at compile time records whether one of them reads the body.
+</Callout>
 
 So for custom extractors the rule holds at runtime instead. A custom body extractor beside `Json<T>` — or beside another custom body extractor — compiles, and the second one to run gets `BodyAlreadyRead`: the client receives the standard 400, and the error is also logged at `error` level naming the extractor, because the request was well-formed and the fault is the handler's signature.
 

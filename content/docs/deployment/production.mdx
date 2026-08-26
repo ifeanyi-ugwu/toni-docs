@@ -110,7 +110,9 @@ app.use_http_adapter(AxumAdapter::new(), (host, port)).unwrap();
 app.start().await?;
 ```
 
+<Callout type="info" title="bind() is refuse-or-none">
 `start()` returns `Result<()>`. Underneath, `bind()` acquires sockets for **every** declared transport — HTTP, WebSocket, RPC, gRPC — and refuses if any of them fails: the error is a `StartupError` naming the transport, any sockets already acquired are closed, and nothing serves. Port conflicts, permission denials, and configuration errors surface here rather than panicking inside the server. Startup-hook failures — an `on_module_init` that returns `Err`, a database [startup check](/docs/database/seaorm#startup-check) that cannot reach its server — surface earlier, as `StartupError::HookFailed` from `create`.
+</Callout>
 
 ## Systemd service
 
@@ -150,8 +152,7 @@ Logs reach `journalctl` without any setup: the framework's default `tracing` sub
 
 systemd can own the listening socket and pass it to the service. The socket stays open across restarts, so requests arriving while the service is down wait in the kernel accept queue instead of being refused. Declare it in a `.socket` unit:
 
-```ini
-# /etc/systemd/system/myapp.socket
+```ini title="/etc/systemd/system/myapp.socket"
 [Socket]
 ListenStream=8080
 
@@ -202,7 +203,7 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 num_cpus = "1"
 ```

@@ -23,40 +23,23 @@ This scaffolds a project with `AppModule`, `AppController`, and `AppService` wir
 
 ## Option B — Add to an existing project
 
-Add the core crate and your chosen HTTP adapter to `Cargo.toml`:
+Add the core crate and exactly one HTTP adapter. The Toni API is identical
+across all five — controllers, guards, interceptors, extractors, and global
+middleware behave the same. What differs is the runtime attribute, the server
+crate, and a handful of capabilities.
 
-```toml
+<Tabs items={['Axum', 'Actix', 'Salvo', 'Poem', 'Rocket']}>
+
+<Tab value="Axum">
+
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
-
-# Choose one adapter:
-toni-axum = "0.1"     # Axum + Tokio  (I/O-bound workloads)
-# toni-actix = "0.1"  # Actix-web     (CPU-bound workloads)
-# toni-salvo = "0.1"  # Salvo
-# toni-poem = "0.1"   # Poem
-# toni-rocket = "0.1" # Rocket
-
-# Async runtime (required with toni-axum)
+toni-axum = "0.1"
 tokio = { version = "1", features = ["full"] }
-
-# Serialization (nearly always needed)
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 ```
 
-The `toni` crate's default `logger` feature installs a `tracing` subscriber at startup, so applications log to stderr with no setup — `default-features = false` compiles it out. See [Logging](/docs/techniques/logging).
-
-### Optional crates
-
-| Crate | Purpose |
-|-------|---------|
-| `toni-config` | Environment-based configuration with optional validation |
-| `toni-async-graphql` | GraphQL via `async-graphql` |
-| `toni-juniper` | GraphQL via `juniper` |
-
-## Minimum working main
-
-```rust
+```rust title="src/main.rs"
 use toni::ToniFactory;
 use toni_axum::AxumAdapter;
 
@@ -68,7 +51,131 @@ async fn main() {
 }
 ```
 
-That's it. Everything else — modules, controllers, services — lives in your application code and gets wired together by the DI container at startup.
+The default. Streaming bodies both ways, and WebSocket on the HTTP port or its own.
+
+</Tab>
+<Tab value="Actix">
+
+```toml title="Cargo.toml"
+[dependencies]
+toni = "0.2"
+toni-actix = "0.1"
+actix-web = "4"
+```
+
+```rust title="src/main.rs"
+use toni::ToniFactory;
+use toni_actix::ActixAdapter;
+
+#[actix_web::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
+    app.use_http_adapter(ActixAdapter::new(), ("127.0.0.1", 3000)).unwrap();
+    app.start().await.unwrap();
+}
+```
+
+Runs on Actix's own runtime. Buffers request and response bodies, and does not implement WebSocket.
+
+</Tab>
+<Tab value="Salvo">
+
+```toml title="Cargo.toml"
+[dependencies]
+toni = "0.2"
+toni-salvo = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust title="src/main.rs"
+use toni::ToniFactory;
+use toni_salvo::SalvoAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
+    app.use_http_adapter(SalvoAdapter::new(), ("127.0.0.1", 3000)).unwrap();
+    app.start().await.unwrap();
+}
+```
+
+Streaming bodies and WebSocket on either port. TRACE and CONNECT match by path regardless of method.
+
+</Tab>
+<Tab value="Poem">
+
+```toml title="Cargo.toml"
+[dependencies]
+toni = "0.2"
+toni-poem = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust title="src/main.rs"
+use toni::ToniFactory;
+use toni_poem::PoemAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
+    app.use_http_adapter(PoemAdapter::new(), ("127.0.0.1", 3000)).unwrap();
+    app.start().await.unwrap();
+}
+```
+
+Streaming bodies and WebSocket on either port. Rewrites `{param}` to `:param` when mounting routes.
+
+</Tab>
+<Tab value="Rocket">
+
+```toml title="Cargo.toml"
+[dependencies]
+toni = "0.2"
+toni-rocket = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust title="src/main.rs"
+use toni::ToniFactory;
+use toni_rocket::RocketAdapter;
+
+#[tokio::main]
+async fn main() {
+    let mut app = ToniFactory::create(AppModule).await.unwrap();
+    app.use_http_adapter(RocketAdapter::new(), ("127.0.0.1", 3000)).unwrap();
+    app.start().await.unwrap();
+}
+```
+
+Same-port WebSocket only. Buffers the request body, and refuses a pre-bound listener at bind.
+
+</Tab>
+
+</Tabs>
+
+Two more crates are needed by nearly every application:
+
+```toml title="Cargo.toml"
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+The `toni` crate's default `logger` feature installs a `tracing` subscriber at
+startup, so an application logs to stderr with no setup — `default-features = false`
+compiles it out. See [Logging](/docs/techniques/logging).
+
+### Optional crates
+
+| Crate | Purpose |
+|-------|---------|
+| `toni-config` | Environment-based configuration with optional validation |
+| `toni-async-graphql` | GraphQL via `async-graphql` |
+| `toni-juniper` | GraphQL via `juniper` |
+
+That is the whole of `main`. Modules, controllers, and services live in your own
+code and are wired together by the container at startup. To compare the adapters
+in detail before committing to one, see [HTTP Adapters](/docs/http-adapters).
 
 <FromNest>
 `ToniFactory::create(AppModule)` takes the root module like `NestFactory.create`,

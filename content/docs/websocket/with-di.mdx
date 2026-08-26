@@ -128,7 +128,9 @@ impl ChatGateway {
 struct ChatModule;
 ```
 
+<Callout type="warn">
 Gateway-level guards run twice: once at **connect** (a rejection refuses the connection) and once per **message** (a rejection drops the message and keeps the connection alive).
+</Callout>
 
 ### Per-handler guards
 

@@ -129,7 +129,9 @@ Providers are singletons by default — one instance per module scope. `#[inject
 #[injectable(scope = "transient")]     // fresh instance per resolution
 ```
 
+<Callout type="info" title="Request scope means one execution">
 An execution is one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution built with `ProviderContext::standalone()`. Within an execution the instance is shared by clone — one construction, cloned into every injection site — so mutable state that must be visible across sites belongs behind an `Arc<Mutex<_>>`. Request-scoped providers cannot carry lifecycle hooks; declaring one is a compile error.
+</Callout>
 
 A singleton dispatch target — an HTTP controller, an RPC controller, or a gRPC service — that depends on a request-scoped provider is elevated to request scope automatically, and a warning is logged when it happens. See [Provider Patterns](/docs/core-concepts/provider-patterns) for value providers, factory providers, alias providers, and custom token providers.
 

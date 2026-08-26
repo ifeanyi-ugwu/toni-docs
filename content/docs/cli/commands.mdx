@@ -271,4 +271,6 @@ Keep the fallback branch — it is what lets the binary still run on its own, ou
 
 The same code path serves systemd socket activation in production, which uses the same protocol.
 
+<Callout type="warn">
 Rocket is the exception: it binds through its own configuration and refuses a pre-bound listener, so `--listen` does not work with `toni-rocket`.
+</Callout>

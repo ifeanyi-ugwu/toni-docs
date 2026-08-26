@@ -32,7 +32,7 @@ let module = ConfigModule::<AppConfig>::from_file(".env")?;
 
 For direct `std::env` access outside `toni-config`, the `dotenv` crate works as usual:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 dotenv = "0.15"
 ```

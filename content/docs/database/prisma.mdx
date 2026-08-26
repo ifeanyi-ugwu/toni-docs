@@ -9,7 +9,7 @@ description: Integrating a Prisma-generated client with Toni's module system.
 
 First, set up `prisma-client-rust` by following its [documentation](https://prisma.brendonovich.dev). Then add `toni-prisma`:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-prisma = "0.1"
@@ -131,7 +131,9 @@ pub struct ReportsService {
 }
 ```
 
+<Callout type="warn" title="A second Prisma client of the same type must be named">
 Unlike the other database integrations, Prisma's connect closure is opaque to the framework, so two unnamed `for_root` calls registering the same client type cannot be told apart — a name is **required** to register more than one client of the same type. Names are global identifiers; two connections cannot share one, even across different integration crates.
+</Callout>
 
 ## Shutdown
 

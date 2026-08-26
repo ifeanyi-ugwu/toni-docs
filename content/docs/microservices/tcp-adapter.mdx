@@ -9,7 +9,7 @@ The TCP adapter runs a raw TCP server that speaks a newline-delimited JSON proto
 
 Add the dependencies:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-tcp = "0.1"
@@ -30,7 +30,9 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+<Callout type="info">
 The socket is bound synchronously during startup, so a port conflict surfaces as an `Err` from `app.start()` (or `app.bind()`) rather than a panic in a background task. Binding port `0` picks a free port; the bound address is available from `app.bind()`'s `BoundAdapters`.
+</Callout>
 
 `TcpAdapter::from_listener(std::net::TcpListener)` serves on a socket the caller already bound and put into listening state instead of binding one — the route to systemd socket activation and zero-downtime restarts; see [Bind targets](/docs/techniques/bind-targets).
 

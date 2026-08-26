@@ -56,8 +56,7 @@ docker run -p 8080:8080 \
 
 For local development with a database:
 
-```yaml
-# docker-compose.yml
+```yaml title="docker-compose.yml"
 services:
   api:
     build: .
@@ -99,7 +98,9 @@ docker compose logs -f api
 
 Logs appear without any setup: the framework installs a default `tracing` subscriber writing to stderr, which Docker captures. `RUST_LOG` controls the level (`info` when unset). See [Logging](/docs/techniques/logging).
 
+<Callout type="warn" title="A container with no signal wiring is killed, not drained">
 `docker stop` sends SIGTERM and kills the container after a timeout. Toni installs no signal handlers, so wire SIGTERM to the application's shutdown handle yourself — see [Graceful shutdown](/docs/deployment/production#graceful-shutdown). Without it, in-flight requests are dropped and shutdown hooks never run.
+</Callout>
 
 ## Health check endpoint
 

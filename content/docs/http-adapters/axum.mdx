@@ -7,7 +7,7 @@ The `toni-axum` crate wraps [Axum](https://github.com/tokio-rs/axum) 0.8 to hand
 
 ## Installation
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = "0.2"
 toni-axum = "0.1"
@@ -95,7 +95,7 @@ If the serve loop fails after a successful bind, the adapter logs the error and 
 
 Any [`tower::Layer`](https://docs.rs/tower/latest/tower/trait.Layer.html) can run as Toni middleware via `TowerLayer`. This requires the `tower-compat` feature on `toni`:
 
-```toml
+```toml title="Cargo.toml"
 [dependencies]
 toni = { version = "0.2", features = ["tower-compat"] }
 ```
@@ -118,7 +118,9 @@ fn configure_middleware(&self, consumer: &mut MiddlewareConsumer) {
 }
 ```
 
+<Callout type="warn">
 `TowerLayer` is Toni middleware, not an Axum feature — the same registration works on every HTTP adapter. One limitation: layers that call the inner service more than once (`tower::retry`, `tower::hedge`) panic at runtime; use an interceptor for retry logic.
+</Callout>
 
 ## Runtime tuning
 

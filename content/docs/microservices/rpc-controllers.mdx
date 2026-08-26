@@ -36,7 +36,9 @@ Register it in a module's `controllers` list — its dependencies stay in `provi
 pub struct OrdersModule;
 ```
 
+<Callout type="warn">
 Listing an RPC controller under `providers` is a compile error — no provider factory exists for it. When a dependency is request-scoped, the controller auto-elevates and is built per call, exactly as HTTP controllers do.
+</Callout>
 
 A bare `#[rpc_controller]` with no `#[patterns]` impl is valid — it registers as a dispatch target and routes nothing.
 

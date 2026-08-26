@@ -1,0 +1,15 @@
+---
+title: Extractors
+description: Typed request data as handler parameters, checked at compile time.
+---
+
+An extractor is a handler parameter whose type says what to pull out of the request. `Path<u32>` parses a route segment, `Json<T>` deserializes a body, `Multipart` streams an upload. Extraction failures answer with a 400 before the handler runs, so a handler body never validates its own inputs.
+
+One rule governs the whole chapter: a request has one body, and only one extractor may read it. That is checked at compile time for the built-in extractors, and both offending parameters are named in the error.
+
+<Cards>
+  <Card title="Built-in Extractors" href="/docs/extractors/built-in" description="Path, Query, Json, Body, Bytes, streams, Extensions, and Validated." />
+  <Card title="Attribute Markers" href="/docs/extractors/markers" description="The #[body], #[param], and #[query] forms — and the gotchas they carry." />
+  <Card title="Custom Extractors" href="/docs/extractors/custom" description="Implement FromContext to make any type extractable." />
+  <Card title="Multipart / File Upload" href="/docs/extractors/multipart" description="Reading form-data fields and streaming uploaded files." />
+</Cards>

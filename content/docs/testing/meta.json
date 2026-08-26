@@ -1,4 +1,8 @@
 {
   "title": "Testing",
-  "pages": ["unit", "integration"]
+  "pages": [
+    "index",
+    "unit",
+    "integration"
+  ]
 }

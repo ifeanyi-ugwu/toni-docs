@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Guards, interceptors, pipes, and error handlers are registered per transport (`use_global_http_*`, `use_global_rpc_*`, `use_global_ws_*`); `use_global_middleware` is HTTP-wide. For CORS, see [CORS](/docs/security/cors).
+Guards, interceptors, pipes, and error handlers are registered per transport (`use_global_http_*`, `use_global_rpc_*`, `use_global_ws_*`); `use_global_middleware` is HTTP-wide. For CORS, see [CORS](/docs/techniques/cors).
 
 ## Streaming bodies
 

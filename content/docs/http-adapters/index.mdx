@@ -105,9 +105,11 @@ Unlike the RPC and gRPC adapters, HTTP adapters expose no `with_max_inflight` kn
 
 ## Sections in this chapter
 
-- [Axum Adapter](/docs/http-adapters/axum) — the default; full streaming and WebSocket support
-- [Actix-web Adapter](/docs/http-adapters/actix) — for existing Actix deployments
-- [Salvo Adapter](/docs/http-adapters/salvo) — full streaming and WebSocket support
-- [Poem Adapter](/docs/http-adapters/poem) — full streaming and WebSocket support
-- [Rocket Adapter](/docs/http-adapters/rocket) — same-port WebSocket, buffered request bodies
-- [Custom Adapters](/docs/http-adapters/custom) — bring your own HTTP server
+<Cards>
+  <Card title="Axum" href="/docs/http-adapters/axum" description="The default. Streaming bodies, WebSocket on either port, pre-bound listeners." />
+  <Card title="Actix-web" href="/docs/http-adapters/actix" description="For existing Actix deployments. Buffers bodies both ways and has no WebSocket support." />
+  <Card title="Salvo" href="/docs/http-adapters/salvo" description="Streaming and WebSocket, with a path-match quirk on TRACE and CONNECT." />
+  <Card title="Poem" href="/docs/http-adapters/poem" description="Streaming and WebSocket. Rewrites {param} to :param when mounting." />
+  <Card title="Rocket" href="/docs/http-adapters/rocket" description="Same-port WebSocket only, and it insists on binding its own socket." />
+  <Card title="Custom Adapters" href="/docs/http-adapters/custom" description="The HttpAdapter trait, and what registration and bind each have to do." />
+</Cards>

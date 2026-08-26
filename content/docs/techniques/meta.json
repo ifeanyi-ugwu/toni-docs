@@ -1,9 +1,11 @@
 {
   "title": "Techniques",
   "pages": [
+    "index",
     "sse",
     "health",
     "logging",
-    "bind-targets"
+    "bind-targets",
+    "cors"
   ]
 }

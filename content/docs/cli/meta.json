@@ -1,4 +1,8 @@
 {
   "title": "CLI",
-  "pages": ["installation", "commands"]
+  "pages": [
+    "index",
+    "installation",
+    "commands"
+  ]
 }

@@ -1,4 +1,12 @@
 {
   "title": "WebSocket",
-  "pages": ["gateways", "broadcasting", "rooms", "with-di", "separate-port", "redis-broadcast"]
+  "pages": [
+    "index",
+    "gateways",
+    "broadcasting",
+    "rooms",
+    "with-di",
+    "separate-port",
+    "redis-broadcast"
+  ]
 }

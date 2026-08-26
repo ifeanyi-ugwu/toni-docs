@@ -1,4 +1,10 @@
 {
   "title": "Extractors",
-  "pages": ["built-in", "markers", "custom", "multipart"]
+  "pages": [
+    "index",
+    "built-in",
+    "markers",
+    "custom",
+    "multipart"
+  ]
 }

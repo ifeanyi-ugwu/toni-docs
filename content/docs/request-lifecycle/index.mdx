@@ -67,8 +67,10 @@ All levels run, in that order. Method-level runs *in addition to* controller-lev
 
 ## Sections in this chapter
 
-- [Middleware](/docs/request-lifecycle/middleware) — request/response interception, route patterns, Tower layers
-- [Guards](/docs/request-lifecycle/guards) — authorization and access control
-- [Interceptors](/docs/request-lifecycle/interceptors) — cross-cutting logic wrapping handlers
-- [Pipes](/docs/request-lifecycle/pipes) — context transformation before the handler
-- [Error Handling](/docs/request-lifecycle/error-handling) — domain errors, the `#[catch]` chain, observers, panic recovery
+<Cards>
+  <Card title="Middleware" href="/docs/request-lifecycle/middleware" description="Wrapping requests before and after routing, route patterns, and Tower layers." />
+  <Card title="Guards" href="/docs/request-lifecycle/guards" description="Authorization checks that answer true or false, and what a rejection produces." />
+  <Card title="Interceptors" href="/docs/request-lifecycle/interceptors" description="Logic wrapped around the handler that can transform the response or skip it." />
+  <Card title="Pipes" href="/docs/request-lifecycle/pipes" description="Synchronous checks that run after interceptors and can answer the request outright." />
+  <Card title="Error Handling" href="/docs/request-lifecycle/error-handling" description="Domain errors, the #[catch] chain, observers, framework events, and panic recovery." />
+</Cards>

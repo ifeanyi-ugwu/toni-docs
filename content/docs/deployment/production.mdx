@@ -9,7 +9,7 @@ description: Building and running Toni applications in production.
 cargo build --release
 ```
 
-The compiled binary is in `target/release/<project-name>`. It has no runtime dependencies — ship just the binary.
+The compiled binary is in `target/release/<project-name>`. It has no runtime dependencies; ship the binary alone.
 
 ## Environment configuration
 
@@ -111,7 +111,7 @@ app.start().await?;
 ```
 
 <Callout type="info" title="bind() is refuse-or-none">
-`start()` returns `Result<()>`. Underneath, `bind()` acquires sockets for **every** declared transport — HTTP, WebSocket, RPC, gRPC — and refuses if any of them fails: the error is a `StartupError` naming the transport, any sockets already acquired are closed, and nothing serves. Port conflicts, permission denials, and configuration errors surface here rather than panicking inside the server. Startup-hook failures — an `on_module_init` that returns `Err`, a database [startup check](/docs/database/seaorm#startup-check) that cannot reach its server — surface earlier, as `StartupError::HookFailed` from `create`.
+`start()` returns `Result<()>`. Underneath, `bind()` acquires sockets for **every** declared transport (HTTP, WebSocket, RPC, gRPC) and refuses if any of them fails: the error is a `StartupError` naming the transport, any sockets already acquired are closed, and nothing serves. Port conflicts, permission denials, and configuration errors surface here rather than panicking inside the server. Startup-hook failures surface earlier, as `StartupError::HookFailed` from `create`: an `on_module_init` that returns `Err`, or a database [startup check](/docs/database/seaorm#startup-check) that cannot reach its server.
 </Callout>
 
 ## Systemd service

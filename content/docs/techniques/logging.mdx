@@ -20,8 +20,7 @@ Unset, the filter is `info`.
 <FromNest>
 There is no injectable `Logger` and no `logger: [...]` option. `create` installs a
 `tracing` subscriber, the `tracing` macros are the print calls, and `RUST_LOG`
-sets the levels. A subscriber installed before `create` wins, which is how you
-replace the default rather than configure it.
+sets the levels.
 </FromNest>
 
 ## Bringing your own subscriber

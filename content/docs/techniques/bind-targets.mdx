@@ -3,7 +3,7 @@ title: Bind Targets
 description: Pass an address to bind, or hand over a socket another process already bound — on every transport that listens.
 ---
 
-Every server answers "where do I listen" — the sharper question is who owns the socket. When the process binds its own port, the socket dies with the process: a dev-loop restart refuses connections until the rebuild finishes, and a deploy drops whatever arrives during the swap. When something that outlives the process owns the socket — a watcher, systemd, a test harness that bound port `0` itself — connections queue in the kernel's accept backlog and are answered by whichever process accepts next. `BindTarget` makes that ownership a parameter instead of an assumption.
+Every server answers "where do I listen". The sharper question is who owns the socket. When the process binds its own port, the socket dies with the process: a dev-loop restart refuses connections until the rebuild finishes, and a deploy drops whatever arrives during the swap. When something that outlives the process owns the socket — a watcher, systemd, a test harness that bound port `0` itself — connections queue in the kernel's accept backlog and are answered by whichever process accepts next. `BindTarget` makes that ownership a parameter instead of an assumption.
 
 ## The type
 
@@ -30,7 +30,7 @@ let by_listener: toni::BindTarget = listener.into();
 
 ## HTTP
 
-`use_http_adapter` takes `impl Into<BindTarget>`, so both forms read the same at the call site:
+`use_http_adapter` takes `impl Into<BindTarget>`, and both forms read the same at the call site:
 
 ```rust
 // Bind an address — the common case.
@@ -60,7 +60,7 @@ let target: toni::BindTarget = match fds.take_tcp_listener(0)? {
 app.use_http_adapter(AxumAdapter::new(), target)?;
 ```
 
-`examples/socket_activation.rs` in the repository is the runnable version. The same adoption code serves two launchers: `toni dev --listen 3000` in development — see [Development Workflow](/docs/getting-started/development-workflow#keeping-the-port-alive-across-restarts) — and systemd socket activation in production — see [Production deployment](/docs/deployment/production).
+`examples/socket_activation.rs` in the repository is the runnable version. The same adoption code serves two launchers: `toni dev --listen 3000` in [development](/docs/getting-started/development-workflow#keeping-the-port-alive-across-restarts), and systemd socket activation in [production](/docs/deployment/production).
 
 ## WebSocket
 
@@ -71,7 +71,7 @@ app.use_websocket_adapter(AxumAdapter::new())?;
 app.use_websocket_listener(4000, listener)?;
 ```
 
-The first argument is the declared port — the `N` written in the gateway attribute. It is a key, not a location: it selects which gateway the socket serves, and the socket may be listening on a different port entirely. `BoundAdapters.websocket` reports the address the socket actually listens on. A listener supplied for a port no gateway declares fails `bind()` — nothing would ever accept on it.
+The first argument is the declared port — the `N` written in the gateway attribute. It is a key, not a location: it selects which gateway the socket serves, and the socket may be listening on a different port entirely. `BoundAdapters.websocket` reports the address the socket listens on. A listener supplied for a port no gateway declares fails `bind()` — nothing would ever accept on it.
 
 Same-port gateways ride the HTTP listener; their socket goes to `use_http_adapter`.
 

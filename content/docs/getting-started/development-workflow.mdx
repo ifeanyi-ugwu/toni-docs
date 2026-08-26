@@ -3,7 +3,7 @@ title: Development Workflow
 description: Rebuild and restart the server on save, and keep the port answering across restarts.
 ---
 
-Save a file, the project rebuilds, the server restarts. The CLI ships this loop as `toni dev`; the generic Rust watch tools work just as well.
+Save a file, the project rebuilds, the server restarts. The CLI ships this loop as `toni dev`; the generic Rust watch tools do the same.
 
 ## toni dev
 
@@ -47,8 +47,7 @@ bacon run
 <FromNest>
 `toni dev` is the same loop as `nest start --watch`: recompile, restart. The unit
 is different — TypeScript recompiles in milliseconds, a Rust incremental rebuild
-takes seconds. That is why the settings below are worth applying here and are not
-worth thinking about in Node.
+takes seconds. The settings below matter here in a way they do not in Node.
 </FromNest>
 
 ## Faster rebuilds

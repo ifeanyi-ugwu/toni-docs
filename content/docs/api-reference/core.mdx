@@ -84,7 +84,7 @@ gRPC is registered separately from RPC because it is contract-first (`.proto` se
 
 `BindTarget` is where the HTTP adapter listens: `("127.0.0.1", 3000)` binds an address, a `std::net::TcpListener` serves on a socket already bound — see [Where to listen](/docs/http-adapters#where-to-listen). RPC and gRPC adapters take their address in their own constructors.
 
-`use_websocket_listener` hands a pre-bound socket to the separate-port gateways declared with `port = declared_port`; the declared port selects the gateway, `BoundAdapters.websocket` reports where the socket actually listens. A listener supplied for a port no gateway declares fails `bind()`. Same-port gateways ride the HTTP listener — pass their socket to `use_http_adapter` instead.
+`use_websocket_listener` hands a pre-bound socket to the separate-port gateways declared with `port = declared_port`; the declared port selects the gateway, `BoundAdapters.websocket` reports where the socket listens. A listener supplied for a port no gateway declares fails `bind()`. Same-port gateways ride the HTTP listener — pass their socket to `use_http_adapter` instead.
 
 ### Lifecycle
 
@@ -401,7 +401,9 @@ pub trait ErrorObserver: Send + Sync {
 }
 ```
 
-Fire-and-forget tap on every error entering the pipeline, across all transports — user-handler errors and framework events (guard rejections, panics, missing routes) alike. A wrapped domain error is exposed directly, so `error.downcast_ref::<MyError>()` works the way `#[catch(MyError)]` expects. Observers run before the error-handler chain, so they also see errors a handler later claims.
+Fire-and-forget tap on every error entering the pipeline, across all transports — user-handler errors and framework events (guard rejections, panics, missing routes) alike. A wrapped domain error is exposed directly, so `error.downcast_ref::<MyError>()` works the way `#[catch(MyError)]` expects.
+
+Observers run before the error-handler chain, so they also see errors a handler later claims.
 
 ## Error system
 

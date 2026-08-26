@@ -265,8 +265,7 @@ The chain dispatches on handler-returned errors and framework events alike. For 
 `useGlobalFilters`, but the two sit at opposite ends of the workflow. In NestJS a
 filter is where an error becomes a response, so most projects have one. In Toni a
 `#[derive(toni::Error)]` type already renders itself through its `ErrorKind`, and
-a handler is the override for the cases where that rendering is wrong. Reach for
-a typed error first.
+a handler is the override for the cases where that rendering is wrong.
 </FromNest>
 
 ## Framework events

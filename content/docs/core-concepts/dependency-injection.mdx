@@ -15,7 +15,7 @@ When `ToniFactory::create` runs:
 4. The graph is topologically sorted — providers with no dependencies are instantiated first
 5. Each subsequent provider receives already-instantiated dependencies
 
-Any failure in this phase — a missing provider, a circular dependency — comes back as `Err(StartupError::Setup)` from `create`. There's no runtime failure.
+Any failure in this phase — a missing provider, a circular dependency — comes back as `Err(StartupError::Setup)` from `create`, never at request time.
 
 ## Provider tokens
 
@@ -117,7 +117,7 @@ Two resolutions against the same execution share one instance; two executions bu
 
 ## Executions
 
-Request scope is measured in **executions**: one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution built with `ProviderContext::standalone()`. Within an execution, the `ExecutionCache` guarantees one *construction* per request-scoped provider — every injection site receives a clone of that one build, so state that must be visible across sites has to live behind a shared handle (`Arc<Mutex<_>>`); mutating a plain field mutates only that site's copy. `resolve` takes the execution on `ToniApplication`, `ToniApplicationContext`, and `ModuleRef` alike, so a service holding a `ModuleRef` can reach request-scoped providers too.
+Request scope is measured in **executions**: one HTTP request, one WebSocket message, one RPC or gRPC call, or one standalone execution built with `ProviderContext::standalone()`. Within an execution the `ExecutionCache` guarantees one *construction* per request-scoped provider, and every injection site receives a clone of that build. State that must be visible across sites therefore lives behind a shared handle such as `Arc<Mutex<_>>`; mutating a plain field mutates only that site's copy. `resolve` takes the execution on `ToniApplication`, `ToniApplicationContext`, and `ModuleRef` alike, and a service holding a `ModuleRef` reaches request-scoped providers the same way.
 
 ## Request data in the DI graph
 
@@ -191,13 +191,13 @@ Cannot resolve dependencies for modules: ["ModuleA"]. No provider cycle was foun
     - ModuleA: DEFERRED: Global provider 'my_app::services::MailService' not yet instantiated for module 'ModuleA'
 ```
 
-A cycle message always points to a genuine construction cycle. The fix is to break it.
+A cycle message always points to a genuine construction cycle.
 
 ### Breaking a cycle
 
 **Extract the shared logic.** Move what both services need into a third provider that each depends on. Neither service then depends on the other, and the cycle disappears. A mutual dependency is usually a sign the two services share a responsibility that wants its own home, so this is the right fix for most cycles.
 
-**Resolve one side lazily with `ModuleRef`.** When the dependency is genuinely bidirectional, inject [`ModuleRef`](/docs/api-reference/core#di-utilities) into one side instead of the provider itself, and fetch the counterpart at call time:
+**Resolve one side lazily with `ModuleRef`.** When the dependency is bidirectional, inject [`ModuleRef`](/docs/api-reference/core#di-utilities) into one side instead of the provider itself, and fetch the counterpart at call time:
 
 ```rust
 #[injectable]

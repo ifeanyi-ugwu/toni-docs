@@ -101,7 +101,7 @@ fn list_products(
 
 Two sharp edges:
 
-- The default swallows unparseable values, not just missing ones — `?page=abc` yields `1`, never a 400.
+- The default swallows unparseable values, not only missing ones — `?page=abc` yields `1`, never a 400.
 - The default is a string literal parsed at request time, so a default that does not parse as the parameter's type panics on every request that falls back to it — not at compile time.
 
 ## `#[param]`

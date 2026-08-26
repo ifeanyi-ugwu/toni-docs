@@ -24,7 +24,7 @@ pub trait Interceptor<C: ?Sized + HandlerContext, R>: Send + Sync {
 }
 ```
 
-Both live at `toni::traits_helpers::{Interceptor, InterceptorNext}`. `run` consumes `Box<Self>`, so the downstream chain can be invoked at most once — the type system rules out calling the handler twice.
+Both live at `toni::traits_helpers::{Interceptor, InterceptorNext}`. `run` consumes `Box<Self>`, so the downstream chain can be invoked at most once.
 
 <FromNest>
 `intercept` receives the context and a `next`, as `NestInterceptor` does — but

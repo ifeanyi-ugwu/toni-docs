@@ -3,7 +3,7 @@ title: Unit Testing
 description: Testing individual services, guards, and interceptors in isolation.
 ---
 
-Unit tests in Toni are straightforward Rust unit tests — no special testing framework is needed. Since services are plain structs with methods, you instantiate them directly and call their methods.
+Unit tests in Toni are ordinary Rust unit tests — no harness, no test module. A service is a plain struct: instantiate it and call its methods.
 
 ## Testing a service
 
